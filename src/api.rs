@@ -1,469 +1,265 @@
 use anyhow::{Context, Result};
-use base64::Engine;
+use bytes::Bytes;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::VecDeque;
 use std::pin::Pin;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ApiRequest {
   pub model: String,
   pub messages: Vec<Message>,
   pub temperature: Option<f32>,
   pub max_tokens: Option<u32>,
   pub stream: bool,
-  pub response_format: Option<ResponseFormat>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub thinking: Option<ThinkingConfig>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub tools: Option<Vec<Tool>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ResponseFormat {
+#[derive(Debug, Serialize, Clone)]
+pub struct Tool {
   #[serde(rename = "type")]
-  pub format_type: String,
+  pub tool_type: String,
+  pub function: FunctionDefinition,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FunctionDefinition {
+  pub name: String,
+  pub description: String,
+  pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ThinkingConfig {
+  #[serde(rename = "type")]
+  pub thinking_type: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub budget_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Message {
-  Simple { role: String, content: String },
-  MultiModal { role: String, content: Vec<Content> },
+  Simple {
+    role: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCall>>,
+  },
+  ToolResponse {
+    role: String,
+    content: String,
+    tool_call_id: String,
+  },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum Content {
-  Text(TextContent),
-  Image(ImageContent),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TextContent {
+pub struct ToolCall {
+  pub id: String,
   #[serde(rename = "type")]
-  pub content_type: String,
-  pub text: String,
+  pub tool_type: String,
+  pub function: FunctionCall,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ImageContent {
-  #[serde(rename = "type")]
-  pub content_type: String,
-  pub image_url: ImageUrl,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ImageUrl {
-  pub url: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ApiResponse {
-  pub choices: Vec<Choice>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Choice {
-  pub message: Message,
+pub struct FunctionCall {
+  pub name: String,
+  pub arguments: String,
 }
 
 pub struct ApiClient {
   client: Client,
   api_key: String,
+  base_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum StreamItem {
+  Reasoning(String),
+  Content(String),
+  ToolCall(ToolCall),
+  Finish(Option<String>),
+}
+
+struct StreamState {
+  stream: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+  buffer: Vec<u8>,
+  pending: VecDeque<Result<StreamItem>>,
+  finished: bool,
 }
 
 impl ApiClient {
   pub fn new(api_key: String) -> Self {
+    let base_url = std::env::var("DEEPSEEK_API_BASE")
+      .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
+
+    let client = Client::builder()
+      .no_proxy()
+      .build()
+      .unwrap_or_else(|_| Client::new());
+
     Self {
-      client: Client::new(),
+      client,
       api_key,
+      base_url,
     }
   }
 
-  pub async fn call_api(
-    &self,
-    model: &str,
-    query: &str,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> Result<ApiResponse> {
-    let request = self.build_request(model, query, temperature, max_tokens, json_mode);
-    self.send_request(request).await
-  }
-
-  pub async fn call_api_with_history(
+  pub async fn call_api_with_params(
     &self,
     model: &str,
     messages: Vec<Message>,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> Result<ApiResponse> {
-    let request =
-      self.build_request_with_history(model, messages, temperature, max_tokens, json_mode);
-    self.send_request(request).await
-  }
-
-  pub async fn call_api_with_file(
-    &self,
-    model: &str,
-    query: &str,
-    file_path: &Path,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> Result<ApiResponse> {
-    let request =
-      self.build_request_with_file(model, query, file_path, temperature, max_tokens, json_mode)?;
-    self.send_request(request).await
-  }
-
-  pub async fn call_api_with_history_stream(
-    &self,
-    model: &str,
-    messages: Vec<Message>,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> Result<Pin<Box<dyn Stream<Item = Result<(String, Option<String>)>> + Send>>> {
-    use futures_util::stream;
+    thinking_mode: &str,
+    tools: Option<Vec<Tool>>,
+  ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamItem>> + Send>>> {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use serde_json::Value;
 
-    let mut request =
-      self.build_request_with_history(model, messages, temperature, max_tokens, json_mode);
-    request.stream = true;
+    let thinking = match thinking_mode {
+      "high" => Some(ThinkingConfig {
+        thinking_type: "enabled".to_string(),
+        budget_tokens: Some(4000),
+      }),
+      "max" => Some(ThinkingConfig {
+        thinking_type: "enabled".to_string(),
+        budget_tokens: Some(16000),
+      }),
+      _ => Some(ThinkingConfig {
+        thinking_type: "disabled".to_string(),
+        budget_tokens: None,
+      }),
+    };
 
-    let client = &self.client;
-    let api_key = &self.api_key;
-    let resp = client
-      .post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+    let request = ApiRequest {
+      model: model.to_string(),
+      messages,
+      temperature: if thinking_mode != "none" {
+        None
+      } else {
+        Some(0.7)
+      },
+      max_tokens: Some(8192),
+      stream: true,
+      thinking,
+      tools,
+    };
+
+    let resp = self
+      .client
+      .post(format!("{}/chat/completions", self.base_url))
       .header(CONTENT_TYPE, "application/json")
-      .header(AUTHORIZATION, format!("Bearer {}", api_key))
+      .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
       .json(&request)
       .send()
       .await
       .context("API request failed")?;
 
-    let stream = resp.bytes_stream();
-    let buffer = Vec::new();
-    let finished = false;
+    if !resp.status().is_success() {
+      let status = resp.status();
+      let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".into());
+      anyhow::bail!("API Error {}: {}", status, error_text);
+    }
 
-    let s = stream::unfold(
-      (stream, buffer, finished),
-      |(mut stream, mut buffer, mut finished)| async move {
-        if finished {
+    let state = StreamState {
+      stream: Box::pin(resp.bytes_stream()),
+      buffer: Vec::new(),
+      pending: VecDeque::new(),
+      finished: false,
+    };
+
+    let s = futures_util::stream::unfold(state, |mut state| async move {
+      if state.finished && state.pending.is_empty() {
+        return None;
+      }
+
+      loop {
+        if let Some(item) = state.pending.pop_front() {
+          return Some((item, state));
+        }
+
+        if state.finished {
           return None;
         }
-        while let Some(item) = stream.next().await {
-          match item {
-            Ok(chunk) => {
-              buffer.extend_from_slice(&chunk);
-              // 尝试按行分割
-              while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-                let line = buffer.drain(..=pos).collect::<Vec<u8>>();
-                let line_str = String::from_utf8_lossy(&line).trim().to_string();
-                if line_str.is_empty() {
-                  continue;
+
+        match state.stream.next().await {
+          Some(Ok(chunk)) => {
+            state.buffer.extend_from_slice(&chunk);
+            while let Some(pos) = state.buffer.iter().position(|&b| b == b'\n') {
+              let line = state.buffer.drain(..=pos).collect::<Vec<u8>>();
+              let line_str = String::from_utf8_lossy(&line).trim().to_string();
+
+              if line_str.is_empty() {
+                continue;
+              }
+              if let Some(data) = line_str.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                  state.finished = true;
+                  state.pending.push_back(Ok(StreamItem::Finish(None)));
+                  break;
                 }
-                if let Some(data) = line_str.strip_prefix("data: ") {
-                  if data == "[DONE]" {
-                    finished = true;
-                    return Some((
-                      Ok((String::new(), Some("length".to_string()))),
-                      (stream, buffer, finished),
-                    ));
-                  }
-                  // 解析json
-                  if let Ok(json) = serde_json::from_str::<Value>(data) {
-                    // 兼容OpenAI风格
-                    if let Some(choices) = json.get("choices") {
-                      if let Some(choice) = choices.get(0) {
-                        let finish_reason = choice
-                          .get("finish_reason")
-                          .and_then(|v| v.as_str())
-                          .map(|s| s.to_string());
-                        if let Some(delta) = choice.get("delta") {
-                          if let Some(content) = delta.get("content") {
-                            if let Some(s) = content.as_str() {
-                              return Some((
-                                Ok((s.to_string(), finish_reason)),
-                                (stream, buffer, finished),
-                              ));
-                            }
-                          }
-                        }
-                        // deepseek 可能直接有 message.content
-                        if let Some(message) = choice.get("message") {
-                          if let Some(content) = message.get("content") {
-                            if let Some(s) = content.as_str() {
-                              return Some((
-                                Ok((s.to_string(), finish_reason)),
-                                (stream, buffer, finished),
-                              ));
-                            }
-                          }
-                        }
-                        // 如果有 finish_reason 但没有内容，也要传递
-                        if finish_reason.is_some() {
-                          return Some((
-                            Ok((String::new(), finish_reason)),
-                            (stream, buffer, finished),
-                          ));
-                        }
+                if let Ok(json) = serde_json::from_str::<Value>(data)
+                  && let Some(choice) = json.get("choices").and_then(|c| c.get(0))
+                {
+                  let fr = choice
+                    .get("finish_reason")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                  if let Some(delta) = choice.get("delta") {
+                    if let Some(rc) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                      state
+                        .pending
+                        .push_back(Ok(StreamItem::Reasoning(rc.to_string())));
+                    }
+                    if let Some(tcs) = delta.get("tool_calls").and_then(|tc_val| {
+                      serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()).ok()
+                    }) {
+                      for tc in tcs {
+                        state.pending.push_back(Ok(StreamItem::ToolCall(tc)));
                       }
                     }
+                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                      state
+                        .pending
+                        .push_back(Ok(StreamItem::Content(content.to_string())));
+                    }
+                  }
+
+                  if let Some(reason) = fr {
+                    state
+                      .pending
+                      .push_back(Ok(StreamItem::Finish(Some(reason))));
+                    state.finished = true;
+                    break;
                   }
                 }
               }
             }
-            Err(e) => {
-              return Some((
-                Err::<(String, Option<String>), _>(anyhow::anyhow!(e)),
-                (stream, buffer, true),
-              ));
+            if !state.pending.is_empty() {
+              continue;
+            }
+          }
+          Some(Err(e)) => {
+            state.finished = true;
+            return Some((Err(anyhow::anyhow!(e)), state));
+          }
+          None => {
+            state.finished = true;
+            if state.pending.is_empty() {
+              return None;
             }
           }
         }
-        None
-      },
-    );
-    Ok(Box::pin(s))
-  }
-
-  fn build_request(
-    &self,
-    model: &str,
-    query: &str,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> ApiRequest {
-    // Update system message when in JSON mode
-    let system_message = if json_mode {
-      "You are a helpful assistant. You must output your response in a valid JSON format."
-        .to_string()
-    } else {
-      "You are a helpful assistant.".to_string()
-    };
-
-    ApiRequest {
-      model: model.to_string(),
-      messages: vec![
-        Message::Simple {
-          role: "system".to_string(),
-          content: system_message,
-        },
-        Message::Simple {
-          role: "user".to_string(),
-          content: query.to_string(),
-        },
-      ],
-      temperature,
-      max_tokens,
-      stream: false,
-      response_format: if json_mode {
-        Some(ResponseFormat {
-          format_type: "json_object".to_string(),
-        })
-      } else {
-        None
-      },
-    }
-  }
-
-  fn build_request_with_history(
-    &self,
-    model: &str,
-    messages: Vec<Message>,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> ApiRequest {
-    ApiRequest {
-      model: model.to_string(),
-      messages,
-      temperature,
-      max_tokens,
-      stream: false,
-      response_format: if json_mode {
-        Some(ResponseFormat {
-          format_type: "json_object".to_string(),
-        })
-      } else {
-        None
-      },
-    }
-  }
-
-  fn build_request_with_file(
-    &self,
-    model: &str,
-    query: &str,
-    file_path: &Path,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    json_mode: bool,
-  ) -> Result<ApiRequest> {
-    let file_content = self.read_file_content(file_path)?;
-    let mime_type = mime_guess::from_path(file_path)
-      .first_or_octet_stream()
-      .to_string();
-
-    let content = if mime_type.starts_with("image/") {
-      vec![
-        Content::Text(TextContent {
-          content_type: "text".to_string(),
-          text: query.to_string(),
-        }),
-        Content::Image(ImageContent {
-          content_type: "image_url".to_string(),
-          image_url: ImageUrl {
-            url: format!("data:{};base64,{}", mime_type, file_content),
-          },
-        }),
-      ]
-    } else {
-      vec![Content::Text(TextContent {
-        content_type: "text".to_string(),
-        text: format!("{}\n\n文件内容:\n{}", query, file_content),
-      })]
-    };
-
-    let system_message = if json_mode {
-      "You are a helpful assistant. You must output your response in a valid JSON format."
-        .to_string()
-    } else {
-      "You are a helpful assistant.".to_string()
-    };
-
-    Ok(ApiRequest {
-      model: model.to_string(),
-      messages: vec![
-        Message::Simple {
-          role: "system".to_string(),
-          content: system_message,
-        },
-        Message::MultiModal {
-          role: "user".to_string(),
-          content,
-        },
-      ],
-      temperature,
-      max_tokens,
-      stream: true,
-      response_format: if json_mode {
-        Some(ResponseFormat {
-          format_type: "json_object".to_string(),
-        })
-      } else {
-        None
-      },
-    })
-  }
-
-  fn read_file_content(&self, file_path: &Path) -> Result<String> {
-    let mime_type = mime_guess::from_path(file_path)
-      .first_or_octet_stream()
-      .to_string();
-
-    if mime_type.starts_with("image/") {
-      // 读取图像文件并转换为base64
-      let image_data =
-        std::fs::read(file_path).context(format!("Failed to read image file: {:?}", file_path))?;
-      Ok(base64::engine::general_purpose::STANDARD.encode(image_data))
-    } else {
-      // 读取文本文件
-      let content = std::fs::read_to_string(file_path)
-        .context(format!("Failed to read file: {:?}", file_path))?;
-      Ok(content)
-    }
-  }
-
-  async fn send_request(&self, request: ApiRequest) -> Result<ApiResponse> {
-    let response = self
-      .client
-      .post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-      .header("Content-Type", "application/json")
-      .header("Authorization", format!("Bearer {}", self.api_key))
-      .json(&request)
-      .send()
-      .await
-      .context("API request failed")?;
-
-    if !response.status().is_success() {
-      let status = response.status();
-      let error_text = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".into());
-      anyhow::bail!("API Error {}: {}", status, error_text);
-    }
-
-    response
-      .json()
-      .await
-      .context("Failed to parse API response")
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn test_api_client_creation() {
-    let client = ApiClient::new("test_key".to_string());
-    assert_eq!(client.api_key, "test_key");
-  }
-
-  #[test]
-  fn test_request_building() {
-    let client = ApiClient::new("test_key".to_string());
-    let request = client.build_request("deepseek-chat", "test query", Some(1.0), Some(100), true);
-
-    assert_eq!(request.model, "deepseek-chat");
-    assert_eq!(request.temperature, Some(1.0));
-    assert_eq!(request.max_tokens, Some(100));
-    assert!(!request.stream);
-    assert!(request.response_format.is_some());
-    assert_eq!(request.response_format.unwrap().format_type, "json_object");
-    assert_eq!(request.messages.len(), 2);
-  }
-
-  #[test]
-  fn test_message_creation() {
-    let message = Message::Simple {
-      role: "user".to_string(),
-      content: "Hello".to_string(),
-    };
-    match message {
-      Message::Simple { role, content } => {
-        assert_eq!(role, "user");
-        assert_eq!(content, "Hello");
       }
-      _ => panic!("Expected simple message"),
-    }
-  }
+    });
 
-  #[test]
-  fn test_json_mode_system_message() {
-    let client = ApiClient::new("test_key".to_string());
-
-    // Test JSON mode
-    let json_request = client.build_request("deepseek-chat", "test", None, None, true);
-    if let Message::Simple { content, .. } = &json_request.messages[0] {
-      assert!(content.contains("JSON format"));
-    } else {
-      panic!("Expected simple message");
-    }
-
-    // Test normal mode
-    let normal_request = client.build_request("deepseek-chat", "test", None, None, false);
-    if let Message::Simple { content, .. } = &normal_request.messages[0] {
-      assert!(!content.contains("JSON format"));
-    } else {
-      panic!("Expected simple message");
-    }
+    Ok(Box::pin(s))
   }
 }

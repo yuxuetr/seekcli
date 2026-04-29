@@ -1,276 +1,400 @@
 use anyhow::{Context, Result};
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use colored::*;
 use futures_util::StreamExt;
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::env;
 use std::io::{self, Write};
+use termimad::MadSkin;
 
 mod api;
-mod cli;
+mod history;
+mod skills;
 
-pub use api::{ApiClient, Message};
-pub use cli::{build_cli, map_model};
+#[cfg(test)]
+mod test;
 
-fn get_model_max_tokens(model: &str) -> u32 {
-  match model {
-    "deepseek-r1" => 65536,
-    "deepseek-chat" => 8192,
-    _ => 4096,
+pub use api::{ApiClient, Message, StreamItem, ToolCall};
+pub use history::{HistoryManager, Session};
+pub use skills::{Skill, SkillManager};
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum ThinkingMode {
+  None,
+  High,
+  Max,
+}
+
+impl ThinkingMode {
+  fn label(&self) -> &str {
+    match self {
+      ThinkingMode::None => "None",
+      ThinkingMode::High => "High",
+      ThinkingMode::Max => "Max",
+    }
+  }
+  fn as_str(&self) -> &str {
+    match self {
+      ThinkingMode::None => "none",
+      ThinkingMode::High => "high",
+      ThinkingMode::Max => "max",
+    }
   }
 }
 
-fn get_model_max_input_tokens(_model: &str) -> usize {
-  65536 // 64K tokens
+struct App {
+  client: ApiClient,
+  history: HistoryManager,
+  skill_manager: SkillManager,
+  current_session: Session,
+  model: String,
+  thinking_mode: ThinkingMode,
+  current_skill: Option<Skill>,
+  auto_route: bool,
 }
 
-fn estimate_tokens(text: &str) -> usize {
-  // 粗略估算，1 token ≈ 4 字符
-  text.chars().count() / 4 + 1
-}
+impl App {
+  fn new(api_key: String) -> Result<Self> {
+    let history = HistoryManager::new()?;
+    let skill_manager = SkillManager::new()?;
+    let model = "deepseek-v4-flash".to_string();
+    let current_session = history.create_session(model.clone());
 
-const MAX_AUTO_CONTINUE: usize = 5;
+    Ok(Self {
+      client: ApiClient::new(api_key),
+      history,
+      skill_manager,
+      current_session,
+      model,
+      thinking_mode: ThinkingMode::None,
+      current_skill: None,
+      auto_route: true,
+    })
+  }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-  let matches = build_cli().get_matches();
-  let model_input = matches.get_one::<String>("model").unwrap();
-  let model = map_model(model_input).map_err(|e| anyhow::anyhow!(e))?;
-  let temperature = matches.get_one::<f32>("temperature").copied();
-  let max_tokens = matches
-    .get_one::<u32>("max_tokens")
-    .copied()
-    .unwrap_or_else(|| get_model_max_tokens(&model));
-  let api_key =
-    env::var("DASHSCOPE_API_KEY").context("DASHSCOPE_API_KEY environment variable not set")?;
-  let client = ApiClient::new(api_key);
+  fn print_help(&self) {
+    println!("{}", "\nAvailable Commands:".bold().yellow());
+    println!("  /model [flash|pro]  Switch between deepseek-v4 models (1M Context)");
+    println!("  /thinking [n|h|m]   Switch thinking intensity");
+    println!("  /skill list         List all skills");
+    println!("  /skill auto [on|off] Toggle auto-routing");
+    println!("  /clear              Reset context (start a new 1M session)");
+    println!("  /history            List sessions");
+    println!("  /load [id]          Load and continue a session");
+    println!("  /quit               Exit\n");
+  }
 
-  let mut history: Vec<Message> = vec![];
-  let stdin = io::stdin();
-  let mut stdout = io::stdout();
-
-  loop {
-    print_red_prompt(&mut stdout);
-    stdout.flush()?;
-    let mut input = String::new();
-    stdin.read_line(&mut input)?;
-    let input = input.trim();
-    if input.is_empty() {
-      continue;
+  async fn route_skill(&mut self, input: &str) -> Result<Option<Skill>> {
+    let skills = self.skill_manager.load_skills()?;
+    if skills.is_empty() {
+      return Ok(None);
     }
-    if input == "\\q" {
-      break;
+
+    let mut skill_desc = String::new();
+    for s in &skills {
+      skill_desc.push_str(&format!("- {}: {}\n", s.name, s.description));
     }
-    if input == "\\c" {
-      history.clear();
-      continue;
-    }
-    // 添加到历史
-    history.push(Message::Simple {
+
+    let route_prompt = format!(
+      "You are an expert intent classifier for DeepSeek V4 (1M Context). \n\
+            Assign the input to the most relevant skill.\n\
+            - Domains: Rust, IELTS, Dioxus, etc.\n\
+            - Return ONLY the skill name or 'none'.\n\n\
+            Skills:\n{}\n\nInput: {}",
+      skill_desc, input
+    );
+
+    let messages = vec![Message::Simple {
       role: "user".to_string(),
-      content: input.to_string(),
-    });
-    // 构造带历史的消息
-    let mut messages = vec![Message::Simple {
-      role: "system".to_string(),
-      content: "You are a helpful assistant.".to_string(),
+      content: route_prompt,
+      reasoning_content: None,
+      tool_calls: None,
     }];
-    messages.extend(history.iter().cloned());
-    // 检查token数，超限则自动摘要
-    let max_input_tokens = get_model_max_input_tokens(&model);
-    let total_tokens: usize = messages
-      .iter()
-      .map(|m| match m {
-        Message::Simple { content, .. } => estimate_tokens(content),
-        Message::MultiModal { content, .. } => content
-          .iter()
-          .map(|c| match c {
-            api::Content::Text(t) => estimate_tokens(&t.text),
-            api::Content::Image(_) => 0,
-          })
-          .sum(),
-      })
-      .sum();
-    if total_tokens > max_input_tokens {
-      // 自动摘要历史
-      let history_text = messages
-        .iter()
-        .filter_map(|m| match m {
-          Message::Simple { role, content } => {
-            if role == "user" || role == "assistant" {
-              Some(format!("{}: {}", role, content))
-            } else {
-              None
-            }
-          }
-          _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-      let summary_prompt = format!(
-        "请用中文总结以下对话内容，保留关键信息，便于后续继续对话：\n{}",
-        history_text
-      );
-      print_green_prompt(&mut stdout);
-      stdout.flush()?;
-      let mut summary = String::new();
-      match client
-        .call_api_with_history_stream(
-          &model,
-          vec![
-            Message::Simple {
-              role: "system".to_string(),
-              content: "你是一个对话历史摘要助手。".to_string(),
-            },
-            Message::Simple {
-              role: "user".to_string(),
-              content: summary_prompt,
-            },
-          ],
-          temperature,
-          Some(2048),
-          false,
-        )
-        .await
-      {
-        Ok(mut stream) => {
-          while let Some(chunk) = stream.next().await {
-            match chunk {
-              Ok((s, _)) => {
-                print!("{}", s);
-                stdout.flush()?;
-                summary.push_str(&s);
-              }
-              Err(e) => {
-                eprintln!("[摘要API流错误]: {}", e);
-                break;
-              }
-            }
-          }
-          println!(" ");
-        }
-        Err(e) => {
-          println!("[摘要API错误]: {}", e);
-        }
+
+    let mut stream = self
+      .client
+      .call_api_with_params("deepseek-v4-flash", messages, "none", None)
+      .await?;
+    let mut selected_name = String::new();
+    while let Some(item) = stream.next().await {
+      if let Ok(StreamItem::Content(c)) = item {
+        selected_name.push_str(&c);
       }
-      // 用摘要替换历史
-      history.clear();
-      history.push(Message::Simple {
-        role: "user".to_string(),
-        content: format!("[历史摘要] {}", summary),
-      });
-      // 重新构造messages
-      messages = vec![Message::Simple {
-        role: "system".to_string(),
-        content: "You are a helpful assistant.".to_string(),
-      }];
-      messages.extend(history.iter().cloned());
     }
-    // 自动续写主流程
-    let mut reply = String::new();
-    let mut auto_continue_count = 0;
+
+    let name_lower = selected_name.to_lowercase();
+    if name_lower.contains("none") {
+      return Ok(None);
+    }
+
+    Ok(skills.into_iter().find(|s| {
+      let s_name = s.name.to_lowercase();
+      name_lower.contains(&s_name) || s_name.contains(name_lower.trim())
+    }))
+  }
+
+  async fn run(&mut self) -> Result<()> {
+    println!(
+      "{}",
+      "Welcome to SeekCLI (DeepSeek V4 1M Context Powered)"
+        .bold()
+        .green()
+    );
+    let mut rl = DefaultEditor::new()?;
+
     loop {
-      print_green_prompt(&mut stdout);
-      stdout.flush()?;
-      let mut last_reason = None;
-      // eprintln!("[DEBUG] max_tokens: {}", max_tokens);
-      match client
-        .call_api_with_history_stream(
-          &model,
-          messages.clone(),
-          temperature,
-          Some(max_tokens),
-          false,
-        )
-        .await
-      {
-        Ok(mut stream) => {
-          while let Some(chunk) = stream.next().await {
-            match chunk {
-              Ok((s, reason)) => {
-                print!("{}", s);
-                stdout.flush()?;
-                reply.push_str(&s);
-                // if let Some(ref r) = reason {
-                //   eprintln!("[DEBUG] finish_reason: {}", r);
-                // }
-                if reason.is_some() {
-                  last_reason = reason;
-                }
-              }
-              Err(e) => {
-                eprintln!("[API流错误]: {}", e);
-                break;
-              }
-            }
+      let skill_label = self
+        .current_skill
+        .as_ref()
+        .map(|s| format!("|{}", s.name))
+        .unwrap_or_default();
+      let prompt = format!(
+        "{} ({}{}{}) {} ",
+        self.model.blue(),
+        self.thinking_mode.label().magenta(),
+        skill_label.yellow(),
+        if self.auto_route { "|auto" } else { "" }.dimmed(),
+        "❯".green()
+      );
+
+      let readline = rl.readline(&prompt);
+      match readline {
+        Ok(line) => {
+          let line = line.trim();
+          if line.is_empty() {
+            continue;
           }
-          println!(" ");
+          rl.add_history_entry(line)?;
+
+          if line.starts_with('/') {
+            if self.handle_command(line).await? {
+              break;
+            }
+          } else {
+            if self.auto_route
+              && let Ok(Some(skill)) = self.route_skill(line).await
+              && self.current_skill.as_ref().map(|s| &s.name) != Some(&skill.name)
+            {
+              println!(
+                "{} Switching skill -> {}",
+                "Auto-Route:".blue(),
+                skill.name.green()
+              );
+              self.activate_skill(skill);
+            }
+
+            if let Some(ref skill) = self.current_skill {
+              println!(
+                "{} Active Skill: {}",
+                "✦".yellow(),
+                skill.name.bold().green()
+              );
+            }
+
+            self.chat(line).await?;
+          }
         }
-        Err(e) => {
-          println!("[API错误]: {}", e);
+        Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+        Err(err) => {
+          println!("Error: {:?}", err);
           break;
         }
       }
-      history.push(Message::Simple {
-        role: "assistant".to_string(),
-        content: reply.clone(),
+    }
+    Ok(())
+  }
+
+  fn activate_skill(&mut self, skill: Skill) {
+    self.current_skill = Some(skill.clone());
+    // Do NOT clear history, just inject the persona into the flow if starting new,
+    // or append if switching topics. For V4 1M, we keep it simple.
+    if self.current_session.messages.is_empty() {
+      self.current_session.messages.push(Message::Simple {
+        role: "system".to_string(),
+        content: skill.system_prompt,
+        reasoning_content: None,
+        tool_calls: None,
       });
-
-      // 检查是否需要自动续写
-      let should_continue = if let Some(reason) = last_reason.as_deref() {
-        // eprintln!("[DEBUG] Detected finish_reason: {}", reason);
-        reason == "length"
-      } else {
-        // 如果没有finish_reason，检查回复是否看起来被截断了
-        let trimmed = reply.trim();
-        trimmed.ends_with("（")
-          || trimmed.ends_with("、")
-          || trimmed.ends_with("，")
-          || trimmed.ends_with("：")
-          || trimmed.ends_with("-")
-          || trimmed.ends_with("**")
-          || (trimmed.len() > 100
-            && !trimmed.ends_with("。")
-            && !trimmed.ends_with("！")
-            && !trimmed.ends_with("？"))
-      };
-
-      if should_continue && auto_continue_count < MAX_AUTO_CONTINUE {
-        auto_continue_count += 1;
-        // eprintln!(
-        //   "[DEBUG] Auto-continuing (attempt {}/{})",
-        //   auto_continue_count, MAX_AUTO_CONTINUE
-        // );
-        history.push(Message::Simple {
-          role: "user".to_string(),
-          content: "请继续".to_string(),
-        });
-        messages = vec![Message::Simple {
-          role: "system".to_string(),
-          content: "You are a helpful assistant.".to_string(),
-        }];
-        messages.extend(history.iter().cloned());
-        reply.clear();
-        continue;
-      }
-      break;
     }
   }
-  Ok(())
+
+  async fn handle_command(&mut self, line: &str) -> Result<bool> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let cmd = parts[0];
+
+    match cmd {
+      "/quit" | "/exit" => return Ok(true),
+      "/help" => self.print_help(),
+      "/clear" => {
+        self.current_session = self.history.create_session(self.model.clone());
+        self.current_skill = None;
+        println!("{}", "Conversation reset.".yellow());
+      }
+      "/skill" => {
+        if parts.len() > 1 {
+          match parts[1] {
+            "list" => {
+              let skills = self.skill_manager.load_skills()?;
+              for s in skills {
+                println!("- {}: {}", s.name.bold(), s.description);
+              }
+            }
+            "auto" => {
+              if parts.len() > 2 {
+                self.auto_route = parts[2] == "on";
+                println!("Auto-route: {}", if self.auto_route { "ON" } else { "OFF" });
+              }
+            }
+            _ => {
+              let skills = self.skill_manager.load_skills()?;
+              if let Some(skill) = skills.into_iter().find(|s| s.name == parts[1]) {
+                self.activate_skill(skill);
+              }
+            }
+          }
+        }
+      }
+      "/model" => {
+        if parts.len() > 1 {
+          self.model = match parts[1] {
+            "flash" => "deepseek-v4-flash".to_string(),
+            "pro" => "deepseek-v4-pro".to_string(),
+            _ => self.model.clone(),
+          };
+        }
+        println!("Model: {}", self.model.cyan());
+      }
+      "/thinking" => {
+        if parts.len() > 1 {
+          self.thinking_mode = match parts[1] {
+            "n" => ThinkingMode::None,
+            "h" => ThinkingMode::High,
+            "m" => ThinkingMode::Max,
+            _ => self.thinking_mode,
+          };
+        }
+        println!("Thinking: {}", self.thinking_mode.label().magenta());
+      }
+      "/history" => {
+        let sessions = self.history.list_sessions()?;
+        for s in sessions.iter().take(10) {
+          println!(
+            "- {} ({})",
+            s.title,
+            s.id.chars().take(8).collect::<String>()
+          );
+        }
+      }
+      _ => println!("Unknown command"),
+    }
+    Ok(false)
+  }
+
+  async fn chat(&mut self, content: &str) -> Result<()> {
+    self.current_session.messages.push(Message::Simple {
+      role: "user".to_string(),
+      content: content.to_string(),
+      reasoning_content: None,
+      tool_calls: None,
+    });
+
+    let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
+
+    // V4 1M Context means we can send thousands of messages without trimming!
+    let mut stream = self
+      .client
+      .call_api_with_params(
+        &self.model,
+        self.current_session.messages.clone(),
+        self.thinking_mode.as_str(),
+        tools,
+      )
+      .await?;
+
+    let mut assistant_content = String::new();
+    let mut assistant_reasoning = String::new();
+    let mut tool_calls = Vec::new();
+    let mut is_reasoning = false;
+
+    while let Some(item) = stream.next().await {
+      match item? {
+        StreamItem::Reasoning(r) => {
+          if !is_reasoning {
+            print!("\n{}", "Thinking: ".italic().bright_black());
+            is_reasoning = true;
+          }
+          print!("{}", r.italic().bright_black());
+          assistant_reasoning.push_str(&r);
+        }
+        StreamItem::Content(c) => {
+          if is_reasoning {
+            println!();
+            is_reasoning = false;
+          }
+          print!("{}", c);
+          assistant_content.push_str(&c);
+        }
+        StreamItem::ToolCall(tc) => {
+          println!(
+            "\n{} Called: {}",
+            "Skill:".yellow(),
+            tc.function.name.cyan()
+          );
+          tool_calls.push(tc);
+        }
+        StreamItem::Finish(reason) => {
+          println!();
+          if let Some(r) = reason
+            && r == "length"
+          {
+            println!("\n{}", "[Note: Max output limit reached. Single response capped at 8K tokens. Use '/continue' if needed.]".yellow());
+          }
+        }
+      }
+      io::stdout().flush()?;
+    }
+
+    // Render formatted markdown after stream
+    if !assistant_content.is_empty() {
+      println!(
+        "\n{}",
+        "┏━━━━━━━━━━━━━ 渲染视图 ━━━━━━━━━━━━━┓".blue().bold()
+      );
+      let skin = MadSkin::default();
+      skin.print_text(&assistant_content);
+      println!("{}", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".blue().bold());
+    }
+
+    self.current_session.messages.push(Message::Simple {
+      role: "assistant".to_string(),
+      content: assistant_content,
+      reasoning_content: if assistant_reasoning.is_empty() {
+        None
+      } else {
+        Some(assistant_reasoning)
+      },
+      tool_calls: if tool_calls.is_empty() {
+        None
+      } else {
+        Some(tool_calls)
+      },
+    });
+
+    if self.current_session.title == "New Chat" {
+      self.current_session.title = content.chars().take(30).collect::<String>();
+    }
+
+    self.history.save_session(&self.current_session)?;
+    Ok(())
+  }
 }
 
-fn print_red_prompt(stdout: &mut io::Stdout) {
-  let _ = crossterm::queue!(
-    stdout,
-    SetForegroundColor(Color::Red),
-    Print("> "),
-    ResetColor
-  );
-}
+#[tokio::main]
+async fn main() -> Result<()> {
+  let api_key = env::var("DEEPSEEK_API_KEY")
+    .or_else(|_| env::var("DASHSCOPE_API_KEY"))
+    .context("Please set DEEPSEEK_API_KEY")?;
 
-fn print_green_prompt(stdout: &mut io::Stdout) {
-  let _ = crossterm::queue!(
-    stdout,
-    SetForegroundColor(Color::Green),
-    Print("> "),
-    ResetColor
-  );
+  let mut app = App::new(api_key)?;
+  app.run().await
 }
