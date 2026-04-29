@@ -1,180 +1,65 @@
-# DeepCLI - DeepSeek Command Line Interface
+# SeekCLI
 
-DeepCLI is a command-line tool that allows you to interact with DeepSeek's large language models (LLMs) directly from your terminal. It supports both the `deepseek-reasoner` and `deepseek-chat` models and provides JSON output formatting capabilities.
+**SeekCLI** 是一个专为 DeepSeek 大模型深度定制的个人命令行效率工具。它不仅仅是一个简单的 API 调用客户端，而是围绕 DeepSeek V4 (1M Context) 的特性，专为开发者和重度 AI 用户设计的日常交互终端。
 
-## Features
+## 🌟 核心特性
 
-- Query DeepSeek models directly from your terminal
-- Choose between `r1` (reasoning) and `chat` (conversational) models
-- Control output creativity with temperature parameter
-- Limit response length with max tokens parameter
-- Get beautifully formatted, colorized JSON output
-- Simple setup and easy to use
-- File input support (text and image)
-- Chat history preservation
-- Beautiful terminal interface
+- 🚀 **DeepSeek V4 原生支持**: 充分发挥 1M 超长上下文优势，无需频繁清理历史，支持深度长文本分析。
+- 🧠 **多级思考模式**: 支持 `/thinking` 指令快速切换 [None/High/Max] 思考强度，适配不同难度的任务。
+- 🎭 **智能技能系统 (Skills)**:
+    - **自动路由**: 根据输入自动识别并切换预设技能（如：翻译专家、代码助手、文件处理）。
+    - **系统提示词注入**: 针对不同场景自动优化 System Prompt。
+- 🎨 **极致终端体验**:
+    - **智能渲染**: 基于 `termimad` 的 Markdown 渲染，视觉清晰。
+    - **语法高亮**: 代码块实时高亮（base16-ocean 主题），支持多种主流语言。
+    - **快捷复制**: `/copy [idx]` 一键提取代码块到系统剪贴板。
+- 💾 **会话管理**:
+    - 自动保存历史记录至 `~/.seekcli/sessions/`。
+    - 支持 `/history` 查看和 `/load` 加载历史会话。
 
-## Installation
+## 🛠️ 安装与配置
 
-### Prerequisites
+### 环境要求
+- Rust 2024 Edition (v1.85+)
+- DeepSeek 或 阿里云 DashScope API Key
 
-- Rust (version 1.65 or higher)
-- DeepSeek API key
-
-### Install from source
-
+### 快速安装
 ```bash
-# Clone the repository
-git clone https://github.com/yuxuetr/deepcli.git
-cd deepcli
-
-# Build the project
-cargo build --release
-
-# The binary will be at target/release/deepcli
+git clone https://github.com/yuxuetr/seekcli.git
+cd seekcli
+cargo install --path .
 ```
 
-### Install via Cargo
-
+### 配置 API Key
+在环境变量中设置以下之一：
 ```bash
-cargo install deepcli
+export DEEPSEEK_API_KEY="your_key"
+# 或者使用 DashScope (Qwen/DeepSeek)
+export DASHSCOPE_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
+export DASHSCOPE_API_KEY="your_key"
 ```
 
-## Configuration
+## ⌨️ 交互指令
 
-Set your DeepSeek API key as an environment variable:
+进入交互模式后，可以使用以下指令提升效率：
 
-```bash
-export DASHSCOPE_API_KEY=your_api_key_here
-```
+| 指令 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `/model` | 切换模型 (flash/pro) | `/model pro` |
+| `/thinking` | 调整思考强度 (n/h/m) | `/thinking h` |
+| `/skill` | 管理/激活特定技能 | `/skill list`, `/skill translator` |
+| `/copy` | 复制最后一次回复的代码块 | `/copy 1` |
+| `/history` | 查看最近的会话记录 | `/history` |
+| `/clear` | 重置当前会话上下文 | `/clear` |
+| `/help` | 显示帮助菜单 | `/help` |
+| `/quit` | 退出程序 | `/quit` |
 
-Add this to your shell profile (`.bashrc`, `.zshrc`, etc.) to make it permanent.
+## 📁 目录结构
+- `~/.seekcli/sessions/`: 存放聊天的 JSON 记录。
+- `~/.seekcli/skills/`: 存放自定义技能配置。
 
-## Usage
+## 🤝 个人自用声明
+本项目初衷是创建一个符合个人工作流的 DeepSeek 交互工具。如果你有好的想法或优化建议，欢迎提交 PR。
 
-### Interactive Mode
-
-Start the interactive mode:
-
-```bash
-./target/release/deepcli -i
-```
-
-In interactive mode:
-- Type text directly for conversation
-- Use `\file <file_path>` to analyze a file
-- Use `\clear` to clear current input (without clearing history)
-- Press `Ctrl+C` to exit
-
-### Single Query Mode
-
-```bash
-# Basic query
-./target/release/deepcli "你好，请介绍一下自己"
-
-# Specify model
-./target/release/deepcli -m r1 "请帮我分析这个问题"
-
-# Set parameters
-./target/release/deepcli -t 0.7 -l 1000 "请详细解释这个概念"
-
-# JSON output
-./target/release/deepcli --json "请以JSON格式返回结果"
-```
-
-### Command Line Parameters
-
-- `-m, --model <MODEL>`: Choose model (`r1` or `chat`, default: `chat`)
-- `-t, --temperature <TEMPERATURE>`: Set temperature (0.0-2.0)
-- `-l, --max-tokens <MAX_TOKENS>`: Set maximum token count
-- `-i, --interactive`: Start interactive mode
-- `--json`: Output response as formatted JSON
-- `-h, --help`: Display help information
-
-### File Support
-
-#### Text Files
-
-```bash
-# In interactive mode
-\file /path/to/document.txt
-
-# Or analyze file content directly
-./target/release/deepcli "分析这个文件" --file /path/to/document.txt
-```
-
-#### Image Files
-
-Supports common image formats (PNG, JPG, JPEG, etc.):
-
-```bash
-# In interactive mode
-\file /path/to/image.png
-```
-
-## Development Setup
-
-### Prerequisites
-
-- Rust toolchain (install via [rustup](https://rustup.rs/))
-- DeepSeek API key
-
-### Recommended VSCode Plugins
-
-- rust-analyzer: Rust language support
-- crates: Rust package management
-- Better TOML: TOML file support
-- GitLens: Git enhancements
-- Error Lens: Enhanced error highlighting
-
-### Build and Run
-
-```bash
-# Build in release mode
-cargo build --release
-
-# Run with debug output
-cargo run -- "Your query here"
-```
-
-### Testing
-
-```bash
-cargo test
-```
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a new branch (`git checkout -b feature/your-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin feature/your-feature`)
-5. Create a new Pull Request
-
-### Pre-commit Checks
-
-Install pre-commit hooks to ensure code quality:
-
-```bash
-pipx install pre-commit
-pre-commit install
-```
-
-### Dependency Security
-
-Check dependencies for security issues with:
-
-```bash
-cargo deny check
-```
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgements
-
-- DeepSeek for their powerful language models
-- Rust community for excellent tooling and libraries
+## 📄 开源协议
+[MIT License](LICENSE)
