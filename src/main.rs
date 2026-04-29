@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use arboard::Clipboard;
 use colored::*;
 use futures_util::StreamExt;
+use regex::Regex;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
@@ -51,6 +53,7 @@ struct App {
   thinking_mode: ThinkingMode,
   current_skill: Option<Skill>,
   auto_route: bool,
+  last_code_blocks: Vec<String>,
 }
 
 impl App {
@@ -69,6 +72,7 @@ impl App {
       thinking_mode: ThinkingMode::None,
       current_skill: None,
       auto_route: true,
+      last_code_blocks: Vec::new(),
     })
   }
 
@@ -78,6 +82,7 @@ impl App {
     println!("  /thinking [n|h|m]   Switch thinking intensity");
     println!("  /skill list         List all skills");
     println!("  /skill auto [on|off] Toggle auto-routing");
+    println!("  /copy [index]       Copy code block from last response");
     println!("  /clear              Reset context (start a new 1M session)");
     println!("  /history            List sessions");
     println!("  /load [id]          Load and continue a session");
@@ -285,6 +290,43 @@ impl App {
           );
         }
       }
+      "/copy" => {
+        if parts.len() > 1 {
+          if let Ok(idx) = parts[1].parse::<usize>() {
+            if idx > 0 && idx <= self.last_code_blocks.len() {
+              let code = &self.last_code_blocks[idx - 1];
+              match Clipboard::new() {
+                Ok(mut cb) => {
+                  if cb.set_text(code.trim().to_string()).is_ok() {
+                    println!(
+                      "{} Code block {} copied to clipboard!",
+                      "Success:".green(),
+                      idx
+                    );
+                  } else {
+                    println!("{} Failed to set clipboard text.", "Error:".red());
+                  }
+                }
+                Err(e) => println!("{} Failed to open clipboard: {}", "Error:".red(), e),
+              }
+            } else {
+              println!(
+                "{} Invalid index. Range: 1-{}",
+                "Error:".red(),
+                self.last_code_blocks.len()
+              );
+            }
+          }
+        } else if !self.last_code_blocks.is_empty() {
+          println!(
+            "{} Specify index (1-{}) to copy.",
+            "Info:".blue(),
+            self.last_code_blocks.len()
+          );
+        } else {
+          println!("{} No code blocks found in last response.", "Info:".blue());
+        }
+      }
       _ => println!("Unknown command"),
     }
     Ok(false)
@@ -354,15 +396,69 @@ impl App {
       io::stdout().flush()?;
     }
 
-    // Render formatted markdown after stream
+    // Extract code blocks for the /copy command
+    let re = Regex::new(r"```(?:[a-zA-Z0-9]*)\n([\s\S]*?)```")?;
+    self.last_code_blocks = re
+      .captures_iter(&assistant_content)
+      .map(|cap| cap[1].to_string())
+      .collect();
+
+    // Render formatted markdown with syntax highlighting and simplified copy instructions
     if !assistant_content.is_empty() {
-      println!(
-        "\n{}",
-        "┏━━━━━━━━━━━━━ 渲染视图 ━━━━━━━━━━━━━┓".blue().bold()
-      );
+      println!("\n{}", "┏━━━━━━━━━━━━━━━━━━━━━ 智能渲染视图 ━━━━━━━━━━━━━━━━━━━━━┓".blue().bold());
+
       let skin = MadSkin::default();
-      skin.print_text(&assistant_content);
-      println!("{}", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".blue().bold());
+      let mut current_pos = 0;
+      let mut block_idx = 0;
+
+      // Initialize syntect for syntax highlighting
+      let ps = syntect::parsing::SyntaxSet::load_defaults_newlines();
+      let ts = syntect::highlighting::ThemeSet::load_defaults();
+      let theme = &ts.themes["base16-ocean.dark"];
+
+      // Improved Regex: Match backticks only at the START of a line (?m)^ to handle nested doc comments
+      let block_re = Regex::new(r"(?m)^```([a-zA-Z0-9]*)\n([\s\S]*?)^```")?;
+
+      for cap in block_re.captures_iter(&assistant_content) {
+        let entire_match = cap.get(0).unwrap();
+        let lang = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let code_content = cap.get(2).unwrap().as_str();
+
+        // 1. Print preceding text
+        let pre_text = &assistant_content[current_pos..entire_match.start()];
+        if !pre_text.trim().is_empty() {
+          skin.print_text(pre_text);
+        }
+
+        // 2. Print syntax-highlighted code block
+        block_idx += 1;
+        let block_title = if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() };
+        println!("{}", format!(" ── {} Block [{}] ──", block_title, block_idx).dimmed());
+
+        // Use syntect for syntax highlighting
+        let syntax = ps.find_syntax_by_token(lang).unwrap_or_else(|| ps.find_syntax_plain_text());
+        let mut h = syntect::easy::HighlightLines::new(syntax, theme);
+
+        for line in syntect::util::LinesWithEndings::from(code_content) {
+          let ranges: Vec<(syntect::highlighting::Style, &str)> = h.highlight_line(line, &ps).unwrap_or_default();
+          let escaped = syntect::util::as_24_bit_terminal_escaped(&ranges[..], false);
+          print!("{}", escaped);
+        }
+        println!("\x1b[0m"); // Reset ANSI colors
+
+        // Simplified copy instruction as requested
+        println!("{}", format!("复制代码请使用: /copy {}", block_idx).bright_black().italic());
+        println!();
+
+        current_pos = entire_match.end();
+      }
+
+      // 3. Print remaining text
+      if current_pos < assistant_content.len() {
+        skin.print_text(&assistant_content[current_pos..]);
+      }
+
+      println!("{}", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".blue().bold());
     }
 
     self.current_session.messages.push(Message::Simple {
