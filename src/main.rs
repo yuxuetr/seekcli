@@ -237,19 +237,29 @@ impl App {
   }
 
   async fn paste_image(&mut self) -> Result<()> {
-    println!("{} Accessing clipboard...", "✦".yellow());
-    let mut cb = Clipboard::new()?;
+    println!("{} Initializing Clipboard context...", "✦".yellow());
 
-    let image = match cb.get_image() {
-      Ok(img) => img,
-      Err(e) => {
-        println!("{} No image or error: {}", "Info:".blue(), e);
+    // Use spawn_blocking to isolate clipboard access from the async executor
+    let image_data = tokio::task::spawn_blocking(|| -> Result<Option<arboard::ImageData<'static>>> {
+      let mut cb = Clipboard::new().map_err(|e| anyhow::anyhow!("Clipboard init error: {}", e))?;
+      match cb.get_image() {
+        Ok(img) => Ok(Some(img)),
+        Err(_) => Ok(None), // Simplified: any error currently treated as no image
+      }
+    })
+    .await?
+    .context("Task execution failed")?;
+
+    let image = match image_data {
+      Some(img) => img,
+      None => {
+        println!("{} No image found in clipboard.", "Info:".blue());
         return Ok(());
       }
     };
 
     println!(
-      "{} Image captured ({}x{}). Processing...",
+      "{} Image captured ({}x{}). Processing buffer...",
       "✦".yellow(),
       image.width,
       image.height
