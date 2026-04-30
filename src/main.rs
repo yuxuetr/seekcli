@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use arboard::Clipboard;
 use base64::Engine;
 use colored::*;
 use futures_util::StreamExt;
@@ -236,50 +235,11 @@ impl App {
     }
   }
 
-  async fn paste_image(&mut self) -> Result<()> {
-    println!("{} Initializing Clipboard context...", "✦".yellow());
-
-    // Use spawn_blocking to isolate clipboard access from the async executor
-    let image_data = tokio::task::spawn_blocking(|| -> Result<Option<arboard::ImageData<'static>>> {
-      let mut cb = Clipboard::new().map_err(|e| anyhow::anyhow!("Clipboard init error: {}", e))?;
-      match cb.get_image() {
-        Ok(img) => Ok(Some(img)),
-        Err(_) => Ok(None), // Simplified: any error currently treated as no image
-      }
-    })
-    .await?
-    .context("Task execution failed")?;
-
-    let image = match image_data {
-      Some(img) => img,
-      None => {
-        println!("{} No image found in clipboard.", "Info:".blue());
-        return Ok(());
-      }
-    };
-
-    println!(
-      "{} Image captured ({}x{}). Processing buffer...",
-      "✦".yellow(),
-      image.width,
-      image.height
-    );
-
-    // Convert to JPEG Base64
+  async fn analyze_image_file(&mut self, path: std::path::PathBuf) -> Result<()> {
+    println!("{} Reading image from disk: {:?}...", "✦".yellow(), path);
+    let img = image::open(path)?;
     let mut buf = std::io::Cursor::new(Vec::new());
-
-    // Explicitly handle RGBA to RGB conversion
-    let width = image.width as u32;
-    let height = image.height as u32;
-    let raw_pixels = image.bytes.into_owned();
-
-    let img_buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, raw_pixels)
-      .context("Failed to create image buffer from raw pixels")?;
-
-    // Convert to RGB (removing alpha channel) before saving as JPEG
-    let rgb_image = image::DynamicImage::ImageRgba8(img_buffer).to_rgb8();
-
-    rgb_image.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+    img.to_rgb8().write_to(&mut buf, image::ImageFormat::Jpeg)?;
     let base64_image = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
 
     if let Some(ref sensor) = self.sensor {
@@ -306,21 +266,71 @@ impl App {
         "Success:".green()
       );
 
-      // Inject the analysis into DeepSeek's context
-      self
-        .current_session
+      self.current_session
         .messages
-        .push(Message::new_user_text(format!(
-          "[图像分析结果]: {}",
-          description
-        )));
-    } else {
-      println!(
-        "{} ZHIPU_API_KEY not set. Cannot analyze image.",
-        "Error:".red()
-      );
+        .push(Message::new_user_text(format!("[图像分析结果]: {}", description)));
+    }
+    Ok(())
+  }
+
+  async fn paste_image(&mut self) -> Result<()> {
+    println!("{} Accessing clipboard...", "✦".yellow());
+
+    // 1. Try to read text (might be a file path) using pbpaste
+    #[cfg(target_os = "macos")]
+    {
+      let output = std::process::Command::new("pbpaste").output();
+      if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !text.is_empty() {
+          let path_str = text.trim_start_matches("file://").trim();
+          let path = std::path::PathBuf::from(path_str);
+          if path.exists() && path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ["png", "jpg", "jpeg", "webp"].contains(&ext.to_lowercase().as_str()) {
+              println!("{} Detected image path in clipboard text.", "✦".yellow());
+              return self.analyze_image_file(path).await;
+            }
+          }
+        }
+      }
     }
 
+    // 2. macOS specific: Try to save clipboard image to file using osascript
+    #[cfg(target_os = "macos")]
+    {
+      println!("{} Attempting macOS native clipboard capture...", "✦".yellow());
+      let temp_path = "/tmp/seekcli_paste.png";
+      let script = format!(
+        "set theFile to (POSIX file \"{}\")\n\
+         try\n\
+           set theData to the clipboard as «class PNGf»\n\
+           set theOpenFile to open for access theFile with write permission\n\
+           set eof theOpenFile to 0\n\
+           write theData to theOpenFile\n\
+           close access theOpenFile\n\
+           return \"success\"\n\
+         on error\n\
+           return \"no image\"\n\
+         end try",
+        temp_path
+      );
+
+      let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output();
+
+      if let Ok(out) = output {
+        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if result == "success" {
+          println!("{} Image saved via AppleScript.", "✦".yellow());
+          return self.analyze_image_file(std::path::PathBuf::from(temp_path)).await;
+        }
+      }
+    }
+
+    println!("{} No image or supported path found in clipboard.", "Info:".blue());
     Ok(())
   }
 
@@ -401,19 +411,20 @@ impl App {
           if let Ok(idx) = parts[1].parse::<usize>() {
             if idx > 0 && idx <= self.last_code_blocks.len() {
               let code = &self.last_code_blocks[idx - 1];
-              match Clipboard::new() {
-                Ok(mut cb) => {
-                  if cb.set_text(code.trim().to_string()).is_ok() {
-                    println!(
-                      "{} Code block {} copied to clipboard!",
-                      "Success:".green(),
-                      idx
-                    );
-                  } else {
-                    println!("{} Failed to set clipboard text.", "Error:".red());
-                  }
+              #[cfg(target_os = "macos")]
+              {
+                let mut child = std::process::Command::new("pbcopy")
+                  .stdin(std::process::Stdio::piped())
+                  .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                  stdin.write_all(code.trim().as_bytes())?;
                 }
-                Err(e) => println!("{} Failed to open clipboard: {}", "Error:".red(), e),
+                child.wait()?;
+                println!(
+                  "{} Code block {} copied to clipboard!",
+                  "Success:".green(),
+                  idx
+                );
               }
             } else {
               println!(
@@ -439,9 +450,53 @@ impl App {
   }
 
   async fn chat(&mut self, content: &str) -> Result<()> {
+    // Phase 3: File Reference (@path) Parsing
+    let processed_content = content.to_string();
+    let re_file = Regex::new(r"@([^\s]+)")?;
+    let mut file_context = String::new();
+
+    for cap in re_file.captures_iter(content) {
+      let path_str = &cap[1];
+      let path = std::path::PathBuf::from(path_str);
+      if path.exists() && path.is_file() {
+        println!("{} Reading referenced file: {:?}...", "✦".yellow(), path);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        match ext.to_lowercase().as_str() {
+          "pdf" | "docx" | "pptx" | "xlsx" => {
+            // Future: Use GLM file sensor for complex documents
+            println!(
+              "{} Complex document detected. (GLM File Sense integration pending)",
+              "Info:".blue()
+            );
+            if let Ok(text) = std::fs::read_to_string(&path) {
+              file_context.push_str(&format!("\n\n--- FILE: {:?} ---\n{}\n", path, text));
+            }
+          }
+          _ => {
+            // Text files: Read directly for DeepSeek 1M context
+            if let Ok(text) = std::fs::read_to_string(&path) {
+              file_context.push_str(&format!("\n\n--- FILE: {:?} ---\n{}\n", path, text));
+              println!(
+                "{} Injected {} bytes of text context.",
+                "Success:".green(),
+                text.len()
+              );
+            }
+          }
+        }
+      }
+    }
+
+    let final_input = if file_context.is_empty() {
+      processed_content
+    } else {
+      format!("{}\n\nContext Files:{}", processed_content, file_context)
+    };
+
     self.current_session.messages.push(Message::Simple {
       role: "user".to_string(),
-      content: api::MessageContent::Text(content.to_string()),
+      content: api::MessageContent::Text(final_input),
       reasoning_content: None,
       tool_calls: None,
     });
