@@ -237,17 +237,19 @@ impl App {
   }
 
   async fn paste_image(&mut self) -> Result<()> {
+    println!("{} Accessing clipboard...", "✦".yellow());
     let mut cb = Clipboard::new()?;
+
     let image = match cb.get_image() {
       Ok(img) => img,
-      Err(_) => {
-        println!("{} No image found in clipboard.", "Info:".blue());
+      Err(e) => {
+        println!("{} No image or error: {}", "Info:".blue(), e);
         return Ok(());
       }
     };
 
     println!(
-      "{} Image captured ({}x{}). Analyzing with Sensor (GLM-4.6V)...",
+      "{} Image captured ({}x{}). Processing...",
       "✦".yellow(),
       image.width,
       image.height
@@ -255,18 +257,23 @@ impl App {
 
     // Convert to JPEG Base64
     let mut buf = std::io::Cursor::new(Vec::new());
-    let dynamic_image = image::DynamicImage::ImageRgba8(
-      image::ImageBuffer::from_raw(
-        image.width as u32,
-        image.height as u32,
-        image.bytes.into_owned(),
-      )
-      .context("Failed to create image buffer")?,
-    );
-    dynamic_image.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+
+    // Explicitly handle RGBA to RGB conversion
+    let width = image.width as u32;
+    let height = image.height as u32;
+    let raw_pixels = image.bytes.into_owned();
+
+    let img_buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, raw_pixels)
+      .context("Failed to create image buffer from raw pixels")?;
+
+    // Convert to RGB (removing alpha channel) before saving as JPEG
+    let rgb_image = image::DynamicImage::ImageRgba8(img_buffer).to_rgb8();
+
+    rgb_image.write_to(&mut buf, image::ImageFormat::Jpeg)?;
     let base64_image = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
 
     if let Some(ref sensor) = self.sensor {
+      println!("{} Analyzing with Sensor (GLM-4.6V)...", "✦".yellow());
       let messages = vec![Message::new_user_image(
         "请详细描述这张图片的内容，包括文字、图表、布局和关键视觉信息。".to_string(),
         base64_image,
