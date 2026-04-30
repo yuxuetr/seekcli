@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+use base64::Engine;
 use colored::*;
 use futures_util::StreamExt;
 use regex::Regex;
@@ -45,7 +46,8 @@ impl ThinkingMode {
 }
 
 struct App {
-  client: ApiClient,
+  brain: ApiClient,
+  sensor: Option<ApiClient>,
   history: HistoryManager,
   skill_manager: SkillManager,
   current_session: Session,
@@ -57,14 +59,24 @@ struct App {
 }
 
 impl App {
-  fn new(api_key: String) -> Result<Self> {
+  fn new() -> Result<Self> {
+    let deepseek_key = env::var("DEEPSEEK_API_KEY")
+      .or_else(|_| env::var("DASHSCOPE_API_KEY"))
+      .context("Please set DEEPSEEK_API_KEY or DASHSCOPE_API_KEY")?;
+
+    let zhipu_key = env::var("ZHIPU_API_KEY").ok();
+
+    let brain = ApiClient::new(deepseek_key, api::Provider::DeepSeek);
+    let sensor = zhipu_key.map(|key| ApiClient::new(key, api::Provider::Zhipu));
+
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
     let model = "deepseek-v4-flash".to_string();
     let current_session = history.create_session(model.clone());
 
     Ok(Self {
-      client: ApiClient::new(api_key),
+      brain,
+      sensor,
       history,
       skill_manager,
       current_session,
@@ -82,6 +94,7 @@ impl App {
     println!("  /thinking [n|h|m]   Switch thinking intensity");
     println!("  /skill list         List all skills");
     println!("  /skill auto [on|off] Toggle auto-routing");
+    println!("  /paste              Analyze image from clipboard (Sensor powered)");
     println!("  /copy [index]       Copy code block from last response");
     println!("  /clear              Reset context (start a new 1M session)");
     println!("  /history            List sessions");
@@ -111,13 +124,13 @@ impl App {
 
     let messages = vec![Message::Simple {
       role: "user".to_string(),
-      content: route_prompt,
+      content: api::MessageContent::Text(route_prompt),
       reasoning_content: None,
       tool_calls: None,
     }];
 
     let mut stream = self
-      .client
+      .brain
       .call_api_with_params("deepseek-v4-flash", messages, "none", None)
       .await?;
     let mut selected_name = String::new();
@@ -216,11 +229,82 @@ impl App {
     if self.current_session.messages.is_empty() {
       self.current_session.messages.push(Message::Simple {
         role: "system".to_string(),
-        content: skill.system_prompt,
+        content: api::MessageContent::Text(skill.system_prompt),
         reasoning_content: None,
         tool_calls: None,
       });
     }
+  }
+
+  async fn paste_image(&mut self) -> Result<()> {
+    let mut cb = Clipboard::new()?;
+    let image = match cb.get_image() {
+      Ok(img) => img,
+      Err(_) => {
+        println!("{} No image found in clipboard.", "Info:".blue());
+        return Ok(());
+      }
+    };
+
+    println!(
+      "{} Image captured ({}x{}). Analyzing with Sensor (GLM-4.6V)...",
+      "✦".yellow(),
+      image.width,
+      image.height
+    );
+
+    // Convert to JPEG Base64
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let dynamic_image = image::DynamicImage::ImageRgba8(
+      image::ImageBuffer::from_raw(
+        image.width as u32,
+        image.height as u32,
+        image.bytes.into_owned(),
+      )
+      .context("Failed to create image buffer")?,
+    );
+    dynamic_image.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+    let base64_image = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+
+    if let Some(ref sensor) = self.sensor {
+      let messages = vec![Message::new_user_image(
+        "请详细描述这张图片的内容，包括文字、图表、布局和关键视觉信息。".to_string(),
+        base64_image,
+      )];
+
+      print!("{}", "Sensor Thinking: ".italic().bright_black());
+      let mut stream = sensor
+        .call_api_with_params("glm-4.6v-flash", messages, "none", None)
+        .await?;
+      let mut description = String::new();
+
+      while let Some(item) = stream.next().await {
+        if let Ok(StreamItem::Content(c)) = item {
+          print!("{}", c.italic().bright_black());
+          description.push_str(&c);
+        }
+      }
+      println!(
+        "\n{} Image analysis completed and injected into context.",
+        "Success:".green()
+      );
+
+      // Inject the analysis into DeepSeek's context
+      self
+        .current_session
+        .messages
+        .push(Message::new_user_text(format!(
+          "[图像分析结果]: {}",
+          description
+        )));
+    } else {
+      println!(
+        "{} ZHIPU_API_KEY not set. Cannot analyze image.",
+        "Error:".red()
+      );
+    }
+
+    Ok(())
   }
 
   async fn handle_command(&mut self, line: &str) -> Result<bool> {
@@ -229,6 +313,11 @@ impl App {
 
     match cmd {
       "/quit" | "/exit" => return Ok(true),
+      "/paste" => {
+        if let Err(e) = self.paste_image().await {
+          println!("{} Failed to paste image: {}", "Error:".red(), e);
+        }
+      }
       "/help" => self.print_help(),
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
@@ -335,7 +424,7 @@ impl App {
   async fn chat(&mut self, content: &str) -> Result<()> {
     self.current_session.messages.push(Message::Simple {
       role: "user".to_string(),
-      content: content.to_string(),
+      content: api::MessageContent::Text(content.to_string()),
       reasoning_content: None,
       tool_calls: None,
     });
@@ -344,7 +433,7 @@ impl App {
 
     // V4 1M Context means we can send thousands of messages without trimming!
     let mut stream = self
-      .client
+      .brain
       .call_api_with_params(
         &self.model,
         self.current_session.messages.clone(),
@@ -405,7 +494,12 @@ impl App {
 
     // Render formatted markdown with syntax highlighting and simplified copy instructions
     if !assistant_content.is_empty() {
-      println!("\n{}", "┏━━━━━━━━━━━━━━━━━━━━━ 智能渲染视图 ━━━━━━━━━━━━━━━━━━━━━┓".blue().bold());
+      println!(
+        "\n{}",
+        "┏━━━━━━━━━━━━━━━━━━━━━ 智能渲染视图 ━━━━━━━━━━━━━━━━━━━━━┓"
+          .blue()
+          .bold()
+      );
 
       let skin = MadSkin::default();
       let mut current_pos = 0;
@@ -432,22 +526,37 @@ impl App {
 
         // 2. Print syntax-highlighted code block
         block_idx += 1;
-        let block_title = if lang.is_empty() { "CODE".to_string() } else { lang.to_uppercase() };
-        println!("{}", format!(" ── {} Block [{}] ──", block_title, block_idx).dimmed());
+        let block_title = if lang.is_empty() {
+          "CODE".to_string()
+        } else {
+          lang.to_uppercase()
+        };
+        println!(
+          "{}",
+          format!(" ── {} Block [{}] ──", block_title, block_idx).dimmed()
+        );
 
         // Use syntect for syntax highlighting
-        let syntax = ps.find_syntax_by_token(lang).unwrap_or_else(|| ps.find_syntax_plain_text());
+        let syntax = ps
+          .find_syntax_by_token(lang)
+          .unwrap_or_else(|| ps.find_syntax_plain_text());
         let mut h = syntect::easy::HighlightLines::new(syntax, theme);
 
         for line in syntect::util::LinesWithEndings::from(code_content) {
-          let ranges: Vec<(syntect::highlighting::Style, &str)> = h.highlight_line(line, &ps).unwrap_or_default();
+          let ranges: Vec<(syntect::highlighting::Style, &str)> =
+            h.highlight_line(line, &ps).unwrap_or_default();
           let escaped = syntect::util::as_24_bit_terminal_escaped(&ranges[..], false);
           print!("{}", escaped);
         }
         println!("\x1b[0m"); // Reset ANSI colors
 
         // Simplified copy instruction as requested
-        println!("{}", format!("复制代码请使用: /copy {}", block_idx).bright_black().italic());
+        println!(
+          "{}",
+          format!("复制代码请使用: /copy {}", block_idx)
+            .bright_black()
+            .italic()
+        );
         println!();
 
         current_pos = entire_match.end();
@@ -458,12 +567,17 @@ impl App {
         skin.print_text(&assistant_content[current_pos..]);
       }
 
-      println!("{}", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".blue().bold());
+      println!(
+        "{}",
+        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+          .blue()
+          .bold()
+      );
     }
 
     self.current_session.messages.push(Message::Simple {
       role: "assistant".to_string(),
-      content: assistant_content,
+      content: api::MessageContent::Text(assistant_content),
       reasoning_content: if assistant_reasoning.is_empty() {
         None
       } else {
@@ -487,10 +601,6 @@ impl App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  let api_key = env::var("DEEPSEEK_API_KEY")
-    .or_else(|_| env::var("DASHSCOPE_API_KEY"))
-    .context("Please set DEEPSEEK_API_KEY")?;
-
-  let mut app = App::new(api_key)?;
+  let mut app = App::new()?;
   app.run().await
 }

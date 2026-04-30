@@ -43,11 +43,36 @@ pub struct ThinkingConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+  Text { text: String },
+  ImageUrl { image_url: ImageUrl },
+  FileUrl { file_url: FileUrl },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImageUrl {
+  pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileUrl {
+  pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum MessageContent {
+  Text(String),
+  Parts(Vec<ContentPart>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Message {
   Simple {
     role: String,
-    content: String,
+    content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,10 +99,28 @@ pub struct FunctionCall {
   pub arguments: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Provider {
+  DeepSeek,
+  Zhipu,
+  DashScope,
+}
+
+impl Provider {
+  pub fn default_base_url(&self) -> &'static str {
+    match self {
+      Provider::DeepSeek => "https://api.deepseek.com/v1",
+      Provider::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
+      Provider::DashScope => "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    }
+  }
+}
+
 pub struct ApiClient {
   client: Client,
   api_key: String,
   base_url: String,
+  _provider: Provider,
 }
 
 #[derive(Debug, Clone)]
@@ -95,10 +138,44 @@ struct StreamState {
   finished: bool,
 }
 
+impl Message {
+  pub fn new_user_text(text: String) -> Self {
+    Self::Simple {
+      role: "user".to_string(),
+      content: MessageContent::Text(text),
+      reasoning_content: None,
+      tool_calls: None,
+    }
+  }
+
+  pub fn new_user_image(text: String, base64_image: String) -> Self {
+    Self::Simple {
+      role: "user".to_string(),
+      content: MessageContent::Parts(vec![
+        ContentPart::ImageUrl {
+          image_url: ImageUrl {
+            url: format!("data:image/jpeg;base64,{}", base64_image),
+          },
+        },
+        ContentPart::Text { text },
+      ]),
+      reasoning_content: None,
+      tool_calls: None,
+    }
+  }
+}
+
 impl ApiClient {
-  pub fn new(api_key: String) -> Self {
-    let base_url = std::env::var("DEEPSEEK_API_BASE")
-      .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
+  pub fn new(api_key: String, provider: Provider) -> Self {
+    let base_url = match provider {
+      Provider::DeepSeek => std::env::var("DEEPSEEK_API_BASE")
+        .unwrap_or_else(|_| provider.default_base_url().to_string()),
+      Provider::Zhipu => {
+        std::env::var("ZHIPU_API_BASE").unwrap_or_else(|_| provider.default_base_url().to_string())
+      }
+      Provider::DashScope => std::env::var("DASHSCOPE_API_BASE")
+        .unwrap_or_else(|_| provider.default_base_url().to_string()),
+    };
 
     let client = Client::builder()
       .no_proxy()
@@ -109,6 +186,7 @@ impl ApiClient {
       client,
       api_key,
       base_url,
+      _provider: provider,
     }
   }
 
