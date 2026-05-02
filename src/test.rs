@@ -17,10 +17,8 @@ mod verification_tests {
     }
     println!("--------------------------------\n");
 
-    assert!(skills.iter().any(|s| s.name == "ielts_writing"));
-    assert!(skills.iter().any(|s| s.name == "ielts_speaking"));
-    assert!(skills.iter().any(|s| s.name == "rust_backend"));
-    assert!(skills.iter().any(|s| s.name == "dioxus_frontend"));
+    assert!(skills.iter().any(|s| s.name == "translator"));
+    assert!(skills.iter().any(|s| s.name == "file_helper"));
     Ok(())
   }
 }
