@@ -487,7 +487,7 @@ impl ApiClient {
       .await?;
 
     let mut results = String::new();
-    if let Some(list) = resp["list"].as_array() {
+    if let Some(list) = resp["search_result"].as_array() {
       for (i, res) in list.iter().enumerate() {
         results.push_str(&format!(
           "{}. [{}]({})\n{}\n\n",
