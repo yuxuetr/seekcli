@@ -420,15 +420,8 @@ impl App {
     match cmd {
       "/quit" | "/exit" => return Ok(true),
       "/image" | "/paste" => match self.paste_image().await {
-        Ok(desc) => {
-          self
-            .current_session
-            .messages
-            .push(Message::new_user_text(format!("[图像分析结果]: {}", desc)));
-          println!(
-            "{} Image analysis added to session context.",
-            "Success:".green()
-          );
+        Ok(_) => {
+          // Result is already printed in paste_image or analyze_complex_file
         }
         Err(e) => println!("{} Failed to analyze clipboard: {}", "Error:".red(), e),
       },
@@ -437,18 +430,8 @@ impl App {
           let path = std::path::PathBuf::from(parts[1]);
           if path.exists() {
             match self.analyze_complex_file(path.clone()).await {
-              Ok(content) => {
-                self
-                  .current_session
-                  .messages
-                  .push(Message::new_user_text(format!(
-                    "--- CONTENT FROM FILE: {:?} ---\n{}\n",
-                    path, content
-                  )));
-                println!(
-                  "{} File content added to session context.",
-                  "Success:".green()
-                );
+              Ok(_) => {
+                // Result is already printed in analyze_complex_file
               }
               Err(e) => println!("{} Failed to analyze file: {}", "Error:".red(), e),
             }
