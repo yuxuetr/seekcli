@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
 use base64::Engine;
 use colored::*;
 use futures_util::StreamExt;
@@ -48,6 +49,7 @@ impl ThinkingMode {
 
 struct App {
   brain: ApiClient,
+  #[allow(dead_code)]
   vlm_sensor: Option<ApiClient>,
   doc_sensor: Option<ApiClient>,
   config: Config,
@@ -508,9 +510,9 @@ impl App {
         if parts.len() > 1 {
           if let Ok(idx) = parts[1].parse::<usize>() {
             if idx > 0 && idx <= self.last_code_blocks.len() {
-              let code = &self.last_code_blocks[idx - 1];
               #[cfg(target_os = "macos")]
               {
+                let code = &self.last_code_blocks[idx - 1];
                 use std::io::Write;
                 let mut child = std::process::Command::new("pbcopy")
                   .stdin(std::process::Stdio::piped())
