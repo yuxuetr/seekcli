@@ -73,10 +73,12 @@ impl App {
 
     let step_key = env::var("STEP_API_KEY").ok();
     let mineru_key = env::var("MINERU_API_KEY").ok();
+    let jina_key = env::var("JINA_API_KEY").ok();
 
-    let brain = ApiClient::new(deepseek_key, api::Provider::DeepSeek);
-    let vlm_sensor = step_key.map(|key| ApiClient::new(key, api::Provider::StepFun));
-    let doc_sensor = mineru_key.map(|key| ApiClient::new(key, api::Provider::MinerU));
+    let brain = ApiClient::new(deepseek_key, api::Provider::DeepSeek, jina_key.clone());
+    let vlm_sensor =
+      step_key.map(|key| ApiClient::new(key, api::Provider::StepFun, jina_key.clone()));
+    let doc_sensor = mineru_key.map(|key| ApiClient::new(key, api::Provider::MinerU, jina_key));
 
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;

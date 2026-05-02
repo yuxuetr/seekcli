@@ -150,6 +150,7 @@ pub struct ApiClient {
   api_key: String,
   pub base_url: String,
   _provider: Provider,
+  jina_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,7 +228,7 @@ impl Message {
 }
 
 impl ApiClient {
-  pub fn new(api_key: String, provider: Provider) -> Self {
+  pub fn new(api_key: String, provider: Provider, jina_api_key: Option<String>) -> Self {
     let base_url =
       match provider {
         Provider::DeepSeek => std::env::var("DEEPSEEK_API_BASE")
@@ -252,6 +253,7 @@ impl ApiClient {
       api_key,
       base_url,
       _provider: provider,
+      jina_api_key,
     }
   }
 
@@ -399,13 +401,16 @@ impl ApiClient {
 
   pub async fn fetch_web_markdown(&self, url: &str) -> Result<String> {
     let jina_url = format!("https://r.jina.ai/{}", url);
-    let resp = self
+    let mut req = self
       .client
       .get(&jina_url)
-      .header("X-With-Generated-Alt", "true") // Optional: ask Jina to generate alt text for images
-      .send()
-      .await?
-      .error_for_status()?;
+      .header("X-With-Generated-Alt", "true");
+
+    if let Some(ref key) = self.jina_api_key {
+      req = req.header("Authorization", format!("Bearer {}", key));
+    }
+
+    let resp = req.send().await?.error_for_status()?;
 
     Ok(resp.text().await?)
   }
