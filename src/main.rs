@@ -52,6 +52,7 @@ struct App {
   #[allow(dead_code)]
   vlm_sensor: Option<ApiClient>,
   doc_sensor: Option<ApiClient>,
+  glm_sensor: Option<ApiClient>,
   config: Config,
   history: HistoryManager,
   skill_manager: SkillManager,
@@ -75,6 +76,7 @@ impl App {
     let mineru_key = env::var("MINERU_API_KEY").ok();
     let jina_key = env::var("JINA_API_KEY").ok();
     let tavily_key = env::var("TAVILY_API_KEY").ok();
+    let zhipu_key = env::var("ZHIPU_API_KEY").ok();
 
     let brain = ApiClient::new(
       deepseek_key,
@@ -90,8 +92,16 @@ impl App {
         tavily_key.clone(),
       )
     });
-    let doc_sensor =
-      mineru_key.map(|key| ApiClient::new(key, api::Provider::MinerU, jina_key, tavily_key));
+    let doc_sensor = mineru_key.map(|key| {
+      ApiClient::new(
+        key,
+        api::Provider::MinerU,
+        jina_key.clone(),
+        tavily_key.clone(),
+      )
+    });
+    let glm_sensor =
+      zhipu_key.map(|key| ApiClient::new(key, api::Provider::Zhipu, jina_key, tavily_key));
 
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
@@ -102,6 +112,7 @@ impl App {
       brain,
       vlm_sensor,
       doc_sensor,
+      glm_sensor,
       config,
       history,
       skill_manager,
@@ -497,21 +508,25 @@ impl App {
       "/search" => {
         if parts.len() > 1 {
           let query = parts[1];
-          println!("{} GLM Searching: {}...", "✦".cyan(), query);
-          match self.brain.glm_web_search(query).await {
-            Ok(res) => {
-              println!(
-                "\n{}",
-                "┏━━━━━━━━━━━━━━━━━━━━━ GLM 搜索结果 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
-              );
-              let skin = termimad::MadSkin::default();
-              skin.print_text(&res);
-              println!(
-                "{}",
-                "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
-              );
+          if let Some(ref glm) = self.glm_sensor {
+            println!("{} GLM Searching: {}...", "✦".cyan(), query);
+            match glm.glm_web_search(query).await {
+              Ok(res) => {
+                println!(
+                  "\n{}",
+                  "┏━━━━━━━━━━━━━━━━━━━━━ GLM 搜索结果 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+                );
+                let skin = termimad::MadSkin::default();
+                skin.print_text(&res);
+                println!(
+                  "{}",
+                  "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+                );
+              }
+              Err(e) => println!("{} GLM Search failed: {}", "Error:".red(), e),
             }
-            Err(e) => println!("{} GLM Search failed: {}", "Error:".red(), e),
+          } else {
+            println!("{} ZHIPU_API_KEY not set.", "Error:".red());
           }
         } else {
           println!("{} Usage: /search <query>", "Info:".blue());
@@ -674,14 +689,18 @@ impl App {
       }
 
       if path_str == "search" {
-        match self.brain.glm_web_search(content).await {
-          Ok(res) => {
-            file_context.push_str(&format!("\n\n--- CONTENT FROM GLM SEARCH ---\n{}\n", res));
-            println!("{} Injected GLM search results.", "Success:".green());
+        if let Some(ref glm) = self.glm_sensor {
+          match glm.glm_web_search(content).await {
+            Ok(res) => {
+              file_context.push_str(&format!("\n\n--- CONTENT FROM GLM SEARCH ---\n{}\n", res));
+              println!("{} Injected GLM search results.", "Success:".green());
+            }
+            Err(e) => {
+              println!("{} GLM Search failed: {}", "Error:".red(), e);
+            }
           }
-          Err(e) => {
-            println!("{} GLM Search failed: {}", "Error:".red(), e);
-          }
+        } else {
+          println!("{} ZHIPU_API_KEY not set.", "Error:".red());
         }
         continue;
       }

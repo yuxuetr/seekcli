@@ -468,7 +468,7 @@ impl ApiClient {
   pub async fn glm_web_search(&self, query: &str) -> Result<String> {
     let body = serde_json::json!({
         "search_query": query,
-        "search_engine": "search_std",
+        "search_engine": "search_pro",
         "search_intent": false,
         "count": 10,
         "search_recency_filter": "noLimit",
