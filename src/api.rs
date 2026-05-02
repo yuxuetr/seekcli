@@ -151,6 +151,7 @@ pub struct ApiClient {
   pub base_url: String,
   _provider: Provider,
   jina_api_key: Option<String>,
+  tavily_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,7 +229,12 @@ impl Message {
 }
 
 impl ApiClient {
-  pub fn new(api_key: String, provider: Provider, jina_api_key: Option<String>) -> Self {
+  pub fn new(
+    api_key: String,
+    provider: Provider,
+    jina_api_key: Option<String>,
+    tavily_api_key: Option<String>,
+  ) -> Self {
     let base_url =
       match provider {
         Provider::DeepSeek => std::env::var("DEEPSEEK_API_BASE")
@@ -254,6 +260,7 @@ impl ApiClient {
       base_url,
       _provider: provider,
       jina_api_key,
+      tavily_api_key,
     }
   }
 
@@ -413,6 +420,109 @@ impl ApiClient {
     let resp = req.send().await?.error_for_status()?;
 
     Ok(resp.text().await?)
+  }
+
+  pub async fn tavily_search(&self, query: &str) -> Result<String> {
+    let key = self
+      .tavily_api_key
+      .as_ref()
+      .context("TAVILY_API_KEY not set")?;
+    let body = serde_json::json!({
+        "query": query,
+        "search_depth": "advanced",
+        "include_answer": true,
+        "max_results": 5
+    });
+
+    let resp = self
+      .client
+      .post("https://api.tavily.com/search")
+      .header("Authorization", format!("Bearer {}", key))
+      .json(&body)
+      .send()
+      .await?
+      .error_for_status()?
+      .json::<serde_json::Value>()
+      .await?;
+
+    let mut result = String::new();
+    if let Some(answer) = resp["answer"].as_str() {
+      result.push_str(&format!("Summary: {}\n\n", answer));
+    }
+
+    if let Some(results) = resp["results"].as_array() {
+      for (i, res) in results.iter().enumerate() {
+        result.push_str(&format!(
+          "{}. [{}]({})\n{}\n\n",
+          i + 1,
+          res["title"].as_str().unwrap_or("No Title"),
+          res["url"].as_str().unwrap_or("#"),
+          res["content"].as_str().unwrap_or("")
+        ));
+      }
+    }
+
+    Ok(result)
+  }
+
+  pub async fn glm_web_search(&self, query: &str) -> Result<String> {
+    let messages = vec![Message::new_user_text(query.to_string())];
+    let tools = vec![serde_json::json!({
+        "type": "web_search",
+        "web_search": {
+            "enable": true,
+            "search_result": true
+        }
+    })];
+
+    let body = serde_json::json!({
+      "model": "glm-4-flash",
+      "messages": messages,
+      "tools": tools
+    });
+
+    let resp = self
+      .client
+      .post("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+      .header("Authorization", format!("Bearer {}", self.api_key))
+      .json(&body)
+      .send()
+      .await?
+      .error_for_status()?
+      .json::<serde_json::Value>()
+      .await?;
+
+    let mut results = String::new();
+    if let Some(choices) = resp["choices"].as_array()
+      && let Some(message) = choices.first()
+    {
+      if let Some(tool_calls) = message["message"]["tool_calls"].as_array() {
+        for tc in tool_calls {
+          if tc["type"] == "web_search" {
+            // GLM sometimes returns search results in a specific format
+            if let Some(search_res) = tc["web_search"].as_array() {
+              for (i, res) in search_res.iter().enumerate() {
+                results.push_str(&format!(
+                  "{}. [{}]({})\n{}\n\n",
+                  i + 1,
+                  res["title"].as_str().unwrap_or("No Title"),
+                  res["link"].as_str().unwrap_or("#"),
+                  res["content"].as_str().unwrap_or("")
+                ));
+              }
+            }
+          }
+        }
+      }
+
+      if results.is_empty()
+        && let Some(content) = message["message"]["content"].as_str()
+      {
+        results.push_str(content);
+      }
+    }
+
+    Ok(results)
   }
 
   pub async fn call_api_with_params(

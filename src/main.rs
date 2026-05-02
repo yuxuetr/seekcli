@@ -74,11 +74,24 @@ impl App {
     let step_key = env::var("STEP_API_KEY").ok();
     let mineru_key = env::var("MINERU_API_KEY").ok();
     let jina_key = env::var("JINA_API_KEY").ok();
+    let tavily_key = env::var("TAVILY_API_KEY").ok();
 
-    let brain = ApiClient::new(deepseek_key, api::Provider::DeepSeek, jina_key.clone());
-    let vlm_sensor =
-      step_key.map(|key| ApiClient::new(key, api::Provider::StepFun, jina_key.clone()));
-    let doc_sensor = mineru_key.map(|key| ApiClient::new(key, api::Provider::MinerU, jina_key));
+    let brain = ApiClient::new(
+      deepseek_key,
+      api::Provider::DeepSeek,
+      jina_key.clone(),
+      tavily_key.clone(),
+    );
+    let vlm_sensor = step_key.map(|key| {
+      ApiClient::new(
+        key,
+        api::Provider::StepFun,
+        jina_key.clone(),
+        tavily_key.clone(),
+      )
+    });
+    let doc_sensor =
+      mineru_key.map(|key| ApiClient::new(key, api::Provider::MinerU, jina_key, tavily_key));
 
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
@@ -110,6 +123,8 @@ impl App {
     println!("  /image              VLM analyze image from clipboard (StepFun powered)");
     println!("  /file <path>        MinerU parse file to markdown context");
     println!("  /web <url>          Fetch and parse web page content");
+    println!("  /search <query>     GLM Web Search");
+    println!("  /tavily <query>     Tavily AI Search");
     println!("  /copy [index]       Copy code block from last response");
     println!("  /clear              Reset context (start a new 1M session)");
     println!("  /history            List sessions");
@@ -479,6 +494,52 @@ impl App {
           println!("{} Usage: /web <url>", "Info:".blue());
         }
       }
+      "/search" => {
+        if parts.len() > 1 {
+          let query = parts[1];
+          println!("{} GLM Searching: {}...", "✦".cyan(), query);
+          match self.brain.glm_web_search(query).await {
+            Ok(res) => {
+              println!(
+                "\n{}",
+                "┏━━━━━━━━━━━━━━━━━━━━━ GLM 搜索结果 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+              );
+              let skin = termimad::MadSkin::default();
+              skin.print_text(&res);
+              println!(
+                "{}",
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+              );
+            }
+            Err(e) => println!("{} GLM Search failed: {}", "Error:".red(), e),
+          }
+        } else {
+          println!("{} Usage: /search <query>", "Info:".blue());
+        }
+      }
+      "/tavily" => {
+        if parts.len() > 1 {
+          let query = parts[1];
+          println!("{} Tavily Searching: {}...", "✦".cyan(), query);
+          match self.brain.tavily_search(query).await {
+            Ok(res) => {
+              println!(
+                "\n{}",
+                "┏━━━━━━━━━━━━━━━━━━━━━ Tavily 搜索结果 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+              );
+              let skin = termimad::MadSkin::default();
+              skin.print_text(&res);
+              println!(
+                "{}",
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+              );
+            }
+            Err(e) => println!("{} Tavily Search failed: {}", "Error:".red(), e),
+          }
+        } else {
+          println!("{} Usage: /tavily <query>", "Info:".blue());
+        }
+      }
       "/help" => self.print_help(),
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
@@ -607,6 +668,35 @@ impl App {
           }
           Err(e) => {
             println!("{} Failed to analyze clipboard: {}", "Error:".red(), e);
+          }
+        }
+        continue;
+      }
+
+      if path_str == "search" {
+        match self.brain.glm_web_search(content).await {
+          Ok(res) => {
+            file_context.push_str(&format!("\n\n--- CONTENT FROM GLM SEARCH ---\n{}\n", res));
+            println!("{} Injected GLM search results.", "Success:".green());
+          }
+          Err(e) => {
+            println!("{} GLM Search failed: {}", "Error:".red(), e);
+          }
+        }
+        continue;
+      }
+
+      if path_str == "tavily" {
+        match self.brain.tavily_search(content).await {
+          Ok(res) => {
+            file_context.push_str(&format!(
+              "\n\n--- CONTENT FROM TAVILY SEARCH ---\n{}\n",
+              res
+            ));
+            println!("{} Injected Tavily search results.", "Success:".green());
+          }
+          Err(e) => {
+            println!("{} Tavily Search failed: {}", "Error:".red(), e);
           }
         }
         continue;
