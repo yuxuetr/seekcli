@@ -414,7 +414,17 @@ impl App {
   }
 
   async fn handle_command(&mut self, line: &str) -> Result<bool> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
+    let re_args = Regex::new(r#""([^"]*)"|'([^']*)'|(\S+)"#)?;
+    let mut parts = Vec::new();
+    for cap in re_args.captures_iter(line) {
+      if let Some(m) = cap.get(1).or(cap.get(2)).or(cap.get(3)) {
+        parts.push(m.as_str());
+      }
+    }
+
+    if parts.is_empty() {
+      return Ok(false);
+    }
     let cmd = parts[0];
 
     match cmd {
@@ -427,7 +437,8 @@ impl App {
       },
       "/file" => {
         if parts.len() > 1 {
-          let path = std::path::PathBuf::from(parts[1]);
+          let path_str = parts[1];
+          let path = std::path::PathBuf::from(path_str);
           if path.exists() {
             match self.analyze_complex_file(path.clone()).await {
               Ok(_) => {
@@ -436,7 +447,7 @@ impl App {
               Err(e) => println!("{} Failed to analyze file: {}", "Error:".red(), e),
             }
           } else {
-            println!("{} File not found: {:?}", "Error:".red(), path);
+            println!("{} File not found: {:?}", "Error:".red(), path_str);
           }
         } else {
           println!("{} Usage: /file <path>", "Info:".blue());
@@ -491,7 +502,7 @@ impl App {
             _ => self.thinking_mode,
           };
         }
-        println!("Thinking: {}", self.thinking_mode.label().magenta());
+        println!("Thinking: {:?}", self.thinking_mode);
       }
       "/history" => {
         let sessions = self.history.list_sessions()?;
@@ -549,10 +560,16 @@ impl App {
 
   async fn chat(&mut self, content: &str) -> Result<()> {
     let mut file_context = String::new();
-    let re_file = Regex::new(r"@([^\s]+)")?;
+    let re_file = Regex::new(r#"@(?:"([^"]+)"|'([^']*)'|([^\s]+))"#)?;
 
     for cap in re_file.captures_iter(content) {
-      let path_str = &cap[1];
+      let path_str = cap
+        .get(1)
+        .or(cap.get(2))
+        .or(cap.get(3))
+        .map(|m| m.as_str())
+        .unwrap_or("");
+
       if path_str == "image" || path_str == "img" || path_str == "paste" || path_str == "clipboard"
       {
         match self.paste_image().await {
