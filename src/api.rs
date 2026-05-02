@@ -397,6 +397,19 @@ impl ApiClient {
     Ok(resp.text().await?)
   }
 
+  pub async fn fetch_web_markdown(&self, url: &str) -> Result<String> {
+    let jina_url = format!("https://r.jina.ai/{}", url);
+    let resp = self
+      .client
+      .get(&jina_url)
+      .header("X-With-Generated-Alt", "true") // Optional: ask Jina to generate alt text for images
+      .send()
+      .await?
+      .error_for_status()?;
+
+    Ok(resp.text().await?)
+  }
+
   pub async fn call_api_with_params(
     &self,
     model: &str,

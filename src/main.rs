@@ -107,6 +107,7 @@ impl App {
     println!("  /skill auto [on|off] Toggle auto-routing");
     println!("  /image              VLM analyze image from clipboard (StepFun powered)");
     println!("  /file <path>        MinerU parse file to markdown context");
+    println!("  /web <url>          Fetch and parse web page content");
     println!("  /copy [index]       Copy code block from last response");
     println!("  /clear              Reset context (start a new 1M session)");
     println!("  /history            List sessions");
@@ -453,6 +454,29 @@ impl App {
           println!("{} Usage: /file <path>", "Info:".blue());
         }
       }
+      "/web" => {
+        if parts.len() > 1 {
+          let url = parts[1];
+          println!("{} Fetching web content from: {}...", "✦".cyan(), url);
+          match self.brain.fetch_web_markdown(url).await {
+            Ok(md) => {
+              println!(
+                "\n{}",
+                "┏━━━━━━━━━━━━━━━━━━━━━ 网页解析预览 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+              );
+              let skin = termimad::MadSkin::default();
+              skin.print_text(&md);
+              println!(
+                "{}",
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+              );
+            }
+            Err(e) => println!("{} Failed to fetch web content: {}", "Error:".red(), e),
+          }
+        } else {
+          println!("{} Usage: /web <url>", "Info:".blue());
+        }
+      }
       "/help" => self.print_help(),
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
@@ -581,6 +605,22 @@ impl App {
           }
           Err(e) => {
             println!("{} Failed to analyze clipboard: {}", "Error:".red(), e);
+          }
+        }
+        continue;
+      }
+
+      if path_str.starts_with("http://") || path_str.starts_with("https://") {
+        match self.brain.fetch_web_markdown(path_str).await {
+          Ok(md) => {
+            file_context.push_str(&format!(
+              "\n\n--- CONTENT FROM WEB: {} ---\n{}\n",
+              path_str, md
+            ));
+            println!("{} Injected web content: {}", "Success:".green(), path_str);
+          }
+          Err(e) => {
+            println!("{} Failed to fetch web content: {}", "Error:".red(), e);
           }
         }
         continue;
