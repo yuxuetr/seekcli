@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 #[cfg(target_os = "macos")]
 use base64::Engine;
+use clap::{Parser, Subcommand};
 use colored::*;
 use futures_util::StreamExt;
 use regex::Regex;
@@ -933,8 +934,106 @@ impl App {
   }
 }
 
+#[derive(Parser)]
+#[command(author, version, about = "DeepSeek V4 Powered CLI with Multi-modal Sensors", long_about = None)]
+struct Cli {
+  #[command(subcommand)]
+  command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+  /// VLM analyze image from clipboard
+  Image,
+  /// MinerU parse file to markdown context
+  File { path: String },
+  /// Fetch and parse web page content
+  Web { url: String },
+  /// GLM Web Search
+  Search { query: String },
+  /// Tavily AI Search
+  Tavily { query: String },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+  let cli = Cli::parse();
   let mut app = App::new()?;
+
+  if let Some(cmd) = cli.command {
+    match cmd {
+      Commands::Image => {
+        app.paste_image().await?;
+      }
+      Commands::File { path } => {
+        let p = std::path::PathBuf::from(path);
+        if p.exists() {
+          app.analyze_complex_file(p).await?;
+        } else {
+          println!("{} File not found: {:?}", "Error:".red(), p);
+        }
+      }
+      Commands::Web { url } => {
+        println!("{} Fetching web content from: {}...", "✦".cyan(), url);
+        match app.brain.fetch_web_markdown(&url).await {
+          Ok(md) => {
+            println!(
+              "\n{}",
+              "┏━━━━━━━━━━━━━━━━━━━━━ 网页解析预览 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+            );
+            let skin = termimad::MadSkin::default();
+            skin.print_text(&md);
+            println!(
+              "{}",
+              "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+            );
+          }
+          Err(e) => println!("{} Failed to fetch web content: {}", "Error:".red(), e),
+        }
+      }
+      Commands::Search { query } => {
+        if let Some(ref glm) = app.glm_sensor {
+          println!("{} GLM Searching: {}...", "✦".cyan(), query);
+          match glm.glm_web_search(&query).await {
+            Ok(res) => {
+              println!(
+                "\n{}",
+                "┏━━━━━━━━━━━━━━━━━━━━━ GLM 搜索结果 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+              );
+              let skin = termimad::MadSkin::default();
+              skin.print_text(&res);
+              println!(
+                "{}",
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+              );
+            }
+            Err(e) => println!("{} GLM Search failed: {}", "Error:".red(), e),
+          }
+        } else {
+          println!("{} ZHIPU_API_KEY not set.", "Error:".red());
+        }
+      }
+      Commands::Tavily { query } => {
+        println!("{} Tavily Searching: {}...", "✦".cyan(), query);
+        match app.brain.tavily_search(&query).await {
+          Ok(res) => {
+            println!(
+              "\n{}",
+              "┏━━━━━━━━━━━━━━━━━━━━━ Tavily 搜索结果 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+            );
+            let skin = termimad::MadSkin::default();
+            skin.print_text(&res);
+            println!(
+              "{}",
+              "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+            );
+          }
+          Err(e) => println!("{} Tavily Search failed: {}", "Error:".red(), e),
+        }
+      }
+    }
+    return Ok(());
+  }
+
   app.run().await
 }
