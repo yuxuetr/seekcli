@@ -331,7 +331,7 @@ impl App {
     }
   }
 
-  async fn paste_image(&mut self) -> Result<()> {
+  async fn paste_image(&mut self) -> Result<String> {
     println!("{} Accessing clipboard...", "✦".yellow());
 
     #[cfg(target_os = "macos")]
@@ -347,19 +347,7 @@ impl App {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ["png", "jpg", "jpeg", "webp", "bmp"].contains(&ext.to_lowercase().as_str()) {
               println!("{} Detected image path in clipboard.", "✦".yellow());
-              match self.analyze_complex_file(path.clone()).await {
-                Ok(content) => {
-                  self
-                    .current_session
-                    .messages
-                    .push(Message::new_user_text(format!(
-                      "--- OCR RESULT FROM CLIPBOARD IMAGE ({:?}) ---\n{}\n",
-                      path, content
-                    )));
-                  return Ok(());
-                }
-                Err(e) => println!("{} OCR failed: {}", "Error:".red(), e),
-              }
+              return self.analyze_complex_file(path.clone()).await;
             }
           }
         }
@@ -387,6 +375,7 @@ impl App {
         .arg("-e")
         .arg(&script)
         .output();
+
       // Implementation of VLM analysis for /paste
       if let Some(ref vlm) = self.vlm_sensor {
         println!(
@@ -416,22 +405,11 @@ impl App {
           }
         }
         println!("\n{} VLM analysis completed.", "Success:".green());
-        self
-          .current_session
-          .messages
-          .push(Message::new_user_text(format!(
-            "[图像分析结果]: {}",
-            description
-          )));
-        return Ok(());
+        return Ok(description);
       }
     }
 
-    println!(
-      "{} No image or supported path found in clipboard.",
-      "Info:".blue()
-    );
-    Ok(())
+    anyhow::bail!("No image or supported path found in clipboard, or not on macOS.")
   }
 
   async fn handle_command(&mut self, line: &str) -> Result<bool> {
@@ -440,11 +418,15 @@ impl App {
 
     match cmd {
       "/quit" | "/exit" => return Ok(true),
-      "/paste" => {
-        if let Err(e) = self.paste_image().await {
-          println!("{} Failed to analyze clipboard: {}", "Error:".red(), e);
+      "/paste" => match self.paste_image().await {
+        Ok(desc) => {
+          self
+            .current_session
+            .messages
+            .push(Message::new_user_text(format!("[图像分析结果]: {}", desc)));
         }
-      }
+        Err(e) => println!("{} Failed to analyze clipboard: {}", "Error:".red(), e),
+      },
       "/help" => self.print_help(),
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
@@ -556,6 +538,21 @@ impl App {
 
     for cap in re_file.captures_iter(content) {
       let path_str = &cap[1];
+      if path_str == "paste" || path_str == "clipboard" {
+        match self.paste_image().await {
+          Ok(desc) => {
+            file_context.push_str(&format!(
+              "\n\n--- CONTENT FROM CLIPBOARD IMAGE ---\n{}\n",
+              desc
+            ));
+          }
+          Err(e) => {
+            println!("{} Failed to analyze clipboard: {}", "Error:".red(), e);
+          }
+        }
+        continue;
+      }
+
       let path = std::path::PathBuf::from(path_str);
       if path.exists() && path.is_file() {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
