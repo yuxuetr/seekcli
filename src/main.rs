@@ -105,7 +105,8 @@ impl App {
     println!("  /thinking [n|h|m]   Switch thinking intensity");
     println!("  /skill list         List all skills");
     println!("  /skill auto [on|off] Toggle auto-routing");
-    println!("  /paste              VLM analyze image from clipboard (StepFun powered)");
+    println!("  /image              VLM analyze image from clipboard (StepFun powered)");
+    println!("  /file <path>        MinerU parse file to markdown context");
     println!("  /copy [index]       Copy code block from last response");
     println!("  /clear              Reset context (start a new 1M session)");
     println!("  /history            List sessions");
@@ -418,15 +419,46 @@ impl App {
 
     match cmd {
       "/quit" | "/exit" => return Ok(true),
-      "/paste" => match self.paste_image().await {
+      "/image" | "/paste" => match self.paste_image().await {
         Ok(desc) => {
           self
             .current_session
             .messages
             .push(Message::new_user_text(format!("[图像分析结果]: {}", desc)));
+          println!(
+            "{} Image analysis added to session context.",
+            "Success:".green()
+          );
         }
         Err(e) => println!("{} Failed to analyze clipboard: {}", "Error:".red(), e),
       },
+      "/file" => {
+        if parts.len() > 1 {
+          let path = std::path::PathBuf::from(parts[1]);
+          if path.exists() {
+            match self.analyze_complex_file(path.clone()).await {
+              Ok(content) => {
+                self
+                  .current_session
+                  .messages
+                  .push(Message::new_user_text(format!(
+                    "--- CONTENT FROM FILE: {:?} ---\n{}\n",
+                    path, content
+                  )));
+                println!(
+                  "{} File content added to session context.",
+                  "Success:".green()
+                );
+              }
+              Err(e) => println!("{} Failed to analyze file: {}", "Error:".red(), e),
+            }
+          } else {
+            println!("{} File not found: {:?}", "Error:".red(), path);
+          }
+        } else {
+          println!("{} Usage: /file <path>", "Info:".blue());
+        }
+      }
       "/help" => self.print_help(),
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
