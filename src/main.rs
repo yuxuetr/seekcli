@@ -538,7 +538,8 @@ impl App {
 
     for cap in re_file.captures_iter(content) {
       let path_str = &cap[1];
-      if path_str == "paste" || path_str == "clipboard" {
+      if path_str == "image" || path_str == "img" || path_str == "paste" || path_str == "clipboard"
+      {
         match self.paste_image().await {
           Ok(desc) => {
             file_context.push_str(&format!(
