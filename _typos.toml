@@ -1,4 +1,6 @@
 [default.extend-words]
+PNGf = "PNGf"
+PN = "PN"
 
 [files]
 extend-exclude = ["CHANGELOG.md", "notebooks/*"]

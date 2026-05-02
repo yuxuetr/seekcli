@@ -1,53 +1,22 @@
-use anyhow::{Context, Result};
-use bytes::Bytes;
-use futures_util::Stream;
-use futures_util::StreamExt;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::pin::Pin;
 
-#[derive(Debug, Serialize, Clone)]
-pub struct ApiRequest {
-  pub model: String,
-  pub messages: Vec<Message>,
-  pub temperature: Option<f32>,
-  pub max_tokens: Option<u32>,
-  pub stream: bool,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub thinking: Option<ThinkingConfig>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub tools: Option<Vec<Tool>>,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct Tool {
-  #[serde(rename = "type")]
-  pub tool_type: String,
-  pub function: FunctionDefinition,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct FunctionDefinition {
-  pub name: String,
-  pub description: String,
-  pub parameters: serde_json::Value,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct ThinkingConfig {
-  #[serde(rename = "type")]
-  pub thinking_type: String,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub budget_tokens: Option<u32>,
-}
+use anyhow::{Context, Result};
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentPart {
-  Text { text: String },
-  ImageUrl { image_url: ImageUrl },
-  FileUrl { file_url: FileUrl },
+pub struct ContentPart {
+  #[serde(rename = "type")]
+  pub part_type: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub text: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub image_url: Option<ImageUrl>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file_url: Option<FileUrl>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -99,11 +68,27 @@ pub struct FunctionCall {
   pub arguments: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Tool {
+  #[serde(rename = "type")]
+  pub tool_type: String,
+  pub function: FunctionDefinition,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FunctionDefinition {
+  pub name: String,
+  pub description: String,
+  pub parameters: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
   DeepSeek,
   Zhipu,
   DashScope,
+  MinerU,
+  StepFun,
 }
 
 impl Provider {
@@ -112,14 +97,58 @@ impl Provider {
       Provider::DeepSeek => "https://api.deepseek.com/v1",
       Provider::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
       Provider::DashScope => "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      Provider::MinerU => "https://mineru.net/api/v4",
+      Provider::StepFun => "https://api.stepfun.com/v1",
     }
+  }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MineruResponse<T> {
+  pub code: i32,
+  pub data: Option<T>,
+  pub msg: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MineruBatchInfo {
+  pub batch_id: String,
+  pub file_urls: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MineruFileResult {
+  #[allow(dead_code)]
+  pub file_name: String,
+  pub state: String,
+  pub full_zip_url: Option<String>,
+  pub err_msg: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MineruBatchResult {
+  #[allow(dead_code)]
+  pub batch_id: String,
+  pub extract_result: Vec<MineruFileResult>,
+}
+
+pub struct MineruResult {
+  pub task_id: String,
+  pub state: String,
+  pub markdown_url: Option<String>,
+  pub err_msg: Option<String>,
+}
+
+impl MineruResult {
+  pub fn is_done(&self) -> bool {
+    self.state == "done"
   }
 }
 
 pub struct ApiClient {
   client: Client,
   api_key: String,
-  base_url: String,
+  pub base_url: String,
   _provider: Provider,
 }
 
@@ -148,16 +177,48 @@ impl Message {
     }
   }
 
-  pub fn new_user_image(text: String, base64_image: String) -> Self {
+  pub fn new_user_image(text: String, base64_image: String, mime_type: &str) -> Self {
     Self::Simple {
       role: "user".to_string(),
       content: MessageContent::Parts(vec![
-        ContentPart::ImageUrl {
-          image_url: ImageUrl {
-            url: format!("data:image/jpeg;base64,{}", base64_image),
-          },
+        ContentPart {
+          part_type: "text".to_string(),
+          text: Some(text),
+          image_url: None,
+          file_url: None,
         },
-        ContentPart::Text { text },
+        ContentPart {
+          part_type: "image_url".to_string(),
+          text: None,
+          image_url: Some(ImageUrl {
+            url: format!("data:{};base64,{}", mime_type, base64_image),
+          }),
+          file_url: None,
+        },
+      ]),
+      reasoning_content: None,
+      tool_calls: None,
+    }
+  }
+
+  pub fn new_user_file(text: String, base64_file: String, mime_type: &str) -> Self {
+    Self::Simple {
+      role: "user".to_string(),
+      content: MessageContent::Parts(vec![
+        ContentPart {
+          part_type: "file_url".to_string(),
+          text: None,
+          image_url: None,
+          file_url: Some(FileUrl {
+            url: format!("data:{};base64,{}", mime_type, base64_file),
+          }),
+        },
+        ContentPart {
+          part_type: "text".to_string(),
+          text: Some(text),
+          image_url: None,
+          file_url: None,
+        },
       ]),
       reasoning_content: None,
       tool_calls: None,
@@ -167,15 +228,19 @@ impl Message {
 
 impl ApiClient {
   pub fn new(api_key: String, provider: Provider) -> Self {
-    let base_url = match provider {
-      Provider::DeepSeek => std::env::var("DEEPSEEK_API_BASE")
-        .unwrap_or_else(|_| provider.default_base_url().to_string()),
-      Provider::Zhipu => {
-        std::env::var("ZHIPU_API_BASE").unwrap_or_else(|_| provider.default_base_url().to_string())
-      }
-      Provider::DashScope => std::env::var("DASHSCOPE_API_BASE")
-        .unwrap_or_else(|_| provider.default_base_url().to_string()),
-    };
+    let base_url =
+      match provider {
+        Provider::DeepSeek => std::env::var("DEEPSEEK_API_BASE")
+          .unwrap_or_else(|_| provider.default_base_url().to_string()),
+        Provider::Zhipu => std::env::var("ZHIPU_API_BASE")
+          .unwrap_or_else(|_| provider.default_base_url().to_string()),
+        Provider::DashScope => std::env::var("DASHSCOPE_API_BASE")
+          .unwrap_or_else(|_| provider.default_base_url().to_string()),
+        Provider::MinerU => std::env::var("MINERU_API_BASE")
+          .unwrap_or_else(|_| provider.default_base_url().to_string()),
+        Provider::StepFun => std::env::var("STEPFUN_API_BASE")
+          .unwrap_or_else(|_| provider.default_base_url().to_string()),
+      };
 
     let client = Client::builder()
       .no_proxy()
@@ -190,6 +255,148 @@ impl ApiClient {
     }
   }
 
+  pub async fn mineru_extract(&self, file_path: &std::path::Path) -> Result<String> {
+    let file_name = file_path
+      .file_name()
+      .and_then(|s| s.to_str())
+      .unwrap_or("file.pdf")
+      .to_string();
+
+    // 1. 获取上传 URL (V4 批量接口)
+    let body = serde_json::json!({
+        "files": [{
+            "name": file_name,
+        }],
+        "is_ocr": true,
+        "model_version": "vlm"
+    });
+
+    let resp = self
+      .client
+      .post(format!("{}/file-urls/batch", self.base_url))
+      .header("Authorization", format!("Bearer {}", self.api_key))
+      .json(&body)
+      .send()
+      .await?
+      .error_for_status()?
+      .json::<MineruResponse<MineruBatchInfo>>()
+      .await?;
+
+    if resp.code != 0 {
+      anyhow::bail!(
+        "MinerU Error ({}): {}",
+        resp.code,
+        resp.msg.unwrap_or_default()
+      );
+    }
+
+    let data = resp
+      .data
+      .context("MinerU returned success but no data field")?;
+    let batch_id = data.batch_id;
+    let upload_url = data
+      .file_urls
+      .first()
+      .context("No upload URL returned from MinerU")?;
+
+    // 2. 使用 PUT 上传原始二进制文件 (V4 要求不设 Content-Type)
+    let bytes = std::fs::read(file_path)?;
+    self
+      .client
+      .put(upload_url)
+      .body(bytes)
+      .send()
+      .await?
+      .error_for_status()?;
+
+    Ok(batch_id)
+  }
+
+  pub async fn mineru_get_result(&self, batch_id: &str) -> Result<MineruResult> {
+    let resp = self
+      .client
+      .get(format!(
+        "{}/extract-results/batch/{}",
+        self.base_url, batch_id
+      ))
+      .header("Authorization", format!("Bearer {}", self.api_key))
+      .send()
+      .await?
+      .error_for_status()?
+      .json::<MineruResponse<MineruBatchResult>>()
+      .await?;
+
+    if resp.code != 0 {
+      anyhow::bail!(
+        "MinerU Result Error ({}): {}",
+        resp.code,
+        resp.msg.unwrap_or_default()
+      );
+    }
+
+    let data = resp.data.context("MinerU result data missing")?;
+    let file_res = data
+      .extract_result
+      .first()
+      .context("No file result in batch")?;
+
+    Ok(MineruResult {
+      task_id: batch_id.to_string(),
+      state: file_res.state.clone(),
+      markdown_url: file_res.full_zip_url.clone(),
+      err_msg: file_res.err_msg.clone(),
+    })
+  }
+
+  pub async fn fetch_url_content(&self, url: &str) -> Result<String> {
+    let resp = self.client.get(url).send().await?.error_for_status()?;
+
+    if url.ends_with(".zip") {
+      let bytes = resp.bytes().await?;
+      let temp_dir = std::env::temp_dir();
+      let zip_path = temp_dir.join(format!("{}.zip", uuid::Uuid::new_v4()));
+      std::fs::write(&zip_path, bytes)?;
+
+      // 1. 先列出所有文件，找到以 full.md 结尾的路径
+      let list_output = std::process::Command::new("unzip")
+        .arg("-Z")
+        .arg("-1")
+        .arg(&zip_path)
+        .output()
+        .context("Failed to execute unzip -Z command.")?;
+
+      let file_list = String::from_utf8_lossy(&list_output.stdout);
+      let target_file = file_list
+        .lines()
+        .map(|s| s.trim())
+        .find(|s| s.ends_with("full.md"))
+        .context("Could not find 'full.md' in MinerU result ZIP.")?;
+
+      // 2. 提取找到的具体文件
+      let output = std::process::Command::new("unzip")
+        .arg("-p")
+        .arg(&zip_path)
+        .arg(target_file)
+        .output()
+        .context("Failed to execute unzip -p command.")?;
+
+      // 清理临时文件
+      let _ = std::fs::remove_file(&zip_path);
+
+      if !output.status.success() {
+        anyhow::bail!(
+          "Failed to extract {} from ZIP: {}",
+          target_file,
+          String::from_utf8_lossy(&output.stderr)
+        );
+      }
+
+      return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    Ok(resp.text().await?)
+  }
+
   pub async fn call_api_with_params(
     &self,
     model: &str,
@@ -197,147 +404,134 @@ impl ApiClient {
     thinking_mode: &str,
     tools: Option<Vec<Tool>>,
   ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamItem>> + Send>>> {
-    use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-    use serde_json::Value;
+    let mut body = serde_json::json!({
+      "model": model,
+      "messages": messages,
+      "stream": true,
+    });
 
-    let thinking = match thinking_mode {
-      "high" => Some(ThinkingConfig {
-        thinking_type: "enabled".to_string(),
-        budget_tokens: Some(4000),
-      }),
-      "max" => Some(ThinkingConfig {
-        thinking_type: "enabled".to_string(),
-        budget_tokens: Some(16000),
-      }),
-      _ => Some(ThinkingConfig {
-        thinking_type: "disabled".to_string(),
-        budget_tokens: None,
-      }),
-    };
+    if thinking_mode != "none" {
+      body["thinking"] = serde_json::json!({
+        "mode": thinking_mode,
+      });
+    }
 
-    let request = ApiRequest {
-      model: model.to_string(),
-      messages,
-      temperature: if thinking_mode != "none" {
-        None
-      } else {
-        Some(0.7)
-      },
-      max_tokens: Some(8192),
-      stream: true,
-      thinking,
-      tools,
-    };
+    if let Some(t) = tools {
+      body["tools"] = serde_json::json!(t);
+    }
 
     let resp = self
       .client
       .post(format!("{}/chat/completions", self.base_url))
-      .header(CONTENT_TYPE, "application/json")
-      .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-      .json(&request)
+      .header("Authorization", format!("Bearer {}", self.api_key))
+      .json(&body)
       .send()
-      .await
-      .context("API request failed")?;
+      .await?;
 
     if !resp.status().is_success() {
       let status = resp.status();
-      let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".into());
-      anyhow::bail!("API Error {}: {}", status, error_text);
+      let err_body = resp.text().await?;
+      anyhow::bail!("API Error {}: {}", status, err_body);
     }
 
-    let state = StreamState {
-      stream: Box::pin(resp.bytes_stream()),
+    let stream = resp.bytes_stream();
+    Ok(Box::pin(StreamState {
+      stream: Box::pin(stream),
       buffer: Vec::new(),
       pending: VecDeque::new(),
       finished: false,
-    };
+    }))
+  }
+}
 
-    let s = futures_util::stream::unfold(state, |mut state| async move {
-      if state.finished && state.pending.is_empty() {
-        return None;
-      }
+impl Stream for StreamState {
+  type Item = Result<StreamItem>;
 
-      loop {
-        if let Some(item) = state.pending.pop_front() {
-          return Some((item, state));
-        }
+  fn poll_next(
+    mut self: Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Option<Self::Item>> {
+    if let Some(item) = self.pending.pop_front() {
+      return std::task::Poll::Ready(Some(item));
+    }
 
-        if state.finished {
-          return None;
-        }
+    if self.finished {
+      return std::task::Poll::Ready(None);
+    }
 
-        match state.stream.next().await {
-          Some(Ok(chunk)) => {
-            state.buffer.extend_from_slice(&chunk);
-            while let Some(pos) = state.buffer.iter().position(|&b| b == b'\n') {
-              let line = state.buffer.drain(..=pos).collect::<Vec<u8>>();
-              let line_str = String::from_utf8_lossy(&line).trim().to_string();
+    while let std::task::Poll::Ready(maybe_bytes) = self.stream.poll_next_unpin(cx) {
+      match maybe_bytes {
+        Some(Ok(bytes)) => {
+          self.buffer.extend_from_slice(&bytes);
+          let mut start = 0;
+          while let Some(line_end) = self.buffer[start..].iter().position(|&b| b == b'\n') {
+            let line_pos = start + line_end;
+            let line = String::from_utf8_lossy(&self.buffer[start..line_pos]);
+            start = line_pos + 1;
 
-              if line_str.is_empty() {
-                continue;
+            if let Some(data) = line.strip_prefix("data: ") {
+              let data = data.trim();
+              if data == "[DONE]" {
+                self.finished = true;
+                break;
               }
-              if let Some(data) = line_str.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                  state.finished = true;
-                  state.pending.push_back(Ok(StreamItem::Finish(None)));
-                  break;
-                }
-                if let Ok(json) = serde_json::from_str::<Value>(data)
-                  && let Some(choice) = json.get("choices").and_then(|c| c.get(0))
+
+              if let Ok(val) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(choices) = val["choices"].as_array()
+                && let Some(choice) = choices.first()
+              {
+                let delta = &choice["delta"];
+
+                if let Some(reasoning) = delta["reasoning_content"].as_str()
+                  && !reasoning.is_empty()
                 {
-                  let fr = choice
-                    .get("finish_reason")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                  self
+                    .pending
+                    .push_back(Ok(StreamItem::Reasoning(reasoning.to_string())));
+                }
 
-                  if let Some(delta) = choice.get("delta") {
-                    if let Some(rc) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                      state
-                        .pending
-                        .push_back(Ok(StreamItem::Reasoning(rc.to_string())));
-                    }
-                    if let Some(tcs) = delta.get("tool_calls").and_then(|tc_val| {
-                      serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()).ok()
-                    }) {
-                      for tc in tcs {
-                        state.pending.push_back(Ok(StreamItem::ToolCall(tc)));
-                      }
-                    }
-                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                      state
-                        .pending
-                        .push_back(Ok(StreamItem::Content(content.to_string())));
+                if let Some(content) = delta["content"].as_str()
+                  && !content.is_empty()
+                {
+                  self
+                    .pending
+                    .push_back(Ok(StreamItem::Content(content.to_string())));
+                }
+
+                if let Some(tool_calls) = delta["tool_calls"].as_array() {
+                  for tc in tool_calls {
+                    if let Ok(tool_call) = serde_json::from_value::<ToolCall>(tc.clone()) {
+                      self.pending.push_back(Ok(StreamItem::ToolCall(tool_call)));
                     }
                   }
+                }
 
-                  if let Some(reason) = fr {
-                    state
-                      .pending
-                      .push_back(Ok(StreamItem::Finish(Some(reason))));
-                    state.finished = true;
-                    break;
-                  }
+                if let Some(finish_reason) = choice["finish_reason"].as_str() {
+                  self
+                    .pending
+                    .push_back(Ok(StreamItem::Finish(Some(finish_reason.to_string()))));
+                  self.finished = true;
                 }
               }
             }
-            if !state.pending.is_empty() {
-              continue;
-            }
           }
-          Some(Err(e)) => {
-            state.finished = true;
-            return Some((Err(anyhow::anyhow!(e)), state));
+          self.buffer.drain(..start);
+
+          if let Some(item) = self.pending.pop_front() {
+            return std::task::Poll::Ready(Some(item));
           }
-          None => {
-            state.finished = true;
-            if state.pending.is_empty() {
-              return None;
-            }
+          if self.finished {
+            return std::task::Poll::Ready(None);
           }
         }
+        Some(Err(e)) => return std::task::Poll::Ready(Some(Err(anyhow::Error::from(e)))),
+        None => {
+          self.finished = true;
+          return std::task::Poll::Ready(None);
+        }
       }
-    });
+    }
 
-    Ok(Box::pin(s))
+    std::task::Poll::Pending
   }
 }

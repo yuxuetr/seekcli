@@ -1,0 +1,6 @@
+[brain]
+flash_model = "deepseek-v4-flash"
+pro_model = "deepseek-v4-pro"
+
+[sensor]
+vlm_model = "step-1o-turbo-vision"

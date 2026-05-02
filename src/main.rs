@@ -10,6 +10,7 @@ use std::io::{self, Write};
 use termimad::MadSkin;
 
 mod api;
+mod config;
 mod history;
 mod skills;
 
@@ -17,6 +18,7 @@ mod skills;
 mod test;
 
 pub use api::{ApiClient, Message, StreamItem, ToolCall};
+pub use config::Config;
 pub use history::{HistoryManager, Session};
 pub use skills::{Skill, SkillManager};
 
@@ -46,7 +48,9 @@ impl ThinkingMode {
 
 struct App {
   brain: ApiClient,
-  sensor: Option<ApiClient>,
+  vlm_sensor: Option<ApiClient>,
+  doc_sensor: Option<ApiClient>,
+  config: Config,
   history: HistoryManager,
   skill_manager: SkillManager,
   current_session: Session,
@@ -59,23 +63,29 @@ struct App {
 
 impl App {
   fn new() -> Result<Self> {
+    let config = Config::load()?;
+
     let deepseek_key = env::var("DEEPSEEK_API_KEY")
       .or_else(|_| env::var("DASHSCOPE_API_KEY"))
       .context("Please set DEEPSEEK_API_KEY or DASHSCOPE_API_KEY")?;
 
-    let zhipu_key = env::var("ZHIPU_API_KEY").ok();
+    let step_key = env::var("STEP_API_KEY").ok();
+    let mineru_key = env::var("MINERU_API_KEY").ok();
 
     let brain = ApiClient::new(deepseek_key, api::Provider::DeepSeek);
-    let sensor = zhipu_key.map(|key| ApiClient::new(key, api::Provider::Zhipu));
+    let vlm_sensor = step_key.map(|key| ApiClient::new(key, api::Provider::StepFun));
+    let doc_sensor = mineru_key.map(|key| ApiClient::new(key, api::Provider::MinerU));
 
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
-    let model = "deepseek-v4-flash".to_string();
+    let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
 
     Ok(Self {
       brain,
-      sensor,
+      vlm_sensor,
+      doc_sensor,
+      config,
       history,
       skill_manager,
       current_session,
@@ -93,7 +103,7 @@ impl App {
     println!("  /thinking [n|h|m]   Switch thinking intensity");
     println!("  /skill list         List all skills");
     println!("  /skill auto [on|off] Toggle auto-routing");
-    println!("  /paste              Analyze image from clipboard (Sensor powered)");
+    println!("  /paste              VLM analyze image from clipboard (StepFun powered)");
     println!("  /copy [index]       Copy code block from last response");
     println!("  /clear              Reset context (start a new 1M session)");
     println!("  /history            List sessions");
@@ -130,7 +140,7 @@ impl App {
 
     let mut stream = self
       .brain
-      .call_api_with_params("deepseek-v4-flash", messages, "none", None)
+      .call_api_with_params(&self.config.brain.flash_model, messages, "none", None)
       .await?;
     let mut selected_name = String::new();
     while let Some(item) = stream.next().await {
@@ -153,7 +163,7 @@ impl App {
   async fn run(&mut self) -> Result<()> {
     println!(
       "{}",
-      "Welcome to SeekCLI (DeepSeek V4 1M Context Powered)"
+      format!("Welcome to SeekCLI (DeepSeek {} Powered)", self.model)
         .bold()
         .green()
     );
@@ -223,8 +233,6 @@ impl App {
 
   fn activate_skill(&mut self, skill: Skill) {
     self.current_skill = Some(skill.clone());
-    // Do NOT clear history, just inject the persona into the flow if starting new,
-    // or append if switching topics. For V4 1M, we keep it simple.
     if self.current_session.messages.is_empty() {
       self.current_session.messages.push(Message::Simple {
         role: "system".to_string(),
@@ -235,50 +243,98 @@ impl App {
     }
   }
 
-  async fn analyze_image_file(&mut self, path: std::path::PathBuf) -> Result<()> {
-    println!("{} Reading image from disk: {:?}...", "✦".yellow(), path);
-    let img = image::open(path)?;
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.to_rgb8().write_to(&mut buf, image::ImageFormat::Jpeg)?;
-    let base64_image = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+  async fn analyze_complex_file(&mut self, path: std::path::PathBuf) -> Result<String> {
+    let ext_lower = path
+      .extension()
+      .and_then(|e| e.to_str())
+      .unwrap_or("")
+      .to_lowercase();
+    let is_doc = [
+      "pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "webp", "bmp",
+    ]
+    .contains(&ext_lower.as_str());
 
-    if let Some(ref sensor) = self.sensor {
-      println!("{} Analyzing with Sensor (GLM-4.6V)...", "✦".yellow());
-      let messages = vec![Message::new_user_image(
-        "请详细描述这张图片的内容，包括文字、图表、布局和关键视觉信息。".to_string(),
-        base64_image,
-      )];
-
-      print!("{}", "Sensor Thinking: ".italic().bright_black());
-      let mut stream = sensor
-        .call_api_with_params("glm-4.6v-flash", messages, "none", None)
-        .await?;
-      let mut description = String::new();
-
-      while let Some(item) = stream.next().await {
-        if let Ok(StreamItem::Content(c)) = item {
-          print!("{}", c.italic().bright_black());
-          description.push_str(&c);
-        }
-      }
+    if is_doc && let Some(ref doc_sensor) = self.doc_sensor {
       println!(
-        "\n{} Image analysis completed and injected into context.",
-        "Success:".green()
+        "{} [MinerU] Extracting content from: {:?}...",
+        "✦".cyan(),
+        path
       );
-
-      self.current_session
-        .messages
-        .push(Message::new_user_text(format!("[图像分析结果]: {}", description)));
+      match doc_sensor.mineru_extract(&path).await {
+        Ok(task_id) => {
+          let mut attempts = 0;
+          print!("{} [MinerU] Processing: ", "✦".cyan());
+          loop {
+            attempts += 1;
+            match doc_sensor.mineru_get_result(&task_id).await {
+              Ok(res) if res.is_done() => {
+                if let Some(url) = res.markdown_url {
+                  let md = doc_sensor.fetch_url_content(&url).await?;
+                  println!(
+                    "\n{} High-fidelity extraction successful.",
+                    "Success:".green()
+                  );
+                  println!(
+                    "\n{}",
+                    "┏━━━━━━━━━━━━━━━━━━━━━ MinerU 解析预览 ━━━━━━━━━━━━━━━━━━━━━┓".cyan()
+                  );
+                  let skin = MadSkin::default();
+                  let preview = if md.len() > 1000 {
+                    format!("{}...", &md[..1000])
+                  } else {
+                    md.clone()
+                  };
+                  skin.print_text(&preview);
+                  println!(
+                    "{}",
+                    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛".cyan()
+                  );
+                  return Ok(md);
+                } else {
+                  anyhow::bail!("MinerU completed but returned no content URL.");
+                }
+              }
+              Ok(res) if res.state == "failed" => {
+                anyhow::bail!(
+                  "MinerU extraction failed: {}",
+                  res.err_msg.unwrap_or_default()
+                );
+              }
+              Ok(res) => {
+                let status = if !res.state.is_empty() {
+                  res.state
+                } else {
+                  "pending".to_string()
+                };
+                print!(
+                  "\r{} [MinerU] Status: {} ({}s) ",
+                  "✦".cyan(),
+                  status,
+                  attempts
+                );
+                io::stdout().flush()?;
+              }
+              Err(e) => anyhow::bail!("MinerU polling error: {}", e),
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if attempts > 300 {
+              anyhow::bail!("MinerU task timed out.");
+            }
+          }
+        }
+        Err(e) => anyhow::bail!("MinerU upload failed: {}", e),
+      }
+    } else {
+      anyhow::bail!("Unsupported file format or MinerU not configured.")
     }
-    Ok(())
   }
 
   async fn paste_image(&mut self) -> Result<()> {
     println!("{} Accessing clipboard...", "✦".yellow());
 
-    // 1. Try to read text (might be a file path) using pbpaste
     #[cfg(target_os = "macos")]
     {
+      // 1. Try pbpaste for file paths first
       let output = std::process::Command::new("pbpaste").output();
       if let Ok(out) = output {
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -287,19 +343,28 @@ impl App {
           let path = std::path::PathBuf::from(path_str);
           if path.exists() && path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ["png", "jpg", "jpeg", "webp"].contains(&ext.to_lowercase().as_str()) {
-              println!("{} Detected image path in clipboard text.", "✦".yellow());
-              return self.analyze_image_file(path).await;
+            if ["png", "jpg", "jpeg", "webp", "bmp"].contains(&ext.to_lowercase().as_str()) {
+              println!("{} Detected image path in clipboard.", "✦".yellow());
+              match self.analyze_complex_file(path.clone()).await {
+                Ok(content) => {
+                  self
+                    .current_session
+                    .messages
+                    .push(Message::new_user_text(format!(
+                      "--- OCR RESULT FROM CLIPBOARD IMAGE ({:?}) ---\n{}\n",
+                      path, content
+                    )));
+                  return Ok(());
+                }
+                Err(e) => println!("{} OCR failed: {}", "Error:".red(), e),
+              }
             }
           }
         }
       }
-    }
 
-    // 2. macOS specific: Try to save clipboard image to file using osascript
-    #[cfg(target_os = "macos")]
-    {
-      println!("{} Attempting macOS native clipboard capture...", "✦".yellow());
+      // 2. Use osascript to capture raw image to temp file then use GLM VLM for analysis as requested
+      println!("{} Capturing raw image from clipboard...", "✦".yellow());
       let temp_path = "/tmp/seekcli_paste.png";
       let script = format!(
         "set theFile to (POSIX file \"{}\")\n\
@@ -316,21 +381,54 @@ impl App {
         temp_path
       );
 
-      let output = std::process::Command::new("osascript")
+      let _output = std::process::Command::new("osascript")
         .arg("-e")
-        .arg(script)
+        .arg(&script)
         .output();
+      // Implementation of VLM analysis for /paste
+      if let Some(ref vlm) = self.vlm_sensor {
+        println!(
+          "{} [VLM] Using {} for visual analysis...",
+          "✦".yellow(),
+          self.config.sensor.vlm_model
+        );
+        let bytes = std::fs::read(temp_path)?;
+        let base64_image = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-      if let Ok(out) = output {
-        let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if result == "success" {
-          println!("{} Image saved via AppleScript.", "✦".yellow());
-          return self.analyze_image_file(std::path::PathBuf::from(temp_path)).await;
+        let messages = vec![Message::new_user_image(
+          "请详细分析这张图片的内容。".to_string(),
+          base64_image,
+          "image/png",
+        )];
+
+        print!("{}", "VLM Thinking: ".italic().bright_black());
+        let mut stream = vlm
+          .call_api_with_params(&self.config.sensor.vlm_model, messages, "none", None)
+          .await?;
+        let mut description = String::new();
+
+        while let Some(item) = stream.next().await {
+          if let StreamItem::Content(c) = item? {
+            print!("{}", c.italic().bright_black());
+            description.push_str(&c);
+          }
         }
+        println!("\n{} VLM analysis completed.", "Success:".green());
+        self
+          .current_session
+          .messages
+          .push(Message::new_user_text(format!(
+            "[图像分析结果]: {}",
+            description
+          )));
+        return Ok(());
       }
     }
 
-    println!("{} No image or supported path found in clipboard.", "Info:".blue());
+    println!(
+      "{} No image or supported path found in clipboard.",
+      "Info:".blue()
+    );
     Ok(())
   }
 
@@ -342,7 +440,7 @@ impl App {
       "/quit" | "/exit" => return Ok(true),
       "/paste" => {
         if let Err(e) = self.paste_image().await {
-          println!("{} Failed to paste image: {}", "Error:".red(), e);
+          println!("{} Failed to analyze clipboard: {}", "Error:".red(), e);
         }
       }
       "/help" => self.print_help(),
@@ -378,8 +476,8 @@ impl App {
       "/model" => {
         if parts.len() > 1 {
           self.model = match parts[1] {
-            "flash" => "deepseek-v4-flash".to_string(),
-            "pro" => "deepseek-v4-pro".to_string(),
+            "flash" => self.config.brain.flash_model.clone(),
+            "pro" => self.config.brain.pro_model.clone(),
             _ => self.model.clone(),
           };
         }
@@ -413,6 +511,7 @@ impl App {
               let code = &self.last_code_blocks[idx - 1];
               #[cfg(target_os = "macos")]
               {
+                use std::io::Write;
                 let mut child = std::process::Command::new("pbcopy")
                   .stdin(std::process::Stdio::piped())
                   .spawn()?;
@@ -450,38 +549,35 @@ impl App {
   }
 
   async fn chat(&mut self, content: &str) -> Result<()> {
-    // Phase 3: File Reference (@path) Parsing
-    let processed_content = content.to_string();
-    let re_file = Regex::new(r"@([^\s]+)")?;
     let mut file_context = String::new();
+    let re_file = Regex::new(r"@([^\s]+)")?;
 
     for cap in re_file.captures_iter(content) {
       let path_str = &cap[1];
       let path = std::path::PathBuf::from(path_str);
       if path.exists() && path.is_file() {
-        println!("{} Reading referenced file: {:?}...", "✦".yellow(), path);
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
         match ext.to_lowercase().as_str() {
-          "pdf" | "docx" | "pptx" | "xlsx" => {
-            // Future: Use GLM file sensor for complex documents
-            println!(
-              "{} Complex document detected. (GLM File Sense integration pending)",
-              "Info:".blue()
-            );
-            if let Ok(text) = std::fs::read_to_string(&path) {
-              file_context.push_str(&format!("\n\n--- FILE: {:?} ---\n{}\n", path, text));
+          "pdf" | "docx" | "pptx" | "xlsx" | "png" | "jpg" | "jpeg" | "webp" | "bmp" => {
+            match self.analyze_complex_file(path.clone()).await {
+              Ok(md) => {
+                file_context.push_str(&format!(
+                  "\n\n--- CONTENT FROM FILE: {:?} ---\n{}\n",
+                  path, md
+                ));
+              }
+              Err(e) => {
+                println!("{} Failed to parse {:?}: {}", "Error:".red(), path, e);
+              }
             }
           }
           _ => {
-            // Text files: Read directly for DeepSeek 1M context
             if let Ok(text) = std::fs::read_to_string(&path) {
-              file_context.push_str(&format!("\n\n--- FILE: {:?} ---\n{}\n", path, text));
-              println!(
-                "{} Injected {} bytes of text context.",
-                "Success:".green(),
-                text.len()
-              );
+              file_context.push_str(&format!(
+                "\n\n--- CONTENT FROM FILE: {:?} ---\n{}\n",
+                path, text
+              ));
+              println!("{} Injected file: {:?}", "Success:".green(), path);
             }
           }
         }
@@ -489,9 +585,9 @@ impl App {
     }
 
     let final_input = if file_context.is_empty() {
-      processed_content
+      content.to_string()
     } else {
-      format!("{}\n\nContext Files:{}", processed_content, file_context)
+      format!("{}\n\nContext Files:{}", content, file_context)
     };
 
     self.current_session.messages.push(Message::Simple {
@@ -503,7 +599,6 @@ impl App {
 
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
-    // V4 1M Context means we can send thousands of messages without trimming!
     let mut stream = self
       .brain
       .call_api_with_params(
@@ -550,21 +645,19 @@ impl App {
           if let Some(r) = reason
             && r == "length"
           {
-            println!("\n{}", "[Note: Max output limit reached. Single response capped at 8K tokens. Use '/continue' if needed.]".yellow());
+            println!("\n{}", "[Note: Max output limit reached.]".yellow());
           }
         }
       }
       io::stdout().flush()?;
     }
 
-    // Extract code blocks for the /copy command
     let re = Regex::new(r"```(?:[a-zA-Z0-9]*)\n([\s\S]*?)```")?;
     self.last_code_blocks = re
       .captures_iter(&assistant_content)
       .map(|cap| cap[1].to_string())
       .collect();
 
-    // Render formatted markdown with syntax highlighting and simplified copy instructions
     if !assistant_content.is_empty() {
       println!(
         "\n{}",
@@ -572,17 +665,12 @@ impl App {
           .blue()
           .bold()
       );
-
       let skin = MadSkin::default();
       let mut current_pos = 0;
       let mut block_idx = 0;
-
-      // Initialize syntect for syntax highlighting
       let ps = syntect::parsing::SyntaxSet::load_defaults_newlines();
       let ts = syntect::highlighting::ThemeSet::load_defaults();
       let theme = &ts.themes["base16-ocean.dark"];
-
-      // Improved Regex: Match backticks only at the START of a line (?m)^ to handle nested doc comments
       let block_re = Regex::new(r"(?m)^```([a-zA-Z0-9]*)\n([\s\S]*?)^```")?;
 
       for cap in block_re.captures_iter(&assistant_content) {
@@ -590,13 +678,11 @@ impl App {
         let lang = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         let code_content = cap.get(2).unwrap().as_str();
 
-        // 1. Print preceding text
         let pre_text = &assistant_content[current_pos..entire_match.start()];
         if !pre_text.trim().is_empty() {
           skin.print_text(pre_text);
         }
 
-        // 2. Print syntax-highlighted code block
         block_idx += 1;
         let block_title = if lang.is_empty() {
           "CODE".to_string()
@@ -608,21 +694,17 @@ impl App {
           format!(" ── {} Block [{}] ──", block_title, block_idx).dimmed()
         );
 
-        // Use syntect for syntax highlighting
         let syntax = ps
           .find_syntax_by_token(lang)
           .unwrap_or_else(|| ps.find_syntax_plain_text());
         let mut h = syntect::easy::HighlightLines::new(syntax, theme);
-
         for line in syntect::util::LinesWithEndings::from(code_content) {
           let ranges: Vec<(syntect::highlighting::Style, &str)> =
             h.highlight_line(line, &ps).unwrap_or_default();
           let escaped = syntect::util::as_24_bit_terminal_escaped(&ranges[..], false);
           print!("{}", escaped);
         }
-        println!("\x1b[0m"); // Reset ANSI colors
-
-        // Simplified copy instruction as requested
+        println!("\x1b[0m");
         println!(
           "{}",
           format!("复制代码请使用: /copy {}", block_idx)
@@ -630,15 +712,12 @@ impl App {
             .italic()
         );
         println!();
-
         current_pos = entire_match.end();
       }
 
-      // 3. Print remaining text
       if current_pos < assistant_content.len() {
         skin.print_text(&assistant_content[current_pos..]);
       }
-
       println!(
         "{}",
         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
