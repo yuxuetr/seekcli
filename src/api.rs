@@ -466,24 +466,18 @@ impl ApiClient {
   }
 
   pub async fn glm_web_search(&self, query: &str) -> Result<String> {
-    let messages = vec![Message::new_user_text(query.to_string())];
-    let tools = vec![serde_json::json!({
-        "type": "web_search",
-        "web_search": {
-            "enable": true,
-            "search_result": true
-        }
-    })];
-
     let body = serde_json::json!({
-      "model": "glm-4-flash",
-      "messages": messages,
-      "tools": tools
+        "search_query": query,
+        "search_engine": "search_std",
+        "search_intent": false,
+        "count": 10,
+        "search_recency_filter": "noLimit",
+        "content_size": "medium"
     });
 
     let resp = self
       .client
-      .post("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+      .post("https://open.bigmodel.cn/api/paas/v4/web_search")
       .header("Authorization", format!("Bearer {}", self.api_key))
       .json(&body)
       .send()
@@ -493,33 +487,20 @@ impl ApiClient {
       .await?;
 
     let mut results = String::new();
-    if let Some(choices) = resp["choices"].as_array()
-      && let Some(message) = choices.first()
-    {
-      if let Some(tool_calls) = message["message"]["tool_calls"].as_array() {
-        for tc in tool_calls {
-          if tc["type"] == "web_search" {
-            // GLM sometimes returns search results in a specific format
-            if let Some(search_res) = tc["web_search"].as_array() {
-              for (i, res) in search_res.iter().enumerate() {
-                results.push_str(&format!(
-                  "{}. [{}]({})\n{}\n\n",
-                  i + 1,
-                  res["title"].as_str().unwrap_or("No Title"),
-                  res["link"].as_str().unwrap_or("#"),
-                  res["content"].as_str().unwrap_or("")
-                ));
-              }
-            }
-          }
-        }
+    if let Some(list) = resp["list"].as_array() {
+      for (i, res) in list.iter().enumerate() {
+        results.push_str(&format!(
+          "{}. [{}]({})\n{}\n\n",
+          i + 1,
+          res["title"].as_str().unwrap_or("No Title"),
+          res["link"].as_str().unwrap_or("#"),
+          res["content"].as_str().unwrap_or("")
+        ));
       }
+    }
 
-      if results.is_empty()
-        && let Some(content) = message["message"]["content"].as_str()
-      {
-        results.push_str(content);
-      }
+    if results.is_empty() {
+      results.push_str("No search results found.");
     }
 
     Ok(results)
