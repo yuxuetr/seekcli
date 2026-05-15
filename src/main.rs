@@ -15,6 +15,8 @@ mod api;
 mod config;
 mod history;
 mod skills;
+#[allow(dead_code)]
+mod tools;
 
 #[cfg(test)]
 mod test;
