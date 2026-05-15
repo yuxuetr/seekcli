@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 pub mod fs;
+pub mod meta;
 pub mod shell;
 
 pub struct ToolDispatcher;
@@ -19,6 +20,7 @@ impl ToolDispatcher {
       "write_file" => fs::write_file(&args).await,
       "list_dir" => fs::list_dir(&args).await,
       "run_shell" => shell::run_shell(&args).await,
+      "create_skill" => meta::create_skill(&args).await,
       _ => anyhow::bail!("Unknown tool: {}", name),
     }
   }
