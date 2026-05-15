@@ -785,147 +785,172 @@ impl App {
 
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
-    let mut stream = self
-      .brain
-      .call_api_with_params(
-        &self.model,
-        self.current_session.messages.clone(),
-        self.thinking_mode.as_str(),
-        tools,
-      )
-      .await?;
+    let tool_dispatcher = tools::ToolDispatcher::new();
+    let code_blocks_re = Regex::new(r"```(?:[a-zA-Z0-9]*)\n([\s\S]*?)```")?;
+    let block_re = Regex::new(r"(?m)^```([a-zA-Z0-9]*)\n([\s\S]*?)^```")?;
 
-    let mut assistant_content = String::new();
-    let mut assistant_reasoning = String::new();
-    let mut tool_calls = Vec::new();
-    let mut is_reasoning = false;
+    loop {
+      let mut stream = self
+        .brain
+        .call_api_with_params(
+          &self.model,
+          self.current_session.messages.clone(),
+          self.thinking_mode.as_str(),
+          tools.clone(),
+        )
+        .await?;
 
-    while let Some(item) = stream.next().await {
-      match item? {
-        StreamItem::Reasoning(r) => {
-          if !is_reasoning {
-            print!("\n{}", "Thinking: ".italic().bright_black());
-            is_reasoning = true;
+      let mut assistant_content = String::new();
+      let mut assistant_reasoning = String::new();
+      let mut tool_calls = Vec::new();
+      let mut is_reasoning = false;
+
+      while let Some(item) = stream.next().await {
+        match item? {
+          StreamItem::Reasoning(r) => {
+            if !is_reasoning {
+              print!("\n{}", "Thinking: ".italic().bright_black());
+              is_reasoning = true;
+            }
+            print!("{}", r.italic().bright_black());
+            assistant_reasoning.push_str(&r);
           }
-          print!("{}", r.italic().bright_black());
-          assistant_reasoning.push_str(&r);
-        }
-        StreamItem::Content(c) => {
-          if is_reasoning {
+          StreamItem::Content(c) => {
+            if is_reasoning {
+              println!();
+              is_reasoning = false;
+            }
+            print!("{}", c);
+            assistant_content.push_str(&c);
+          }
+          StreamItem::ToolCall(tc) => {
+            println!(
+              "\n{} Called: {}",
+              "Agent:".cyan(),
+              tc.function.name.yellow()
+            );
+            tool_calls.push(tc);
+          }
+          StreamItem::Finish(reason) => {
             println!();
-            is_reasoning = false;
+            if let Some(r) = reason
+              && r == "length"
+            {
+              println!("\n{}", "[Note: Max output limit reached.]".yellow());
+            }
           }
-          print!("{}", c);
-          assistant_content.push_str(&c);
         }
-        StreamItem::ToolCall(tc) => {
+        io::stdout().flush()?;
+      }
+
+      self.last_code_blocks = code_blocks_re
+        .captures_iter(&assistant_content)
+        .map(|cap| cap[1].to_string())
+        .collect();
+
+      if !assistant_content.is_empty() {
+        println!(
+          "\n{}",
+          "┏━━━━━━━━━━━━━━━━━━━━━ 智能渲染视图 ━━━━━━━━━━━━━━━━━━━━━┓"
+            .blue()
+            .bold()
+        );
+        let skin = MadSkin::default();
+        let mut current_pos = 0;
+        let mut block_idx = 0;
+        let ps = syntect::parsing::SyntaxSet::load_defaults_newlines();
+        let ts = syntect::highlighting::ThemeSet::load_defaults();
+        let theme = &ts.themes["base16-ocean.dark"];
+
+        for cap in block_re.captures_iter(&assistant_content) {
+          let entire_match = cap.get(0).unwrap();
+          let lang = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+          let code_content = cap.get(2).unwrap().as_str();
+
+          let pre_text = &assistant_content[current_pos..entire_match.start()];
+          if !pre_text.trim().is_empty() {
+            skin.print_text(pre_text);
+          }
+
+          block_idx += 1;
+          let block_title = if lang.is_empty() {
+            "CODE".to_string()
+          } else {
+            lang.to_uppercase()
+          };
           println!(
-            "\n{} Called: {}",
-            "Skill:".yellow(),
-            tc.function.name.cyan()
+            "{}",
+            format!(" ── {} Block [{}] ──", block_title, block_idx).dimmed()
           );
-          tool_calls.push(tc);
-        }
-        StreamItem::Finish(reason) => {
-          println!();
-          if let Some(r) = reason
-            && r == "length"
-          {
-            println!("\n{}", "[Note: Max output limit reached.]".yellow());
+
+          let syntax = ps
+            .find_syntax_by_token(lang)
+            .unwrap_or_else(|| ps.find_syntax_plain_text());
+          let mut h = syntect::easy::HighlightLines::new(syntax, theme);
+          for line in syntect::util::LinesWithEndings::from(code_content) {
+            let ranges: Vec<(syntect::highlighting::Style, &str)> =
+              h.highlight_line(line, &ps).unwrap_or_default();
+            let escaped = syntect::util::as_24_bit_terminal_escaped(&ranges[..], false);
+            print!("{}", escaped);
           }
+          println!("\x1b[0m");
+          println!(
+            "{}",
+            format!("复制代码请使用: /copy {}", block_idx)
+              .bright_black()
+              .italic()
+          );
+          println!();
+          current_pos = entire_match.end();
         }
+
+        if current_pos < assistant_content.len() {
+          skin.print_text(&assistant_content[current_pos..]);
+        }
+        println!(
+          "{}",
+          "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+            .blue()
+            .bold()
+        );
       }
-      io::stdout().flush()?;
-    }
 
-    let re = Regex::new(r"```(?:[a-zA-Z0-9]*)\n([\s\S]*?)```")?;
-    self.last_code_blocks = re
-      .captures_iter(&assistant_content)
-      .map(|cap| cap[1].to_string())
-      .collect();
-
-    if !assistant_content.is_empty() {
-      println!(
-        "\n{}",
-        "┏━━━━━━━━━━━━━━━━━━━━━ 智能渲染视图 ━━━━━━━━━━━━━━━━━━━━━┓"
-          .blue()
-          .bold()
-      );
-      let skin = MadSkin::default();
-      let mut current_pos = 0;
-      let mut block_idx = 0;
-      let ps = syntect::parsing::SyntaxSet::load_defaults_newlines();
-      let ts = syntect::highlighting::ThemeSet::load_defaults();
-      let theme = &ts.themes["base16-ocean.dark"];
-      let block_re = Regex::new(r"(?m)^```([a-zA-Z0-9]*)\n([\s\S]*?)^```")?;
-
-      for cap in block_re.captures_iter(&assistant_content) {
-        let entire_match = cap.get(0).unwrap();
-        let lang = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let code_content = cap.get(2).unwrap().as_str();
-
-        let pre_text = &assistant_content[current_pos..entire_match.start()];
-        if !pre_text.trim().is_empty() {
-          skin.print_text(pre_text);
-        }
-
-        block_idx += 1;
-        let block_title = if lang.is_empty() {
-          "CODE".to_string()
+      self.current_session.messages.push(Message::Simple {
+        role: "assistant".to_string(),
+        content: api::MessageContent::Text(assistant_content),
+        reasoning_content: if assistant_reasoning.is_empty() {
+          None
         } else {
-          lang.to_uppercase()
+          Some(assistant_reasoning)
+        },
+        tool_calls: if tool_calls.is_empty() {
+          None
+        } else {
+          Some(tool_calls.clone())
+        },
+      });
+
+      if tool_calls.is_empty() {
+        break;
+      }
+
+      println!("\n{} Executing tools...", "Agent:".cyan());
+      for tc in tool_calls {
+        let result_str = match tool_dispatcher
+          .execute(&tc.function.name, &tc.function.arguments)
+          .await
+        {
+          Ok(res) => res,
+          Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
         };
-        println!(
-          "{}",
-          format!(" ── {} Block [{}] ──", block_title, block_idx).dimmed()
-        );
-
-        let syntax = ps
-          .find_syntax_by_token(lang)
-          .unwrap_or_else(|| ps.find_syntax_plain_text());
-        let mut h = syntect::easy::HighlightLines::new(syntax, theme);
-        for line in syntect::util::LinesWithEndings::from(code_content) {
-          let ranges: Vec<(syntect::highlighting::Style, &str)> =
-            h.highlight_line(line, &ps).unwrap_or_default();
-          let escaped = syntect::util::as_24_bit_terminal_escaped(&ranges[..], false);
-          print!("{}", escaped);
-        }
-        println!("\x1b[0m");
-        println!(
-          "{}",
-          format!("复制代码请使用: /copy {}", block_idx)
-            .bright_black()
-            .italic()
-        );
-        println!();
-        current_pos = entire_match.end();
+        self.current_session.messages.push(Message::ToolResponse {
+          role: "tool".to_string(),
+          content: result_str,
+          tool_call_id: tc.id,
+        });
       }
-
-      if current_pos < assistant_content.len() {
-        skin.print_text(&assistant_content[current_pos..]);
-      }
-      println!(
-        "{}",
-        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-          .blue()
-          .bold()
-      );
+      println!("{} Returning tool results to model...", "Agent:".cyan());
     }
-
-    self.current_session.messages.push(Message::Simple {
-      role: "assistant".to_string(),
-      content: api::MessageContent::Text(assistant_content),
-      reasoning_content: if assistant_reasoning.is_empty() {
-        None
-      } else {
-        Some(assistant_reasoning)
-      },
-      tool_calls: if tool_calls.is_empty() {
-        None
-      } else {
-        Some(tool_calls)
-      },
-    });
 
     if self.current_session.title == "New Chat" {
       self.current_session.title = content.chars().take(30).collect::<String>();
