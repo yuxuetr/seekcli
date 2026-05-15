@@ -785,16 +785,43 @@ impl App {
 
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
+    let messages = std::mem::take(&mut self.current_session.messages);
+    let (_final_content, updated_messages) = self.run_agent_loop(messages, tools).await?;
+    self.current_session.messages = updated_messages;
+
+    if self.current_session.title == "New Chat" {
+      self.current_session.title = content.chars().take(30).collect::<String>();
+    }
+
+    self.history.save_session(&self.current_session)?;
+    Ok(())
+  }
+
+  fn parse_invoke_agent_args(arguments: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
+      && let Some(p) = v.get("prompt").and_then(|p| p.as_str())
+    {
+      return p.to_string();
+    }
+    arguments.to_string()
+  }
+
+  async fn run_agent_loop(
+    &mut self,
+    mut messages: Vec<Message>,
+    tools: Option<Vec<api::Tool>>,
+  ) -> Result<(String, Vec<Message>)> {
     let tool_dispatcher = tools::ToolDispatcher::new();
     let code_blocks_re = Regex::new(r"```(?:[a-zA-Z0-9]*)\n([\s\S]*?)```")?;
     let block_re = Regex::new(r"(?m)^```([a-zA-Z0-9]*)\n([\s\S]*?)^```")?;
+    let final_content;
 
     loop {
       let mut stream = self
         .brain
         .call_api_with_params(
           &self.model,
-          self.current_session.messages.clone(),
+          messages.clone(),
           self.thinking_mode.as_str(),
           tools.clone(),
         )
@@ -915,9 +942,9 @@ impl App {
         );
       }
 
-      self.current_session.messages.push(Message::Simple {
+      messages.push(Message::Simple {
         role: "assistant".to_string(),
-        content: api::MessageContent::Text(assistant_content),
+        content: api::MessageContent::Text(assistant_content.clone()),
         reasoning_content: if assistant_reasoning.is_empty() {
           None
         } else {
@@ -931,19 +958,38 @@ impl App {
       });
 
       if tool_calls.is_empty() {
+        final_content = assistant_content;
         break;
       }
 
       println!("\n{} Executing tools...", "Agent:".cyan());
       for tc in tool_calls {
-        let result_str = match tool_dispatcher
-          .execute(&tc.function.name, &tc.function.arguments)
-          .await
-        {
-          Ok(res) => res,
-          Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
+        let result_str = if tc.function.name == "invoke_agent" {
+          let prompt = Self::parse_invoke_agent_args(&tc.function.arguments);
+          let mut sub_session = self.history.create_session(self.model.clone());
+          sub_session.messages.push(Message::Simple {
+            role: "user".to_string(),
+            content: api::MessageContent::Text(prompt),
+            reasoning_content: None,
+            tool_calls: None,
+          });
+
+          println!("{} Spawning sub-agent...", "Agent:".magenta());
+          match Box::pin(self.run_agent_loop(sub_session.messages, tools.clone())).await {
+            Ok((res, _)) => format!("Sub-agent completed. Summary:\n{}", res),
+            Err(e) => format!("Sub-agent failed: {}", e),
+          }
+        } else {
+          match tool_dispatcher
+            .execute(&tc.function.name, &tc.function.arguments)
+            .await
+          {
+            Ok(res) => res,
+            Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
+          }
         };
-        self.current_session.messages.push(Message::ToolResponse {
+
+        messages.push(Message::ToolResponse {
           role: "tool".to_string(),
           content: result_str,
           tool_call_id: tc.id,
@@ -952,12 +998,7 @@ impl App {
       println!("{} Returning tool results to model...", "Agent:".cyan());
     }
 
-    if self.current_session.title == "New Chat" {
-      self.current_session.title = content.chars().take(30).collect::<String>();
-    }
-
-    self.history.save_session(&self.current_session)?;
-    Ok(())
+    Ok((final_content, messages))
   }
 }
 
