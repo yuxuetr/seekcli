@@ -12,6 +12,7 @@ mod api;
 mod config;
 mod history;
 mod skills;
+mod subagents;
 mod tools;
 
 #[cfg(test)]
@@ -300,7 +301,9 @@ impl App {
 
     let mut messages = std::mem::take(&mut self.current_session.messages);
     Self::ensure_agent_system_prompt(&mut messages);
-    let (_final_content, updated_messages) = self.run_agent_loop(messages, tools, 0).await?;
+    let (_final_content, updated_messages) = self
+      .run_agent_loop(messages, tools, 0, agent::MAX_ITER)
+      .await?;
     self.current_session.messages = updated_messages;
 
     if self.current_session.title == "New Chat" {
@@ -310,13 +313,24 @@ impl App {
     Ok(())
   }
 
-  fn parse_invoke_agent_args(arguments: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
-      && let Some(p) = v.get("prompt").and_then(|p| p.as_str())
-    {
-      return p.to_string();
+  /// Parse `{"subagent_type": "...", "prompt": "..."}` from a tool-call
+  /// arguments string. Falls back to `("general", arguments)` if the payload
+  /// is not the expected shape.
+  fn parse_invoke_agent_args(arguments: &str) -> (String, String) {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) {
+      let subagent_type = v
+        .get("subagent_type")
+        .and_then(|s| s.as_str())
+        .unwrap_or("general")
+        .to_string();
+      let prompt = v
+        .get("prompt")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+      return (subagent_type, prompt);
     }
-    arguments.to_string()
+    ("general".to_string(), arguments.to_string())
   }
 
   fn ensure_agent_system_prompt(messages: &mut Vec<Message>) {
@@ -368,6 +382,7 @@ impl App {
     mut messages: Vec<Message>,
     tools: Option<Vec<api::Tool>>,
     depth: usize,
+    max_iter: usize,
   ) -> Result<(String, Vec<Message>)> {
     if depth > agent::MAX_SUBAGENT_DEPTH {
       anyhow::bail!(
@@ -386,7 +401,7 @@ impl App {
     let mut final_content = String::new();
     let mut completed = false;
 
-    for _iter in 0..agent::MAX_ITER {
+    for _iter in 0..max_iter {
       let mut stream = self
         .brain
         .call_api_with_params(
@@ -479,7 +494,7 @@ impl App {
       println!("\n{} Executing tools...", "Agent:".cyan());
       for tc in tool_calls {
         let result_str = if tc.function.name == "invoke_agent" {
-          let prompt = Self::parse_invoke_agent_args(&tc.function.arguments);
+          let (subagent_type, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
           let next_depth = depth + 1;
           if next_depth > agent::MAX_SUBAGENT_DEPTH {
             format!(
@@ -487,24 +502,57 @@ impl App {
               agent::MAX_SUBAGENT_DEPTH
             )
           } else {
-            let sub_tools = tools::registry::filter_for_subagent(&effective_tools);
-            let mut sub_messages: Vec<Message> = Vec::new();
-            Self::ensure_agent_system_prompt(&mut sub_messages);
-            sub_messages.push(Message::Simple {
-              role: "user".to_string(),
-              content: format!("{}{}", agent::prompt::subagent_preamble(next_depth), prompt),
-              reasoning_content: None,
-              tool_calls: None,
-            });
+            match subagents::registry::lookup(&subagent_type) {
+              None => {
+                let listing: Vec<String> = subagents::registry::catalog()
+                  .iter()
+                  .map(|(name, desc)| format!("  - {}: {}", name, desc))
+                  .collect();
+                format!(
+                  "Unknown subagent_type '{}'. Available types:\n{}",
+                  subagent_type,
+                  listing.join("\n")
+                )
+              }
+              Some(template) => {
+                let sub_tools =
+                  tools::registry::filter_by_allowed(&effective_tools, template.allowed_tools);
+                let sub_messages = vec![
+                  Message::Simple {
+                    role: "system".to_string(),
+                    content: template.system_prompt.to_string(),
+                    reasoning_content: None,
+                    tool_calls: None,
+                  },
+                  Message::Simple {
+                    role: "user".to_string(),
+                    content: prompt,
+                    reasoning_content: None,
+                    tool_calls: None,
+                  },
+                ];
 
-            println!(
-              "{} Spawning sub-agent (depth={})...",
-              "Agent:".magenta(),
-              next_depth
-            );
-            match Box::pin(self.run_agent_loop(sub_messages, Some(sub_tools), next_depth)).await {
-              Ok((res, _)) => format!("Sub-agent completed. Summary:\n{}", res),
-              Err(e) => format!("Sub-agent failed: {}", e),
+                println!(
+                  "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
+                  "Agent:".magenta(),
+                  template.name.green(),
+                  next_depth,
+                  template.max_iter
+                );
+                match Box::pin(self.run_agent_loop(
+                  sub_messages,
+                  Some(sub_tools),
+                  next_depth,
+                  template.max_iter,
+                ))
+                .await
+                {
+                  Ok((res, _)) => {
+                    format!("Sub-agent '{}' completed. Summary:\n{}", template.name, res)
+                  }
+                  Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
+                }
+              }
             }
           }
         } else {

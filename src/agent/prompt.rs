@@ -14,11 +14,14 @@ Each turn you may either:
 # Tools available
 - read_file / write_file / list_dir : filesystem operations (single level for list_dir)
 - run_shell : execute shell commands; captures stdout and stderr
-- invoke_agent : delegate a focused subtask to an isolated sub-agent (returns summary only)
+- invoke_agent : delegate to a typed sub-agent. Pass subagent_type:
+    - explore : read-only investigation (list dirs, read files, grep). Fastest, safest.
+    - general : full read/write/shell for end-to-end focused subtasks.
 - create_skill : propose a new reusable skill bundle for the user's library
 
 # How to choose
-- For broad exploration / multi-file scans -> invoke_agent (avoids context bloat)
+- For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)
+- For end-to-end small jobs in isolation -> invoke_agent("general", ...)
 - For one-off operations -> call the matching tool directly
 - For long edits -> read_file -> reason -> write_file
 - Stop calling tools as soon as you have enough information to answer.
@@ -47,17 +50,5 @@ Each turn you may either:
 "#,
     max_iter = MAX_ITER,
     max_depth = MAX_SUBAGENT_DEPTH,
-  )
-}
-
-/// Prompt prefix injected for sub-agent runs. Concatenated with the user-provided
-/// subtask prompt at the call site, so the sub-agent knows its execution context.
-pub fn subagent_preamble(depth: usize) -> String {
-  format!(
-    "You are a sub-agent invoked by SeekCLI (depth={depth}/{max}). \
-     You have no access to the parent's conversation history. \
-     Complete the focused subtask below and return a concise summary. \
-     You cannot spawn further sub-agents.\n\n",
-    max = MAX_SUBAGENT_DEPTH
   )
 }

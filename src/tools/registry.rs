@@ -61,19 +61,27 @@ pub fn system_tools() -> Vec<Tool> {
     make_tool(
       "invoke_agent",
       "Spawn an isolated sub-agent in a fresh context to handle a focused subtask. \
-       The sub-agent runs its own ReAct loop and returns only a summary, not the full trace. \
-       Use this for exploration, large-file scanning, or any work that would bloat your context. \
-       Maximum nesting depth is 3.",
+       Choose subagent_type based on what the task needs:\n\
+       - explore: read-only investigation (list dirs, read files, grep). \
+         Fastest and safest. Use for code search, repo understanding, locating things.\n\
+       - general: full read/write/shell focused subtask. Use when the sub-agent \
+         needs to make small edits or run commands end-to-end.\n\
+       Returns only a summary, not the full trace. Maximum nesting depth is 3.",
       json!({
         "type": "object",
         "properties": {
+          "subagent_type": {
+            "type": "string",
+            "enum": ["explore", "general"],
+            "description": "Type of sub-agent to spawn"
+          },
           "prompt": {
             "type": "string",
             "description": "Self-contained instructions for the sub-agent. \
               Include all context it needs; it cannot see your conversation history."
           }
         },
-        "required": ["prompt"]
+        "required": ["subagent_type", "prompt"]
       }),
     ),
     make_tool(
@@ -98,18 +106,12 @@ pub fn system_tools() -> Vec<Tool> {
   ]
 }
 
-/// Tools that must not be inherited by sub-agents.
-/// `invoke_agent` would allow unbounded recursion; `create_skill` is a user-facing
-/// meta-action that should not be triggered from inside an isolated subtask.
-fn restricted_for_subagents() -> &'static [&'static str] {
-  &["invoke_agent", "create_skill"]
-}
-
-pub fn filter_for_subagent(tools: &[Tool]) -> Vec<Tool> {
-  let restricted = restricted_for_subagents();
+/// Filter `tools` down to those listed in `allowed`. Used to apply a
+/// SubAgent template's `allowed_tools` whitelist at spawn time.
+pub fn filter_by_allowed(tools: &[Tool], allowed: &[&str]) -> Vec<Tool> {
   tools
     .iter()
-    .filter(|t| !restricted.contains(&t.function.name.as_str()))
+    .filter(|t| allowed.contains(&t.function.name.as_str()))
     .cloned()
     .collect()
 }
