@@ -97,23 +97,27 @@
 
 ---
 
-## 🛡️ 阶段八：L3 安全层
+## ✅ 阶段八：L3 安全层
 *目标：让 `run_shell` 从"玩具"变"日常可用"。*
 
-- [ ] **8.1 危险命令审批**
-    - [ ] 新增 `src/tools/approval.rs`。
-    - [ ] 拦截规则：`rm -rf /|~|$HOME`、`sudo`、`curl | sh`、`dd of=/dev/`、fork bomb、`chmod 777`、`git push --force`。
-    - [ ] 命中时终端打印命令 + 原因，要求 `y/N` 显式确认。
-    - [ ] 用户拒绝时返回 `"User denied execution of: ..."` 给 LLM，让其自我调整。
-- [ ] **8.2 fs 路径白名单**
-    - [ ] 新增 `src/tools/path_security.rs::check_path()`。
-    - [ ] `write_file` 强制约束在 `current_dir` 子树（除非 skill 显式放宽）。
-    - [ ] `read_file` 默认放宽，但记录访问日志。
-- [ ] **8.3 工具结果分类**
-    - [ ] `ToolDispatcher::execute` 返回 `ToolResult { kind: Success|UserDenied|Error, content: String }`。
-    - [ ] 不同 kind 在 prompt 里用不同标签，帮助模型理解失败原因（参考 Hermes `tool_result_classification.py`）。
+- [x] **8.1 危险命令审批** — `src/tools/approval.rs` (130 行 + 6 单测)
+    - [x] 拦截规则覆盖：`rm -rf /|~|$HOME|/abs`、`sudo`、`curl|sh / wget|bash`、`dd of=/dev/`、fork bomb (`:(){...}`)、`chmod 777`、`git push --force/-f`、`mkfs.*`。
+    - [x] 命中时 stderr 打印命令 + 原因 + `[y/N]` 提示。
+    - [x] 用户拒绝时返回 `[USER DENIED]` 前缀字符串给 LLM。
+    - [x] `agent::prompt::agent_system_prompt` 增加规范：见到 `[USER DENIED]` / `[PATH DENIED]` 不要重试同一调用。
+    - [x] 词法匹配使用 token 边界（whitespace / `;` / `|` / `&`），避免 `pseudosudo` 误伤。
+- [x] **8.2 fs 路径白名单** — `src/tools/path_security.rs` (90 行 + 4 单测)
+    - [x] `ensure_within_cwd()` 通过 lexical normalize（不走 canonicalize，可处理不存在的目标文件）+ `starts_with` 校验。
+    - [x] `write_file` 校验失败返回 `[PATH DENIED]` 前缀。
+    - [x] `read_file` / `list_dir` 不加路径限制（read 限制无法阻止 run_shell 越权，徒增体验损失）。
+- [x] **8.3 工具结果分类**（轻量实现）
+    - [x] 采用**字符串前缀约定**：`[USER DENIED] ...` / `[PATH DENIED] ...` / 正常返回 / `Err(...)` 由 main.rs 包成 `Error executing ...`。
+    - [ ] 完整 `ToolResult { kind, content }` 强类型枚举推迟（侵入 dispatcher + 6 处工具 + main.rs 调用点，性价比不高）。
 
-**验收**：让模型尝试 `rm -rf ~` 时被拦下；让模型尝试在 `/tmp` 之外写文件时被路径白名单拒绝。
+**验收**：
+- `cargo test`：11 个测试全过（6 approval + 4 path_security + 1 skill）
+- `cargo clippy --no-deps`：零告警
+- 实战测试待用户验证：让模型尝试 `rm -rf ~/foo` 应弹出审批；让模型尝试 `write_file("/etc/foo", ...)` 应被路径白名单拒绝。
 
 ---
 

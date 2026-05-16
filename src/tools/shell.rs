@@ -3,11 +3,24 @@ use colored::Colorize;
 use serde_json::Value;
 use std::process::Stdio;
 
+use super::approval;
+
 pub async fn run_shell(args: &Value) -> Result<String> {
   let command = args
     .get("command")
     .and_then(|v| v.as_str())
     .context("Missing 'command' argument")?;
+
+  if let Some(reason) = approval::is_dangerous(command) {
+    if !approval::confirm(command, reason) {
+      println!("{} command denied by user.", "[Agent]".red());
+      return Ok(format!(
+        "[USER DENIED] User refused to run dangerous command ({reason}): {command}\n\
+         Do not retry. Suggest a safer alternative or ask the user how to proceed."
+      ));
+    }
+    println!("{} command approved by user.", "[Agent]".green());
+  }
 
   println!("\n{} {}", "[Agent Executing]".cyan(), command);
 

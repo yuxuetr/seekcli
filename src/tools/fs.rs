@@ -31,6 +31,10 @@ pub async fn write_file(args: &Value) -> Result<String> {
     .and_then(|v| v.as_str())
     .context("Missing 'content' argument")?;
 
+  if let Err(e) = super::path_security::ensure_within_cwd(path) {
+    return Ok(format!("[PATH DENIED] {e}"));
+  }
+
   // Ensure parent dir exists
   if let Some(parent) = std::path::Path::new(path).parent() {
     tokio::fs::create_dir_all(parent)

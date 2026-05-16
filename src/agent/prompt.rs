@@ -30,8 +30,11 @@ Each turn you may either:
 
 # Safety
 - You are operating on the user's local machine.
-- Destructive shell commands are best wrapped in dry-run / preview when reversible.
-- Filesystem writes outside the current working directory may be rejected by future safety layers.
+- Destructive shell commands (rm -rf, sudo, curl|sh, etc.) are intercepted and
+  require the user's interactive y/N approval.
+- Filesystem writes outside the current working directory are rejected.
+- If a tool result starts with `[USER DENIED]` or `[PATH DENIED]`, **do not retry**
+  the same call. Either propose a safer alternative or ask the user how to proceed.
 
 # Stopping conditions
 - Maximum {max_iter} iterations per chat turn.
