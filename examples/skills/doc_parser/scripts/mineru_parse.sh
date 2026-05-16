@@ -50,8 +50,19 @@ if [ -z "$BATCH_ID" ] || [ "$BATCH_ID" = "null" ]; then
 fi
 
 # --- Step 2: upload file (PUT raw bytes, no Content-Type) ------------------
+# CRITICAL: use `curl -T` (upload-file mode), NOT `--data-binary`.
+# --data-binary auto-adds Content-Type: application/x-www-form-urlencoded
+# which makes MinerU's presigned URL silently reject the upload and the
+# job hangs forever in state=waiting-file. -T sends raw bytes via PUT
+# with no Content-Type, matching what MinerU's presigned signature expects.
 echo "[mineru] Uploading (batch_id=$BATCH_ID)..." >&2
-curl -sS -X PUT --data-binary "@$FILE_PATH" "$UPLOAD_URL" >/dev/null
+if ! curl -sS --fail -T "$FILE_PATH" "$UPLOAD_URL" -o /tmp/seekcli_mineru_upload_err 2>/dev/null; then
+  echo "ERROR: file upload to MinerU presigned URL failed" >&2
+  [ -s /tmp/seekcli_mineru_upload_err ] && cat /tmp/seekcli_mineru_upload_err >&2
+  rm -f /tmp/seekcli_mineru_upload_err
+  exit 1
+fi
+rm -f /tmp/seekcli_mineru_upload_err
 
 # --- Step 3: poll for completion -------------------------------------------
 echo "[mineru] Processing (max 120s)..." >&2
