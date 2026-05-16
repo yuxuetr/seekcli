@@ -62,7 +62,7 @@ impl App {
   fn new() -> Result<Self> {
     let config = Config::load()?;
     let deepseek_key = env::var("DEEPSEEK_API_KEY").context("Please set DEEPSEEK_API_KEY")?;
-    let brain = ApiClient::new(deepseek_key, api::Provider::DeepSeek, None, None);
+    let brain = ApiClient::new(deepseek_key);
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();
@@ -147,7 +147,7 @@ impl App {
     if self.current_session.messages.is_empty() {
       self.current_session.messages.push(Message::Simple {
         role: "system".to_string(),
-        content: api::MessageContent::Text(skill.system_prompt),
+        content: skill.system_prompt,
         reasoning_content: None,
         tool_calls: None,
       });
@@ -291,7 +291,7 @@ impl App {
   async fn chat(&mut self, content: &str) -> Result<()> {
     self.current_session.messages.push(Message::Simple {
       role: "user".to_string(),
-      content: api::MessageContent::Text(content.to_string()),
+      content: content.to_string(),
       reasoning_content: None,
       tool_calls: None,
     });
@@ -324,7 +324,7 @@ impl App {
     let already_present = messages.first().is_some_and(|m| {
       matches!(
         m,
-        Message::Simple { role, content: api::MessageContent::Text(t), .. }
+        Message::Simple { role, content: t, .. }
           if role == "system" && t == &target
       )
     });
@@ -333,7 +333,7 @@ impl App {
         0,
         Message::Simple {
           role: "system".to_string(),
-          content: api::MessageContent::Text(target),
+          content: target,
           reasoning_content: None,
           tool_calls: None,
         },
@@ -457,7 +457,7 @@ impl App {
 
       messages.push(Message::Simple {
         role: "assistant".to_string(),
-        content: api::MessageContent::Text(assistant_content.clone()),
+        content: assistant_content.clone(),
         reasoning_content: if assistant_reasoning.is_empty() {
           None
         } else {
@@ -492,11 +492,7 @@ impl App {
             Self::ensure_agent_system_prompt(&mut sub_messages);
             sub_messages.push(Message::Simple {
               role: "user".to_string(),
-              content: api::MessageContent::Text(format!(
-                "{}{}",
-                agent::prompt::subagent_preamble(next_depth),
-                prompt
-              )),
+              content: format!("{}{}", agent::prompt::subagent_preamble(next_depth), prompt),
               reasoning_content: None,
               tool_calls: None,
             });
