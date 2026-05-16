@@ -179,35 +179,44 @@
 
 ---
 
-## 📦 阶段十二：Skill 存储格式标准化（agentskills.io 兼容）
+## ✅ 阶段十二：Skill 存储格式标准化（agentskills.io 兼容）
 *目标：从 `<name>.json` 单文件迁移到 `<name>/SKILL.md` 目录形式，
 兼容 Anthropic Agent Skills / agentskills.io / Hermes 生态。*
 
-- [ ] **12.1 SKILL.md 格式定义**
-    - [ ] 主文件：`~/.seekcli/skills/<name>/SKILL.md`，YAML frontmatter + Markdown body。
-    - [ ] frontmatter 字段：`name` / `description` / `allowed_tools`（可选）/ `version`（可选）。
-    - [ ] body 即 system_prompt（Markdown 直写，无需 JSON escape）。
-    - [ ] 支持子目录：`scripts/`（skill 可调用的辅助脚本）、`references/`（参考文档/示例语料/术语表）。
-- [ ] **12.2 Parser 与依赖**
-    - [ ] 新增 dep：`gray_matter` 或 `serde_yaml`（择一，看体积权衡）。
-    - [ ] `SkillManager::read_skill_dir` 改为扫描子目录形式：遇到目录 → 找 SKILL.md → 解析。
-    - [ ] 向后兼容：仍能读取旧 `<name>.json` 形式，标记 "[legacy]"。
-- [ ] **12.3 migrate 工具**
-    - [ ] 新增 REPL 命令 `/skill migrate`：把 `<name>.json` 自动转成 `<name>/SKILL.md` 目录。
-    - [ ] 或独立 CLI 子命令 `seekcli migrate-skills`。
-    - [ ] 迁移后原 .json 自动备份到 `<name>.json.bak`。
-- [ ] **12.4 create_skill 工具更新**
-    - [ ] proposal 也走目录形式：`proposals/<name>/SKILL.md`。
-    - [ ] 工具 schema 描述提示模型用 Markdown 写 system_prompt（不再是 JSON 字符串）。
-- [ ] **12.5 scripts / references 支持**
-    - [ ] skill 加载时，把 `scripts/*.sh` 列表 / `references/*.md` 摘要注入到激活上下文。
-    - [ ] 或更激进：把 references 内容也作为 system context 附加。
-- [ ] **12.6 文档对齐**
-    - [ ] `AGENT_ARCHITECTURE.md §3` 表格更新："Skill 来源 = SKILL.md 目录策展"。
-    - [ ] `README.md` 加 skill 创作示例。
+- [x] **12.1 SKILL.md 格式定义** — Commit `3169e9a`
+    - [x] 主文件 `<name>/SKILL.md`，YAML frontmatter + Markdown body。
+    - [x] frontmatter 支持 `name` / `description` / `allowed_tools` / `version`。
+    - [x] body 即 system_prompt，模型可直接写 Markdown 无需 escape。
+    - [x] 目录支持 `scripts/` 与 `references/` 子目录（C3 扫描注入）。
+- [x] **12.2 Parser 与依赖** — Commit `3169e9a`
+    - [x] **无新依赖**：手写 ~80 行 YAML frontmatter parser。
+    - [x] `read_skill_dir` 同时识别 `<name>.json` 与 `<name>/SKILL.md`。
+    - [x] 向后兼容：legacy JSON skill 仍可加载。
+    - [x] 9 个单测覆盖 parser 各类边界。
+- [x] **12.3 migrate 工具** — Commit `aa4d046`
+    - [x] REPL 命令 `/skill migrate` 完成。
+    - [x] 失败时回滚已建目录，不留半残状态。
+    - [x] 原 .json 自动备份为 `.json.bak`，可逆。
+- [x] **12.4 create_skill 工具更新** — Commit `aa4d046`
+    - [x] proposal 写入 `proposals/<name>/SKILL.md`。
+    - [x] 同名冲突检查覆盖 .json 与 dir 两种形式。
+    - [x] 模型迭代同名 proposal 时自动覆盖。
+    - [x] accept/reject_proposal 双格式支持。
+    - [x] agent_system_prompt 更新 create_skill 描述。
+- [x] **12.5 scripts / references 支持** — Commit (本 commit C3)
+    - [x] `enumerate_skill_assets(skill_dir)` 扫描子目录。
+    - [x] 加载 skill 时把脚本/参考清单（含一行描述）自动追加到 system_prompt。
+    - [x] 描述自动从首行注释/标题提取，跳过 shebang。
+    - [x] 3 个新单测覆盖空目录、混合资产、SKILL.md + scripts 端到端。
+- [x] **12.6 文档对齐**
+    - [x] `AGENT_ARCHITECTURE.md §3` Hermes 对比表更新 Skill 来源。
+    - [x] `README.md` 加 SKILL.md 格式示例 + migrate 指引。
 
-**验收**：用户/模型可创建带 SKILL.md + references/ 的复杂 skill；
-现有 5 个 JSON skill 一键 migrate 成功后可用。
+**验收**：
+- cargo test: 30 → 33 通过
+- cargo clippy --no-deps: 零告警
+- 实战测试待用户验证：`/skill migrate` 把现有 5 个 JSON skill 一键迁移；
+  创建带 `scripts/` 的 skill，激活后 system_prompt 含资产清单。
 
 ---
 

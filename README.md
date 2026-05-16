@@ -94,11 +94,48 @@ export DEEPSEEK_API_BASE="..."            # 可选，覆盖默认 API endpoint
 
 ```
 ~/.seekcli/
-├── sessions/        会话 JSON 记录
+├── sessions/                会话 JSON 记录
 └── skills/
-    ├── *.json       已生效的 skill
-    └── proposals/   模型起草的 skill，待用户审核（阶段九）
+    ├── <name>/              ← 推荐：agentskills.io 兼容格式
+    │   ├── SKILL.md         主文件：YAML frontmatter + Markdown body
+    │   ├── scripts/         可选：辅助脚本（模型通过 run_shell 调用）
+    │   └── references/      可选：参考文档（模型按需 read_file）
+    ├── <name>.json          ← legacy：单文件格式，仍可加载，可一键 /skill migrate
+    └── proposals/           模型起草的 skill，待 /skill accept 审核
 ```
+
+### Skill 格式速览
+
+`~/.seekcli/skills/translator/SKILL.md`:
+```markdown
+---
+name: translator
+description: 中英文双向翻译，保留格式与代码片段
+allowed_tools:
+  - read_file
+  - run_shell
+---
+
+# Translator
+
+你是 SeekCLI 的翻译助手。
+
+## 规则
+- 保留原文的代码块和 Markdown 结构
+- 技术术语首次出现给出英文原词
+（详见 references/glossary.md）
+```
+
+激活 skill 时，`scripts/` 和 `references/` 目录中的文件清单与一行描述会
+自动追加到 system prompt，模型即可发现并按需调用 / 阅读。
+
+### Legacy JSON 迁移
+
+如果你已有旧 `<name>.json` 格式，运行：
+```
+/skill migrate
+```
+自动把所有 .json 转成 `<name>/SKILL.md` 目录，原文件备份为 `<name>.json.bak`。
 
 ---
 

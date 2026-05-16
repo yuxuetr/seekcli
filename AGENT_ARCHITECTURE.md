@@ -93,7 +93,7 @@
 | 工具注册    | `tools/registry.py` import-time self-register；`model_tools.py` 派发 | Rust 静态 `system_tools()` + `ToolDispatcher` 派发     |
 | 工具数量    | 70+ 个（含浏览器/MCP/voice 等）                                      | 仅核心 5 ~ 8 个（fs/shell/meta），其余靠 MCP 后续接入  |
 | SubAgent    | `tools/delegate_tool.py` 单独大模块                                  | `subagents/registry.rs` 类型化模板，深度限制           |
-| Skill 来源  | **人工策展的 bundle**（`skills/{github,devops,...}`）                | 默认内置策展 + `create_skill` 走 **proposal 审核**     |
+| Skill 来源  | **人工策展的 bundle**（`skills/{github,devops,...}`）                | `<name>/SKILL.md` 目录 + `create_skill` 走 **proposal 审核**，agentskills.io 兼容 |
 | 自演化      | 拆到独立仓库 `hermes-agent-self-evolution`（DSPy/GEPA 离线优化）     | **不做在线自演化**，保持核心纯粹                       |
 | 上下文压缩  | `agent/context_compressor.py` 74KB                                   | `agent/compressor.rs` 阈值触发摘要                     |
 | 安全护栏    | `tools/approval.py` 58KB + `path_security.py` 等                    | `tools/approval.rs` + 路径白名单                       |

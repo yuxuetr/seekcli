@@ -341,20 +341,144 @@ pub struct Frontmatter {
 
 /// Read a SKILL.md file and produce a `Skill`. The skill's `system_prompt`
 /// is the Markdown body (everything after the closing `---` frontmatter
-/// delimiter).
+/// delimiter), optionally appended with a `## Skill Assets` section that
+/// enumerates `scripts/` and `references/` files under the same directory.
 pub fn load_skill_md(path: &Path) -> Result<Skill> {
   let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
   let (fm, body) =
     parse_skill_md(&content).with_context(|| format!("parse frontmatter of {}", path.display()))?;
+
+  let skill_dir = path.parent().unwrap_or(Path::new("."));
+  let assets = enumerate_skill_assets(skill_dir);
+
+  let system_prompt = if assets.is_empty() {
+    body
+  } else {
+    format!("{}\n\n{}", body.trim_end(), assets)
+  };
+
   Ok(Skill {
     name: fm.name,
     description: fm.description,
-    system_prompt: body,
+    system_prompt,
     // `allowed_tools` in frontmatter is a name whitelist (different semantics
     // from legacy `SkillTool` which carried full schemas). Stored in tools as
     // None for now; later phases may wire the whitelist into ToolDispatcher.
     tools: None,
   })
+}
+
+/// Scan a skill directory for `scripts/` and `references/` subfolders and
+/// emit a Markdown section listing the available assets with one-line
+/// descriptions extracted from each file's leading comment or heading.
+/// Returns an empty string when no assets exist.
+fn enumerate_skill_assets(skill_dir: &Path) -> String {
+  let mut out = String::new();
+
+  let scripts_dir = skill_dir.join("scripts");
+  if scripts_dir.is_dir() {
+    let entries = list_asset_entries(&scripts_dir, &["sh", "py", "js", "ts", "rb"]);
+    if !entries.is_empty() {
+      out.push_str("## Skill Scripts\n");
+      out.push_str(&format!(
+        "Located in `{}`. Invoke via `run_shell` with the absolute path.\n\n",
+        scripts_dir.display()
+      ));
+      for (name, desc) in &entries {
+        if desc.is_empty() {
+          out.push_str(&format!("- `{}`\n", name));
+        } else {
+          out.push_str(&format!("- `{}` — {}\n", name, desc));
+        }
+      }
+      out.push('\n');
+    }
+  }
+
+  let refs_dir = skill_dir.join("references");
+  if refs_dir.is_dir() {
+    let entries = list_asset_entries(&refs_dir, &["md", "txt", "json", "yaml", "yml"]);
+    if !entries.is_empty() {
+      out.push_str("## Skill References\n");
+      out.push_str(&format!(
+        "Located in `{}`. Read with `read_file` when relevant.\n\n",
+        refs_dir.display()
+      ));
+      for (name, desc) in &entries {
+        if desc.is_empty() {
+          out.push_str(&format!("- `{}`\n", name));
+        } else {
+          out.push_str(&format!("- `{}` — {}\n", name, desc));
+        }
+      }
+    }
+  }
+
+  out
+}
+
+/// Sorted `(filename, description)` list for files in `dir` matching any of
+/// `allowed_exts`. Returns empty Vec on any IO failure (assets are best-effort
+/// enrichment, not load-blocking).
+fn list_asset_entries(dir: &Path, allowed_exts: &[&str]) -> Vec<(String, String)> {
+  let read = match fs::read_dir(dir) {
+    Ok(r) => r,
+    Err(_) => return Vec::new(),
+  };
+  let mut out = Vec::new();
+  for entry in read.flatten() {
+    let path = entry.path();
+    if !path.is_file() {
+      continue;
+    }
+    let ext = path
+      .extension()
+      .and_then(|s| s.to_str())
+      .unwrap_or("")
+      .to_lowercase();
+    if !allowed_exts.iter().any(|e| *e == ext) {
+      continue;
+    }
+    let name = match path.file_name().and_then(|s| s.to_str()) {
+      Some(n) => n.to_string(),
+      None => continue,
+    };
+    let desc = extract_asset_description(&path).unwrap_or_default();
+    out.push((name, desc));
+  }
+  out.sort_by(|a, b| a.0.cmp(&b.0));
+  out
+}
+
+/// Pull a one-line description from the first meaningful line of a file.
+/// Skips shebangs and common comment markers (`#`, `//`, `/*`, `*`, `;`).
+/// Capped at ~120 chars.
+fn extract_asset_description(path: &Path) -> Result<String> {
+  let content = fs::read_to_string(path)?;
+  for line in content.lines().take(20) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with("#!") {
+      continue;
+    }
+    let stripped = trimmed
+      .trim_start_matches('#')
+      .trim_start_matches("//")
+      .trim_start_matches("/*")
+      .trim_start_matches('*')
+      .trim_start_matches(';')
+      .trim();
+    if stripped.is_empty() {
+      continue;
+    }
+    let truncated: String = stripped.chars().take(120).collect();
+    let suffix = if stripped.chars().count() > 120 {
+      "…"
+    } else {
+      ""
+    };
+    return Ok(format!("{}{}", truncated, suffix));
+  }
+  Ok(String::new())
 }
 
 /// Split a SKILL.md document into `(frontmatter, body)`. Errors if the
@@ -626,5 +750,80 @@ mod tests {
     assert_eq!(skill.description, "from-disk");
     assert!(skill.system_prompt.contains("body-content"));
     std::fs::remove_file(&tmp).ok();
+  }
+
+  #[test]
+  fn assets_enumeration_handles_missing_dirs() {
+    let tmp = std::env::temp_dir().join(format!("seekcli_assets_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    // No scripts/ or references/ — should produce empty enrichment
+    let out = enumerate_skill_assets(&tmp);
+    assert!(out.is_empty());
+    std::fs::remove_dir_all(&tmp).ok();
+  }
+
+  #[test]
+  fn assets_enumeration_lists_scripts_and_references() {
+    let tmp = std::env::temp_dir().join(format!("seekcli_assets_{}", uuid::Uuid::new_v4()));
+    let scripts = tmp.join("scripts");
+    let refs = tmp.join("references");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    std::fs::create_dir_all(&refs).expect("refs dir");
+
+    std::fs::write(
+      scripts.join("format.sh"),
+      "#!/bin/bash\n# Format the output as JSON\necho hi\n",
+    )
+    .unwrap();
+    std::fs::write(
+      scripts.join("lookup.py"),
+      "#!/usr/bin/env python3\n# Lookup glossary term\nprint('x')\n",
+    )
+    .unwrap();
+    std::fs::write(
+      refs.join("examples.md"),
+      "# Translation examples\n\nSome content.\n",
+    )
+    .unwrap();
+    std::fs::write(refs.join("glossary.txt"), "API terms in three languages\n").unwrap();
+
+    let out = enumerate_skill_assets(&tmp);
+    assert!(out.contains("## Skill Scripts"));
+    assert!(out.contains("`format.sh`"));
+    assert!(out.contains("Format the output as JSON"));
+    assert!(out.contains("`lookup.py`"));
+    assert!(out.contains("Lookup glossary term"));
+    assert!(out.contains("## Skill References"));
+    assert!(out.contains("`examples.md`"));
+    assert!(out.contains("Translation examples"));
+    assert!(out.contains("`glossary.txt`"));
+    assert!(out.contains("API terms in three languages"));
+
+    std::fs::remove_dir_all(&tmp).ok();
+  }
+
+  #[test]
+  fn load_skill_md_with_assets() {
+    let tmp = std::env::temp_dir().join(format!("seekcli_skill_{}", uuid::Uuid::new_v4()));
+    let scripts = tmp.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("mkdir");
+    std::fs::write(
+      scripts.join("hello.sh"),
+      "#!/bin/bash\n# Say hello in style\necho hi\n",
+    )
+    .unwrap();
+    std::fs::write(
+      tmp.join("SKILL.md"),
+      "---\nname: with-assets\ndescription: has scripts\n---\nDo the thing.\n",
+    )
+    .unwrap();
+
+    let skill = load_skill_md(&tmp.join("SKILL.md")).expect("load ok");
+    assert!(skill.system_prompt.contains("Do the thing."));
+    assert!(skill.system_prompt.contains("## Skill Scripts"));
+    assert!(skill.system_prompt.contains("hello.sh"));
+    assert!(skill.system_prompt.contains("Say hello in style"));
+
+    std::fs::remove_dir_all(&tmp).ok();
   }
 }
