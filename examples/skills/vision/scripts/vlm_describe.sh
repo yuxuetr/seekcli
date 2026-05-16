@@ -33,7 +33,7 @@ esac
 B64=$(base64 -i "$IMG_PATH")
 
 PAYLOAD=$(jq -n \
-  --arg model "step-1.5v-mini" \
+  --arg model "step-1o-vision-32k" \
   --arg prompt "$QUESTION" \
   --arg image_url "data:$MIME;base64,$B64" \
   '{
