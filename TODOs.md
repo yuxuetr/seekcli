@@ -220,18 +220,36 @@
 
 ---
 
-## 🎨 阶段十一：L6 界面瘦身
+## ✅ 阶段十一：L6 界面瘦身
 *目标：让界面层只做"REPL + 必要状态指示"，不抢 Agent 戏。*
 
-- [ ] **11.1 渲染解耦**
-    - [ ] 若阶段七保留了渲染，将其全部抽到 `src/render.rs`。
-    - [ ] `run_agent_loop` 内部不持有 `MadSkin` / `SyntaxSet` 等渲染句柄。
-- [ ] **11.2 状态指示**
-    - [ ] 用 `indicatif` 显示 "Calling tool: ..." / "Sub-agent depth=N" 状态。
-    - [ ] 工具执行时间 > 3s 显示进度。
-- [ ] **11.3 命令补全**
-    - [ ] `rustyline` 注册 slash command 自动补全。
-    - [ ] 注册 skill / subagent 名字补全。
+- [x] **11.1 渲染解耦** — 阶段七已删除 MadSkin/syntect，N/A
+- [x] **Ctrl-C 中断**（阶段六遗留）— Commit `4c19a5e`
+    - [x] `App.interrupt: Arc<AtomicBool>` + `spawn_interrupt_watcher` 后台任务
+    - [x] `run_agent_loop` 每轮顶部 + stream 消费时 check
+    - [x] `chat()` 入口重置 flag，避免 readline Ctrl-C 误穿透
+- [x] **11.2 状态指示** — Commit `4c19a5e`
+    - [x] `indicatif = "0.17"` 依赖
+    - [x] `run_shell` 长命令（>800ms）显示 spinner，含 elapsed_precise + 命令预览
+    - [x] 命令快完成时 spinner 静默退出（不打扰用户）
+    - [x] `deny.toml` 加 `RUSTSEC-2025-0119` ignore
+- [x] **11.3 命令补全** — Commit (本 C2)
+    - [x] `CmdCompleter` 实现 Completer + Helper + Hinter + Highlighter + Validator
+    - [x] Tab 后 `/` → 列出 10 个 slash 命令
+    - [x] Tab 后 `/skill ` → 列出 5 个 subcommand + 所有 skill 名
+    - [x] Tab 后 `/skill accept ` / `/skill reject ` → 列出 proposal 名
+    - [x] Tab 后 `/model ` → `flash` / `pro`
+    - [x] Tab 后 `/thinking ` → `n` / `h` / `m`
+    - [x] 每次 Tab 重新扫描 skills_dir，新建 skill/proposal 立即可补全
+
+**验收**：
+- cargo test: 33 通过
+- cargo clippy --no-deps: 零告警
+- 实战测试待用户验证：
+  - REPL 输入 `/sk` 按 Tab → 补全成 `/skill`
+  - 输入 `/skill ` 按 Tab → 列出所有 skill 名
+  - 长 shell 命令期间能看到旋转动画
+  - Ctrl-C 在 agent 推理时优雅退出回到 REPL
 
 ---
 

@@ -27,6 +27,37 @@ All notable changes to this project will be documented in this file. See [conven
 
 ## [unreleased]
 
+### 🎨 UX (Phase 11 — Interface Polish)
+- **Ctrl-C 中断**：agent 推理或工具执行中按 Ctrl-C 不再杀进程，而是优雅退出到 REPL。通过 `Arc<AtomicBool>` flag + 后台 `tokio::signal::ctrl_c()` watcher 实现。
+- **indicatif spinner**：长 shell 命令（>800ms）显示带 elapsed time 的旋转动画，命令很快时不打扰用户。
+- **Rustyline Tab 补全**：实现 `CmdCompleter`，支持 slash 命令、skill 名、proposal 名、model 变体、thinking 模式的自动补全。每次 Tab 重新扫描 skills_dir，新建技能立即可补全。
+
+### 📦 Skills (Phase 12 — agentskills.io Format Compatibility)
+- **SKILL.md 目录格式**：新 skill 形态为 `<name>/SKILL.md`（YAML frontmatter + Markdown body），与 Anthropic Agent Skills / agentskills.io / Hermes 生态兼容。
+- **scripts/ + references/ 注入**：激活 skill 时，子目录中的脚本和参考文档清单（含一行描述）自动追加到 system prompt，模型即可发现并按需调用。
+- **`/skill migrate` 一键迁移**：把 `<name>.json` legacy 格式转成 `<name>/SKILL.md` 目录，原文件备份为 `.json.bak`。
+- **手写 YAML 前置元数据 parser**：~80 行，不引入 `serde_yaml` / `gray_matter` 依赖。
+- **双格式 loader**：`SkillManager::read_skill_dir` 同时识别 `<name>.json` 和 `<name>/SKILL.md`，向后兼容。
+- **create_skill 升级**：模型起草的 proposal 也走 `proposals/<name>/SKILL.md` 目录格式。
+
+### 🧠 Memory (Phase 10 — L4 Memory Layer)
+- **上下文压缩**：长会话 messages 超过 600KB 字节时自动触发压缩，保留前导 system message + 最近 8 条尾部，中间段交给 DeepSeek 摘要后用 `[Compressed earlier turns]` 替换。实测 87% 压缩率。
+- **prompt cache 验证**：`StreamItem::Usage` 解析 DeepSeek 返回的 `prompt_cache_hit_tokens`，每轮末尾打印 `[Usage] prompt=N (cache hit X%, M miss), completion=K`。实测同 session 内连续问答可达 99% cache hit。
+
+### 🧩 Composition (Phase 9 — L5 Layer)
+- **SubAgent 类型化**：`invoke_agent` schema 加 `subagent_type` 枚举（`explore` 只读探索 / `general` 通用子任务），每种 template 自带 system_prompt + allowed_tools 白名单 + max_iter。
+- **Skill proposal 审核流**：`create_skill` 不再直接生效，而是写入 `proposals/` 等待 `/skill accept` 审核。新增 `/skill proposals` / `/skill accept` / `/skill reject` REPL 命令。
+- **`load_skill` 工具**：让模型在 ReAct 里按需切换 persona，替代阶段七删除的 auto-route 机制。
+
+### 🛡️ Safety (Phase 8 — L3 Layer)
+- **危险命令审批**：`tools/approval.rs` 通过 token 匹配识别 `rm -rf /`、`sudo`、`curl|sh`、`dd of=/dev/`、fork bomb、`chmod 777`、`git push --force`、`mkfs.*` 等高危模式；命中时 stderr 弹 `y/N` 等待用户确认，拒绝则返回 `[USER DENIED]` 给模型。
+- **fs 路径白名单**：`tools/path_security.rs` 通过 lexical normalize 防止 `write_file` 越权到 cwd 之外，拒绝时返回 `[PATH DENIED]`。
+- **安全边界声明**：`AGENT_ARCHITECTURE.md §8` 明确"工具层做语义护栏，不做完整 OS 沙箱"的设计选择，与 Hermes / Claude Code 一致。
+
+### 🐛 Critical Fixes
+- **修复 streaming tool-call 参数丢失**：OpenAI 协议下 tool call 分片到达，原实现把每个 delta 单独反序列化导致 arguments 累积失败，引发"模型反复尝试调工具但收到空参数"的死循环。新增 `PartialToolCall` 累加器按 `index` 拼接片段。
+- **修复 load_skill 触发 API 400**：原实现在 tool_response 推入前先 push 了 system message，违反 DeepSeek API 严格要求的"assistant{tool_calls} 必须紧接 tool 消息"。改用 `deferred_system_msgs` 队列在 tool batch 处理完毕后追加。
+
 ### 🪓 Refactor (Phase 7 — Peripheral Strip)
 - **大幅瘦身**：src/ 从 ~2200 行减至 1528 行 (-672)；Cargo.toml 依赖从 20 个减至 14 个。
 - **删除多模态网关**：MinerU (PDF/Docx 解析) / StepFun VLM (图像理解) / GLM Web Search / Tavily / Jina Reader 全部移除。Provider 枚举只剩 DeepSeek 隐含。
