@@ -6,6 +6,8 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
 use std::io::{self, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod agent;
 mod api;
@@ -57,6 +59,10 @@ struct App {
   thinking_mode: ThinkingMode,
   current_skill: Option<Skill>,
   last_code_blocks: Vec<String>,
+  /// Set to true by the Ctrl-C watcher task. Polled at the top of each
+  /// agent loop iteration and during stream consumption to allow graceful
+  /// mid-task interruption back to the REPL.
+  interrupt: Arc<AtomicBool>,
 }
 
 impl App {
@@ -68,6 +74,10 @@ impl App {
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
+
+    let interrupt = Arc::new(AtomicBool::new(false));
+    spawn_interrupt_watcher(interrupt.clone());
+
     Ok(Self {
       brain,
       config,
@@ -78,6 +88,7 @@ impl App {
       thinking_mode: ThinkingMode::None,
       current_skill: None,
       last_code_blocks: Vec::new(),
+      interrupt,
     })
   }
 
@@ -359,6 +370,10 @@ impl App {
   }
 
   async fn chat(&mut self, content: &str) -> Result<()> {
+    // Clear any stale interrupt flag from a previous turn (e.g. Ctrl-C
+    // pressed at the readline prompt also fires the global watcher).
+    self.interrupt.store(false, Ordering::SeqCst);
+
     self.current_session.messages.push(Message::Simple {
       role: "user".to_string(),
       content: content.to_string(),
@@ -480,6 +495,14 @@ impl App {
     let mut completed = false;
 
     for _iter in 0..max_iter {
+      // Top-of-iteration interrupt check (Ctrl-C between turns).
+      if depth == 0 && self.interrupt.swap(false, Ordering::SeqCst) {
+        println!("\n{}", "[Agent] interrupted by user".yellow());
+        final_content = "[Interrupted by user]".to_string();
+        completed = true;
+        break;
+      }
+
       // Compression only at top-level main agent; sub-agents have short focused
       // contexts and their own max_iter cap.
       if depth == 0
@@ -509,6 +532,12 @@ impl App {
       let mut is_reasoning = false;
 
       while let Some(item) = stream.next().await {
+        // Mid-stream interrupt check. Don't reset the flag here — let the
+        // outer loop see it and exit cleanly.
+        if depth == 0 && self.interrupt.load(Ordering::SeqCst) {
+          println!("\n{}", "[Agent] interrupted by user (mid-stream)".yellow());
+          break;
+        }
         match item? {
           StreamItem::Reasoning(r) => {
             if !is_reasoning {
@@ -745,6 +774,23 @@ impl App {
 #[derive(Parser)]
 #[command(author, version, about = "DeepSeek V4 Harness Agent for CLI", long_about = None)]
 struct Cli {}
+
+/// Background task that flips `flag` to `true` on each Ctrl-C. Rustyline
+/// catches Ctrl-C at the readline prompt directly (returns `Interrupted`),
+/// so the stale flag there is reset at the start of every `chat()` call.
+/// During agent execution, the loop polls this flag and breaks out
+/// gracefully instead of letting the signal kill the whole process.
+fn spawn_interrupt_watcher(flag: Arc<AtomicBool>) {
+  tokio::spawn(async move {
+    loop {
+      if tokio::signal::ctrl_c().await.is_err() {
+        // OS not delivering signals — stop trying.
+        break;
+      }
+      flag.store(true, Ordering::SeqCst);
+    }
+  });
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {

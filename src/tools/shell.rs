@@ -1,9 +1,17 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Value;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use super::approval;
+
+/// Delay before showing the progress spinner. Below this threshold, a
+/// command finishes too quickly for the spinner to be useful.
+const SPINNER_DELAY: Duration = Duration::from_millis(800);
 
 pub async fn run_shell(args: &Value) -> Result<String> {
   let command = args
@@ -24,14 +32,25 @@ pub async fn run_shell(args: &Value) -> Result<String> {
 
   println!("\n{} {}", "[Agent Executing]".cyan(), command);
 
-  let output = tokio::process::Command::new("sh")
+  // Spawn a side task that activates a progress spinner only if the command
+  // takes longer than SPINNER_DELAY. The spinner clears itself when the
+  // main task signals completion via the shared atomic flag.
+  let stop_flag = Arc::new(AtomicBool::new(false));
+  let spinner_task = spawn_delayed_spinner(command.to_string(), stop_flag.clone());
+
+  let output_result = tokio::process::Command::new("sh")
     .arg("-c")
     .arg(command)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .output()
-    .await
-    .context("Failed to spawn shell command")?;
+    .await;
+
+  // Signal the spinner to stop and wait for it to clear cleanly.
+  stop_flag.store(true, Ordering::SeqCst);
+  let _ = spinner_task.await;
+
+  let output = output_result.context("Failed to spawn shell command")?;
 
   let stdout = String::from_utf8_lossy(&output.stdout);
   let stderr = String::from_utf8_lossy(&output.stderr);
@@ -61,4 +80,44 @@ pub async fn run_shell(args: &Value) -> Result<String> {
       output.status, result
     ))
   }
+}
+
+/// Spawn a task that, after `SPINNER_DELAY`, displays a progress spinner
+/// until `stop_flag` is set. The spinner clears itself on stop.
+fn spawn_delayed_spinner(
+  command: String,
+  stop_flag: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+  tokio::spawn(async move {
+    tokio::time::sleep(SPINNER_DELAY).await;
+    if stop_flag.load(Ordering::SeqCst) {
+      // Command finished before the delay; nothing to show.
+      return;
+    }
+
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+      ProgressStyle::default_spinner()
+        .template("  {spinner:.cyan} {elapsed_precise} running: {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+    );
+    pb.set_message(truncate_for_spinner(&command));
+    pb.enable_steady_tick(Duration::from_millis(120));
+
+    // Poll the stop flag rather than blocking, so the spinner reacts within
+    // ~100ms of the command finishing.
+    while !stop_flag.load(Ordering::SeqCst) {
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    pb.finish_and_clear();
+  })
+}
+
+fn truncate_for_spinner(s: &str) -> String {
+  const MAX: usize = 60;
+  if s.chars().count() <= MAX {
+    return s.to_string();
+  }
+  let cut: String = s.chars().take(MAX).collect();
+  format!("{}…", cut)
 }
