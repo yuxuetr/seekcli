@@ -172,15 +172,27 @@ impl App {
   }
 
   fn activate_skill(&mut self, skill: Skill) {
-    self.current_skill = Some(skill.clone());
-    if self.current_session.messages.is_empty() {
-      self.current_session.messages.push(Message::Simple {
-        role: "system".to_string(),
-        content: skill.system_prompt,
-        reasoning_content: None,
-        tool_calls: None,
-      });
-    }
+    // Drop any previously-activated skill's system message so we don't
+    // accumulate conflicting personas when switching mid-session.
+    self.current_session.messages.retain(|m| {
+      !matches!(
+        m,
+        Message::Simple { role, content, .. }
+          if role == "system" && content.starts_with("# Activated Skill: ")
+      )
+    });
+
+    let prompt_text = format!(
+      "# Activated Skill: {}\n\n{}",
+      skill.name, skill.system_prompt
+    );
+    self.current_session.messages.push(Message::Simple {
+      role: "system".to_string(),
+      content: prompt_text,
+      reasoning_content: None,
+      tool_calls: None,
+    });
+    self.current_skill = Some(skill);
   }
 
   async fn handle_command(&mut self, line: &str) -> Result<bool> {
@@ -727,6 +739,16 @@ impl App {
                 let found = skills.iter().find(|s| s.name == name).cloned();
                 match found {
                   Some(skill) => {
+                    // Same dedup as activate_skill: drop any prior skill's
+                    // system message so personas don't accumulate.
+                    messages.retain(|m| {
+                      !matches!(
+                        m,
+                        Message::Simple { role, content, .. }
+                          if role == "system" && content.starts_with("# Activated Skill: ")
+                      )
+                    });
+
                     let prompt_text = format!(
                       "# Activated Skill: {}\n\n{}",
                       skill.name, skill.system_prompt
