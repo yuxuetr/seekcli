@@ -108,18 +108,18 @@
 
 ---
 
-## 4. SeekCLI 当前分层评估（修订版）
+## 4. SeekCLI 当前分层评估（阶段八完成后）
 
 | 层               | 状态  | 说明                                                                      |
 | ---------------- | ----- | ------------------------------------------------------------------------- |
-| L0 LLM 基底      | ✅    | DeepSeek + streaming + ToolCall 协议解析完整                               |
-| L1 引擎          | ⚠️    | ReAct 已实现，但缺 max_iter / 中断处理                                     |
-| L2 工具          | 🔴    | 工具实现存在，但 **schema 未注入 LLM**，dispatcher 形同虚设                |
-| L3 安全          | 🔴    | `run_shell` 直接执行无审批；fs 工具无路径白名单                            |
-| L4 记忆          | 🔴    | 仅有 session JSON，无压缩、无 prompt cache                                 |
-| L5 组合          | ⚠️    | SubAgent 实现存在但无类型化、无深度限制；Skill 定位需修正                  |
-| L6 界面          | ✅    | REPL 完整；花哨渲染应抽出或删除                                            |
-| **外围资产**     | 🟡    | MinerU/StepFun VLM/Tavily/GLM Search/Jina 等占代码量 ~30%，应剥离          |
+| L0 LLM 基底      | ✅    | DeepSeek + streaming + ToolCall 协议解析；streaming tool-call 分片重组已修 |
+| L1 引擎          | ✅    | ReAct + MAX_ITER=25 + MAX_SUBAGENT_DEPTH=3；Ctrl-C 中断推迟到阶段十一      |
+| L2 工具          | ✅    | `tools/registry::system_tools()` 全量 schema 注入；6 个内置工具齐备         |
+| L3 安全          | ✅    | `approval.rs` 危险命令审批 + `path_security.rs` write 路径白名单（见 §8）  |
+| L4 记忆          | 🔴    | 仅有 session JSON，无压缩、无 prompt cache 验证 → 阶段十                    |
+| L5 组合          | ⚠️    | SubAgent depth + 工具裁剪已落地，类型化模板与 Skill proposal 待阶段九       |
+| L6 界面          | ✅    | REPL 干净，渲染框已删（阶段七）；进度条 + Ctrl-C 留阶段十一                 |
+| **外围资产**     | ✅    | MinerU/StepFun VLM/Tavily/GLM Search/Jina 已全部剥离（阶段七）              |
 
 ---
 
@@ -173,3 +173,75 @@ src/
 - **不做多 LLM provider 调度**：DeepSeek V4 单家深度适配。
 - **不引入 plan-execute / multi-agent 框架**：纯 ReAct + 类型化 SubAgent 已足够。
 - **任何长度超过 50 行的"渲染美化"逻辑必须独立成模块**，不得污染 agent loop。
+
+---
+
+## 8. 安全边界声明 (Security Model Boundary)
+
+SeekCLI 是**单用户本地 CLI**，不是生产服务。L3 安全层的设计是
+"在工具结构允许的范围内提供常识性护栏"，而不是"完整 OS 隔离"。
+
+### 8.1 L3 实际拦截清单
+
+**`tools/approval.rs::is_dangerous`** 通过 token 边界匹配识别危险命令模式：
+- `rm -rf` 触及 `/` | `~` | `$HOME` | 任何绝对路径
+- `sudo` 提权
+- `curl|sh` / `wget|bash` 远程脚本管道
+- `dd of=/dev/...` 块设备写
+- fork bomb `:(){...}`
+- `chmod 777` / `chmod -R 777`
+- `git push --force` / `git push -f`
+- `mkfs*` 文件系统格式化
+
+命中后在 stderr 弹 `y/N` 提示，用户拒绝则返回 `[USER DENIED]` 前缀给模型，
+系统提示明确要求"见到 DENIED 不要重试同一调用"。
+
+**`tools/path_security.rs::ensure_within_cwd`** 通过 lexical normalize 防止
+`write_file` 路径越权。绝对路径或 `../..` 逃逸到 cwd 之外被拒，返回
+`[PATH DENIED]` 前缀。
+
+### 8.2 L3 明确**不**拦截的内容
+
+**shell 重定向到 cwd 之外**：`run_shell("date > /tmp/foo")` 会成功执行。
+原因：shell 写文件的方式无穷多（`>` / `>>` / `tee` / `cp` / `mv` /
+heredoc / `cat > /foo` ...），可靠拦截需要解析 shell AST，与"轻量 CLI"
+定位相悖。这是**已知的设计选择**，不是 bug。
+
+**`read_file` / `list_dir` 跨目录**：模型可以读 `~/.zshrc` 等任意可读文件。
+原因：`run_shell` 已有同等 exfiltration 能力（`cat ~/.ssh/id_rsa`），单独
+限制 read 路径只损体验不增实际安全。
+
+**网络访问 / 子进程派生 / 数据外发**：进程级别无任何限制。
+原因：需要 OS 级 sandbox（chroot / Docker / firejail / seccomp），与
+"用户本地 CLI"定位冲突。如需该级别隔离，请在容器内运行 SeekCLI。
+
+### 8.3 横向对比
+
+| 项目 | 危险命令审批 | fs 路径检查 | shell 完全沙箱 |
+|---|---|---|---|
+| **SeekCLI** | ✅ token 匹配 | ✅ write_file 限 cwd | ❌ 不做 |
+| **Claude Code** | ✅ 用户允许列表 | ✅ write 限 workspace | ❌ 不做 |
+| **Hermes Agent** | ✅ `approval.py` (58KB) + `tool_guardrails.py` | ✅ `path_security.py` | ❌ 不做 |
+| **OpenAI Codex CLI** | ✅ 类似 | ✅ 类似 | ⚠️ macOS sandbox-exec 可选 |
+
+业界主流方案与 SeekCLI 一致：**工具层做语义护栏，不在 CLI 层做完整 OS 沙箱**。
+
+### 8.4 用户责任声明
+
+启动 SeekCLI 等同于**给一个智能模型授予终端访问权限**。用户应理解：
+
+1. **审计 stdout**：`run_shell` 的命令在执行前会打印
+   `[Agent Executing] <command>`，用户应当注意阅读。
+2. **不在敏感目录里运行**：避免在 `~/.ssh/`、`~/Documents/财务/` 等目录
+   直接 `cd` 后启动 SeekCLI。
+3. **重要数据先备份**：与所有自动化工具一样。
+4. **如需更强隔离**：在 Docker 容器内运行 SeekCLI，并 mount 仅需要的
+   目录为只读 / 读写。
+
+### 8.5 未来增强方向（不在当前路线图）
+
+- OS sandbox 集成（macOS `sandbox-exec` / Linux seccomp / firejail）
+- 操作审计日志（落到 `~/.seekcli/audit.log`，便于事后追溯）
+- `run_shell` 的可选只读模式（仅允许在白名单命令集合内）
+
+这些都是独立的工程项目，不计入七层架构核心，也不在当前 TODOs 推进计划中。
