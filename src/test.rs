@@ -4,21 +4,16 @@ mod verification_tests {
   use anyhow::Result;
 
   #[test]
-  fn test_load_all_skills() -> Result<()> {
+  fn skill_manager_initializes_cleanly() -> Result<()> {
     let manager = SkillManager::new()?;
+    // load_skills must succeed even on a fresh install with zero skills.
     let skills = manager.load_skills()?;
-
-    println!("\n--- Skill Verification Report ---");
-    println!("Total skills found: {}", skills.len());
-
-    for skill in &skills {
-      println!("- Skill ID: {}", skill.name);
-      println!("  Desc: {}", skill.description);
-    }
-    println!("--------------------------------\n");
-
-    assert!(skills.iter().any(|s| s.name == "translator"));
-    assert!(skills.iter().any(|s| s.name == "file_helper"));
+    let proposals = manager.list_proposals()?;
+    println!(
+      "SkillManager initialized: {} active skills, {} proposals",
+      skills.len(),
+      proposals.len()
+    );
     Ok(())
   }
 }

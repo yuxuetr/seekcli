@@ -21,6 +21,8 @@ Each turn you may either:
 - create_skill : draft a NEW skill proposal. The proposal goes to the user's
                  review queue; it is NOT auto-activated. After creating, instruct
                  the user to run `/skill proposals` and `/skill accept <name>`.
+                 If a tool result starts with `[NAME COLLISION]`, the chosen name
+                 conflicts with an existing active skill — pick a different name.
 
 # How to choose
 - For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)

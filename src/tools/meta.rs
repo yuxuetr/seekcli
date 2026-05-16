@@ -10,10 +10,23 @@ pub async fn create_skill(args: &Value) -> Result<String> {
   )?;
 
   let home = std::env::var("HOME").context("Could not find HOME directory")?;
-  let proposals_dir = PathBuf::from(home)
-    .join(".seekcli")
-    .join("skills")
-    .join("proposals");
+  let skills_root = PathBuf::from(home).join(".seekcli").join("skills");
+  let proposals_dir = skills_root.join("proposals");
+
+  let safe_name = sanitize_name(&skill.name);
+  let active_path = skills_root.join(format!("{}.json", safe_name));
+
+  // Block name collision with an already-active skill. Proposals overwriting
+  // earlier proposals is fine (model iterating); silently clobbering a
+  // user-accepted skill is not.
+  if active_path.exists() {
+    return Ok(format!(
+      "[NAME COLLISION] An active skill named '{}' already exists. \
+       Choose a different name (e.g. '{}_v2'), or ask the user to first \
+       delete the existing skill if they want to replace it.",
+      skill.name, skill.name
+    ));
+  }
 
   if !proposals_dir.exists() {
     tokio::fs::create_dir_all(&proposals_dir)
@@ -21,9 +34,7 @@ pub async fn create_skill(args: &Value) -> Result<String> {
       .context("Failed to create proposals directory")?;
   }
 
-  let safe_name = sanitize_name(&skill.name);
   let file_path = proposals_dir.join(format!("{}.json", safe_name));
-
   let content = serde_json::to_string_pretty(&skill)?;
   tokio::fs::write(&file_path, content)
     .await

@@ -1,7 +1,6 @@
 use crate::api::{FunctionDefinition, Tool};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 
@@ -55,54 +54,18 @@ impl SkillManager {
       fs::create_dir_all(&proposals_dir)?;
     }
 
-    let manager = Self {
+    Ok(Self {
       skills_dir,
       proposals_dir,
-    };
-    manager.ensure_default_skills()?;
-    Ok(manager)
+    })
+  }
+
+  pub fn skills_dir(&self) -> &PathBuf {
+    &self.skills_dir
   }
 
   pub fn proposals_dir(&self) -> &PathBuf {
     &self.proposals_dir
-  }
-
-  fn ensure_default_skills(&self) -> Result<()> {
-    let default_skills = vec![
-            Skill {
-                name: "translator".to_string(),
-                description: "Professional translator for multiple languages. Use this for translation tasks.".to_string(),
-                system_prompt: "You are a professional translator. Translate everything into natural, idiomatic language.".to_string(),
-                tools: None,
-            },
-            Skill {
-                name: "file_helper".to_string(),
-                description: "Expert at reading and writing local files.".to_string(),
-                system_prompt: "You are a file system assistant. Use your tools to help users manage their local files.".to_string(),
-                tools: Some(vec![
-                    SkillTool {
-                        name: "read_file".to_string(),
-                        description: "Read the content of a file".to_string(),
-                        parameters: json!({
-                            "type": "object",
-                            "properties": {
-                                "path": { "type": "string", "description": "Path to the file" }
-                            },
-                            "required": ["path"]
-                        }),
-                    }
-                ]),
-            }
-        ];
-
-    for skill in default_skills {
-      let path = self.skills_dir.join(format!("{}.json", skill.name));
-      if !path.exists() {
-        let content = serde_json::to_string_pretty(&skill)?;
-        fs::write(path, content)?;
-      }
-    }
-    Ok(())
   }
 
   pub fn load_skills(&self) -> Result<Vec<Skill>> {
