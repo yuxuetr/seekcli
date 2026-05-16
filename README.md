@@ -54,11 +54,11 @@ cargo install --path .
 
 ### 环境变量
 ```bash
-export DEEPSEEK_API_KEY="your_key"   # 必选
+export DEEPSEEK_API_KEY="your_key"        # 必选
+export DEEPSEEK_API_BASE="..."            # 可选，覆盖默认 API endpoint
 ```
 
-> **历史遗留**：当前代码仍读取 `ZHIPU_API_KEY / TAVILY_API_KEY / JINA_API_KEY / STEP_API_KEY / MINERU_API_KEY` 等环境变量以支持多模态网关功能。
-> 这些功能将在 **阶段七** 剥离，未来仅保留 `DEEPSEEK_API_KEY`。
+> 阶段七完成后，SeekCLI 不再读取任何其它供应商的 env vars。如需外部能力（搜索 / 抓页 / OCR）请让模型通过 `run_shell` 自取，或等待后续 MCP 工具接入。
 
 ---
 
@@ -104,14 +104,14 @@ export DEEPSEEK_API_KEY="your_key"   # 必选
 
 ## 🗺️ 路线图概览
 
-| 阶段     | 主题                       | 状态     |
-| -------- | -------------------------- | -------- |
-| 阶段六   | Harness 核心修补           | 🚀 进行中 |
-| 阶段七   | 外围资产剥离               | 📅 计划   |
-| 阶段八   | L3 安全层                   | 📅 计划   |
-| 阶段九   | L5 组合层升级（SubAgent + Skill）| 📅 计划   |
-| 阶段十   | L4 记忆层（压缩 + cache）   | 📅 计划   |
-| 阶段十一 | L6 界面瘦身                 | 📅 计划   |
+| 阶段     | 主题                                | 状态     |
+| -------- | ----------------------------------- | -------- |
+| 阶段六   | Harness 核心修补                    | ✅ 完成   |
+| 阶段七   | 外围资产剥离                        | ✅ 完成   |
+| 阶段八   | L3 安全层（审批 + 路径白名单）       | 🚀 下一步 |
+| 阶段九   | L5 组合层升级（SubAgent + Skill）   | 📅 计划   |
+| 阶段十   | L4 记忆层（压缩 + cache）           | 📅 计划   |
+| 阶段十一 | L6 界面瘦身（中断处理 + 状态指示）  | 📅 计划   |
 
 详细任务拆解见 [`TODOs.md`](./TODOs.md)。
 

@@ -27,6 +27,25 @@ All notable changes to this project will be documented in this file. See [conven
 
 ## [unreleased]
 
+### 🪓 Refactor (Phase 7 — Peripheral Strip)
+- **大幅瘦身**：src/ 从 ~2200 行减至 1528 行 (-672)；Cargo.toml 依赖从 20 个减至 14 个。
+- **删除多模态网关**：MinerU (PDF/Docx 解析) / StepFun VLM (图像理解) / GLM Web Search / Tavily / Jina Reader 全部移除。Provider 枚举只剩 DeepSeek 隐含。
+- **删除外围 slash command**：`/image` `/file` `/web` `/search` `/tavily` 全部移除；`chat()` 中 `@image / @url / @search / @tavily / @pdf` 客户端解析路径取消。
+- **删除 auto-route**：`route_skill` 自动技能路由及 `/skill auto` 开关移除。模型应在 ReAct 里自取 skill（阶段九 `load_skill` 工具实现）。
+- **删除渲染层**：termimad + syntect 智能渲染框 `┏━━━ 智能渲染视图 ━━━┓` 移除，纯文本输出。`/copy` 用非正则行扫描提取代码块。
+- **API 简化**：`Message::Simple.content` 从 `MessageContent` enum 改为 `String`；`ApiClient::new` 签名从 4 参数简化为 1。
+- **依赖清理**：移除 base64 / image / mime_guess / termimad / syntect / regex / crossterm / directories；reqwest 移除 multipart feature。
+- **环境变量精简**：仅保留 `DEEPSEEK_API_KEY` 与可选 `DEEPSEEK_API_BASE`；不再读取 ZHIPU/STEP/MINERU/TAVILY/JINA/DASHSCOPE 等。
+
+### ✨ Features (Phase 6 — Harness Core)
+- **工具 schema 注入**：新增 `src/tools/registry.rs`，所有内置工具以带 JSON schema 的 `Tool` 形式注册并合并 skill tools 下发给 LLM。这是让 ReAct 循环真正运转的关键。
+- **Agent 系统提示构建**：新增 `src/agent/{mod,prompt}.rs`，提供 `agent_system_prompt()` / `subagent_preamble()`。每次 chat 入口通过 `ensure_agent_system_prompt` 保证 system message 在头部，最大化 prompt cache 命中率。
+- **ReAct 迭代上限**：`MAX_ITER=25` 硬保护；达到上限优雅退出。
+- **SubAgent 深度限制 + 工具裁剪**：`MAX_SUBAGENT_DEPTH=3`；子 agent 工具集过滤 `invoke_agent / create_skill` 杜绝递归与越权。
+
+### 🐛 Fixes
+- **修复 streaming tool-call 参数丢失**：OpenAI 协议下 tool call 分片到达，原实现把每个 delta 单独反序列化导致 arguments 累积失败，引发"模型反复尝试调工具但收到空参数"的死循环。新增 `PartialToolCall` 累加器按 `index` 拼接片段，在 `finish_reason` / `[DONE]` 时统一刷出完整 ToolCall。
+
 ### 📐 Architecture
 - **项目重新定位**：从"DeepSeek + 多模态网关"收敛为"DeepSeek + Tools + Harness Agent 核心"。多模态 sensor (StepFun VLM / MinerU / GLM Web Search / Tavily / Jina) 将在阶段七剥离。
 - **引入七层架构纲领**：L0 基底 → L1 引擎 → L2 边界 → L3 安全 → L4 记忆 → L5 组合 → L6 界面。详见 `AGENT_ARCHITECTURE.md`。

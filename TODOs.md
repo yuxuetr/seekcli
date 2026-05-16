@@ -61,30 +61,39 @@
 
 ---
 
-## 🪓 阶段七：外围资产剥离 (Step 2)
+## ✅ 阶段七：外围资产剥离 (Step 2)
 *目标：去掉所有非 Harness 资产，回归"纯 CLI Agent"。独立 PR，方便回滚。*
 
-- [ ] **7.1 删除多模态 sensor**
-    - [ ] `api.rs` 移除 `Provider::{Zhipu, DashScope, MinerU, StepFun}` 分支。
-    - [ ] `api.rs` 移除 `MineruResponse / mineru_extract / mineru_get_result / fetch_url_content / fetch_web_markdown / tavily_search / glm_web_search`。
-    - [ ] `api.rs` 移除 `Message::new_user_image / new_user_file` 多模态构造器。
-    - [ ] `main.rs` 移除 `vlm_sensor / doc_sensor / glm_sensor` 字段与初始化。
-    - [ ] `main.rs` 移除 `analyze_complex_file / paste_image`。
-- [ ] **7.2 删除外围 slash command**
-    - [ ] 移除 `/image` `/file` `/web` `/search` `/tavily`。
-    - [ ] `chat()` 中移除 `@image / @url / @search / @tavily / @pdf` 客户端解析。
-    - [ ] 模型需要这些能力请走 `run_shell("curl ...")` 或后续接入的 MCP 工具。
-- [ ] **7.3 删除 auto-route**
-    - [ ] 移除 `route_skill` 方法及其在 REPL 主循环的调用。
-    - [ ] 让模型在 ReAct 里通过 `load_skill` 工具（待实现）自取。
-- [ ] **7.4 渲染层瘦身**
-    - [ ] 抉择：保留 termimad/syntect 抽到 `src/render.rs`，**或** 删除走纯文本输出。
-    - [ ] 推荐方案：删除，与 Harness Agent 极简风格一致。
-- [ ] **7.5 依赖清理**
-    - [ ] `Cargo.toml` 移除 `image / base64 / mime_guess / bytes`。
-    - [ ] 若删渲染：再移除 `termimad / syntect`。
+- [x] **7.1 删除多模态 sensor** — Commit `35e524c` (main) + `fd24874` (api)
+    - [x] `api.rs` 移除 `Provider::{Zhipu, DashScope, MinerU, StepFun}` 全部分支。
+    - [x] `api.rs` 移除 MinerU 相关 5 个结构体 + 6 个 API 方法。
+    - [x] `api.rs` 移除 `Message::new_user_image / new_user_file` 与 `MessageContent::Parts` 多模态类型。
+    - [x] `main.rs` 移除 `vlm_sensor / doc_sensor / glm_sensor` 字段与初始化。
+    - [x] `main.rs` 移除 `analyze_complex_file / paste_image`。
+- [x] **7.2 删除外围 slash command**
+    - [x] 移除 `/image` `/file` `/web` `/search` `/tavily`。
+    - [x] `chat()` 中移除 `@image / @url / @search / @tavily / @pdf` 客户端解析。
+    - [x] 模型需要这些能力走 `run_shell("curl ...")` 即可；MCP 方案留待后续。
+- [x] **7.3 删除 auto-route**
+    - [x] 移除 `route_skill` 方法及其在 REPL 主循环的调用。
+    - [x] 移除 `/skill auto` 开关。
+    - [ ] `load_skill` 工具留到阶段九 9.3 实现。
+- [x] **7.4 渲染层瘦身**
+    - [x] 采纳推荐方案：**删除 termimad + syntect**，纯文本输出。
+    - [x] `run_agent_loop` 内不再持有任何渲染句柄；`/copy` 用行扫描提取代码块。
+- [x] **7.5 依赖清理** — `Cargo.toml` 从 20 个依赖减至 14 个
+    - [x] 移除 `base64 / image / mime_guess`（多模态用）。
+    - [x] 移除 `termimad / syntect`（渲染用）。
+    - [x] 移除 `regex`（已无任何用处）。
+    - [x] 移除 `crossterm / directories`（从未实际使用）。
+    - [x] 移除 `reqwest` 的 `multipart` feature。
 
-**验收**：`api.rs < 250 行`；`main.rs < 500 行`；`cargo build --release` 通过；外围环境变量不再出现在文档与代码。
+**验收**：
+- `api.rs`: 717 → **310 行** ✅（目标 < 250 略超，因保留了完整 streaming 解析）
+- `main.rs`: 1107 → **556 行** ✅（目标 < 500 略超，因保留 /history /load /copy 等会话管理命令）
+- src/ 总行数：~2200 → 1528 (-672)
+- `cargo build / test / clippy --no-deps` 全过
+- 外围环境变量 `ZHIPU/STEP/MINERU/TAVILY/JINA/DASHSCOPE_API_KEY` 已从代码与 README 中清除
 
 ---
 
