@@ -121,25 +121,34 @@
 
 ---
 
-## 🧩 阶段九：L5 组合层升级
+## ✅ 阶段九：L5 组合层升级
 *目标：SubAgent 类型化，Skill 重定位为 proposal 审核流程。*
 
-- [ ] **9.1 SubAgent 模板注册表**
-    - [ ] 新增 `src/subagents/registry.rs`，定义 `SubAgentTemplate { name, system_prompt, allowed_tools, max_iter }`。
-    - [ ] 内置至少两种：`explore`（只读探索）、`general`（通用子任务）。
-    - [ ] `invoke_agent` 工具 schema 加 `subagent_type` 枚举字段。
-    - [ ] 派发时按 template 设置 system prompt 与工具子集。
-- [ ] **9.2 Skill proposal 审核机制**
-    - [ ] `create_skill` 工具写入 `~/.seekcli/skills/proposals/` 而非直接 `skills/`。
-    - [ ] 新增 `/skill review` REPL 命令：列出 proposals → 用户 `accept/reject/edit`。
-    - [ ] 通过审核的 skill 才移动到 `~/.seekcli/skills/` 生效。
-    - [ ] 文档明确说明：这是协作流程，不是"自演化"。
-- [ ] **9.3 Skill 加载工具化**
-    - [ ] 新增 `load_skill` 系统工具，让模型在 ReAct 里按需切换技能（替代被删的 auto-route）。
-    - [ ] schema：`{"name": "translator"}`。
-    - [ ] 切换时把 skill 的 system_prompt 作为新 system message 推入上下文。
+- [x] **9.1 SubAgent 模板注册表** — Commit `4cccfff`
+    - [x] 新增 `src/subagents/{mod,registry}.rs`，`SubAgentTemplate { name, description, system_prompt, allowed_tools, max_iter }`。
+    - [x] 内置 `explore`（只读，max_iter=15）和 `general`（带 write_file，max_iter=20）。两者都不含 `invoke_agent / create_skill`。
+    - [x] `invoke_agent` schema 加 `subagent_type: enum["explore","general"]` 必选字段。
+    - [x] 派发时 `tools::registry::filter_by_allowed` 按白名单裁工具；`max_iter` 跟随模板。
+    - [x] 删除孤儿 `filter_for_subagent` / `subagent_preamble`。
+- [x] **9.2 Skill proposal 审核机制**
+    - [x] `tools::meta::create_skill` 改写到 `~/.seekcli/skills/proposals/`。
+    - [x] `SkillManager::{list_proposals, accept_proposal, reject_proposal}` 增加。
+    - [x] REPL：`/skill proposals` / `/skill accept <name>` / `/skill reject <name>`。
+    - [x] `accept_proposal` 检查目标 skill 不存在才允许 rename，避免静默覆盖。
+    - [x] `agent_system_prompt` 明确：create_skill 是 proposal，不是激活；指示模型告诉用户去 review。
+- [x] **9.3 Skill 加载工具化**
+    - [x] `load_skill` 工具 schema 加入 system_tools。
+    - [x] main.rs::run_agent_loop 拦截 `load_skill`（与 `invoke_agent` 同类），把 skill 的 system_prompt 推入 messages 并 set self.current_skill。
+    - [x] 子 agent (depth > 0) 调用 `load_skill` 返回 `[ERROR] restricted to the main agent`，杜绝持久化副作用。
 
-**验收**：模型可通过 `invoke_agent("explore", "find all use of tokio::spawn")` 拿到摘要；模型起草的 skill 必须经过用户审核才能生效。
+**验收**：
+- `cargo test`：15 个测试全过
+- `cargo clippy --no-deps`：零告警
+- 实战测试待用户验证：
+  - 让模型用 `invoke_agent("explore", ...)` 派发只读探索 → 应正常返回摘要
+  - 让模型尝试 `create_skill` → proposal 落到 `proposals/`，`/skill proposals` 能看到
+  - `/skill accept <name>` 后 → `/skill list` 应出现新 skill
+  - 让模型在对话中 `load_skill("translator")` → 后续回复应转译风格
 
 ---
 

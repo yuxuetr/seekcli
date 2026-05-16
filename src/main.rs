@@ -83,16 +83,19 @@ impl App {
 
   fn print_help(&self) {
     println!("{}", "\nAvailable Commands:".bold().yellow());
-    println!("  /model [flash|pro]   Switch DeepSeek model");
-    println!("  /thinking [n|h|m]    Switch thinking intensity (None/High/Max)");
-    println!("  /skill list          List all skills");
-    println!("  /skill <name>        Activate a skill");
-    println!("  /copy [index]        Copy code block from last response");
-    println!("  /clear               Reset conversation");
-    println!("  /history             List previous sessions");
-    println!("  /load <id>           Load a previous session by id prefix");
-    println!("  /help                Show this help");
-    println!("  /quit                Exit\n");
+    println!("  /model [flash|pro]      Switch DeepSeek model");
+    println!("  /thinking [n|h|m]       Switch thinking intensity (None/High/Max)");
+    println!("  /skill list             List active skills");
+    println!("  /skill <name>           Activate a skill");
+    println!("  /skill proposals        List pending skill proposals from the agent");
+    println!("  /skill accept <name>    Promote a proposal to active skill");
+    println!("  /skill reject <name>    Discard a skill proposal");
+    println!("  /copy [index]           Copy code block from last response");
+    println!("  /clear                  Reset conversation");
+    println!("  /history                List previous sessions");
+    println!("  /load <id>              Load a previous session by id prefix");
+    println!("  /help                   Show this help");
+    println!("  /quit                   Exit\n");
   }
 
   async fn run(&mut self) -> Result<()> {
@@ -170,29 +173,64 @@ impl App {
         self.current_skill = None;
         println!("{}", "Conversation reset.".yellow());
       }
-      "/skill" => {
-        if parts.len() > 1 {
-          match parts[1] {
-            "list" => {
-              let skills = self.skill_manager.load_skills()?;
-              for s in skills {
-                println!("- {}: {}", s.name.bold(), s.description);
-              }
-            }
-            name => {
-              let skills = self.skill_manager.load_skills()?;
-              if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
-                println!("{} Activated skill: {}", "✦".cyan(), skill.name.green());
-                self.activate_skill(skill);
-              } else {
-                println!("{} Skill not found: {}", "Error:".red(), name);
-              }
+      "/skill" => match parts.get(1).copied() {
+        None => println!(
+          "{} Usage: /skill list | /skill proposals | /skill <name> | /skill accept <name> | /skill reject <name>",
+          "Info:".blue()
+        ),
+        Some("list") => {
+          let skills = self.skill_manager.load_skills()?;
+          if skills.is_empty() {
+            println!("{} No skills installed.", "Info:".blue());
+          } else {
+            for s in skills {
+              println!("- {}: {}", s.name.bold(), s.description);
             }
           }
-        } else {
-          println!("{} Usage: /skill list | /skill <name>", "Info:".blue());
         }
-      }
+        Some("proposals") => {
+          let proposals = self.skill_manager.list_proposals()?;
+          if proposals.is_empty() {
+            println!("{} No skill proposals pending.", "Info:".blue());
+          } else {
+            println!(
+              "Pending proposals (run {} or {}):",
+              "/skill accept <name>".green(),
+              "/skill reject <name>".yellow()
+            );
+            for s in proposals {
+              println!("- {}: {}", s.name.bold(), s.description);
+            }
+          }
+        }
+        Some("accept") => match parts.get(2) {
+          None => println!("{} Usage: /skill accept <name>", "Info:".blue()),
+          Some(name) => match self.skill_manager.accept_proposal(name) {
+            Ok(()) => println!(
+              "{} Promoted '{}' to active skill.",
+              "Success:".green(),
+              name
+            ),
+            Err(e) => println!("{} {}", "Error:".red(), e),
+          },
+        },
+        Some("reject") => match parts.get(2) {
+          None => println!("{} Usage: /skill reject <name>", "Info:".blue()),
+          Some(name) => match self.skill_manager.reject_proposal(name) {
+            Ok(()) => println!("{} Discarded proposal '{}'.", "Success:".green(), name),
+            Err(e) => println!("{} {}", "Error:".red(), e),
+          },
+        },
+        Some(name) => {
+          let skills = self.skill_manager.load_skills()?;
+          if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
+            println!("{} Activated skill: {}", "✦".cyan(), skill.name.green());
+            self.activate_skill(skill);
+          } else {
+            println!("{} Skill not found: {}", "Error:".red(), name);
+          }
+        }
+      },
       "/model" => {
         if parts.len() > 1 {
           self.model = match parts[1] {
@@ -331,6 +369,15 @@ impl App {
       return (subagent_type, prompt);
     }
     ("general".to_string(), arguments.to_string())
+  }
+
+  fn parse_load_skill_args(arguments: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
+      && let Some(n) = v.get("name").and_then(|s| s.as_str())
+    {
+      return n.to_string();
+    }
+    arguments.to_string()
   }
 
   fn ensure_agent_system_prompt(messages: &mut Vec<Message>) {
@@ -551,6 +598,46 @@ impl App {
                     format!("Sub-agent '{}' completed. Summary:\n{}", template.name, res)
                   }
                   Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
+                }
+              }
+            }
+          }
+        } else if tc.function.name == "load_skill" {
+          if depth > 0 {
+            "[ERROR] load_skill is restricted to the main agent. \
+             Sub-agents cannot switch skills."
+              .to_string()
+          } else {
+            let name = Self::parse_load_skill_args(&tc.function.arguments);
+            match self.skill_manager.load_skills() {
+              Err(e) => format!("Failed to enumerate skills: {}", e),
+              Ok(skills) => {
+                let found = skills.iter().find(|s| s.name == name).cloned();
+                match found {
+                  Some(skill) => {
+                    let prompt_text = format!(
+                      "# Activated Skill: {}\n\n{}",
+                      skill.name, skill.system_prompt
+                    );
+                    messages.push(Message::Simple {
+                      role: "system".to_string(),
+                      content: prompt_text,
+                      reasoning_content: None,
+                      tool_calls: None,
+                    });
+                    let skill_name = skill.name.clone();
+                    self.current_skill = Some(skill);
+                    println!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
+                    format!(
+                      "Skill '{}' loaded. Its system prompt is now active. \
+                       Continue the user's task in this persona.",
+                      skill_name
+                    )
+                  }
+                  None => {
+                    let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                    format!("Skill '{}' not found. Available: {:?}", name, available)
+                  }
                 }
               }
             }

@@ -17,7 +17,10 @@ Each turn you may either:
 - invoke_agent : delegate to a typed sub-agent. Pass subagent_type:
     - explore : read-only investigation (list dirs, read files, grep). Fastest, safest.
     - general : full read/write/shell for end-to-end focused subtasks.
-- create_skill : propose a new reusable skill bundle for the user's library
+- load_skill : activate a previously-saved skill (e.g. translator) mid-conversation.
+- create_skill : draft a NEW skill proposal. The proposal goes to the user's
+                 review queue; it is NOT auto-activated. After creating, instruct
+                 the user to run `/skill proposals` and `/skill accept <name>`.
 
 # How to choose
 - For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)

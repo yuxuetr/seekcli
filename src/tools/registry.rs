@@ -86,8 +86,10 @@ pub fn system_tools() -> Vec<Tool> {
     ),
     make_tool(
       "create_skill",
-      "Persist a reusable skill (system_prompt + tool subset) to the user's skill library. \
-       Use this only when the user explicitly asks to remember a pattern of work.",
+      "Draft a reusable skill proposal. The proposal is saved to the user's review \
+       queue, NOT directly activated. Use this only when the user explicitly asks \
+       to remember a pattern of work. Tell the user to run `/skill proposals` \
+       afterwards to review and accept.",
       json!({
         "type": "object",
         "properties": {
@@ -101,6 +103,24 @@ pub fn system_tools() -> Vec<Tool> {
           }
         },
         "required": ["name", "description", "system_prompt"]
+      }),
+    ),
+    make_tool(
+      "load_skill",
+      "Activate a previously-saved skill mid-conversation. Its system prompt is \
+       appended to the conversation as a system message, taking effect immediately \
+       on subsequent turns. Use this when the user's intent matches an existing \
+       skill (translator, code_reviewer, etc). Only the main agent can call this; \
+       sub-agents cannot switch skills.",
+      json!({
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Exact skill name from /skill list"
+          }
+        },
+        "required": ["name"]
       }),
     ),
   ]

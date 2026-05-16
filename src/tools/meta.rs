@@ -1,33 +1,41 @@
-use crate::skills::Skill;
+use crate::skills::{Skill, sanitize_name};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
 
 pub async fn create_skill(args: &Value) -> Result<String> {
-  // Attempt to parse the arguments into our Skill struct
-  let skill: Skill = serde_json::from_value(args.clone())
-        .context("Failed to parse arguments into a valid Skill format. Ensure 'name', 'description', and 'system_prompt' are provided.")?;
+  let skill: Skill = serde_json::from_value(args.clone()).context(
+    "Failed to parse arguments into a valid Skill format. \
+     Ensure 'name', 'description', and 'system_prompt' are provided.",
+  )?;
 
   let home = std::env::var("HOME").context("Could not find HOME directory")?;
-  let skills_dir = PathBuf::from(home).join(".seekcli").join("skills");
+  let proposals_dir = PathBuf::from(home)
+    .join(".seekcli")
+    .join("skills")
+    .join("proposals");
 
-  if !skills_dir.exists() {
-    tokio::fs::create_dir_all(&skills_dir)
+  if !proposals_dir.exists() {
+    tokio::fs::create_dir_all(&proposals_dir)
       .await
-      .context("Failed to create skills directory")?;
+      .context("Failed to create proposals directory")?;
   }
 
-  // Sanitize skill name to prevent directory traversal
-  let safe_name = skill.name.replace("/", "_").replace("\\", "_");
-  let file_path = skills_dir.join(format!("{}.json", safe_name));
+  let safe_name = sanitize_name(&skill.name);
+  let file_path = proposals_dir.join(format!("{}.json", safe_name));
 
   let content = serde_json::to_string_pretty(&skill)?;
   tokio::fs::write(&file_path, content)
     .await
-    .context("Failed to write skill file")?;
+    .context("Failed to write skill proposal")?;
 
   Ok(format!(
-    "Successfully created new skill '{}' at {:?}",
-    skill.name, file_path
+    "Skill proposal '{}' saved to {:?}.\n\
+     The proposal is NOT active yet. The user must review and accept it via:\n\
+       /skill proposals          (list pending)\n\
+       /skill accept {}   (promote to active)\n\
+       /skill reject {}   (discard)\n\
+     Do not assume the skill is loaded; tell the user a proposal awaits review.",
+    skill.name, file_path, skill.name, skill.name
   ))
 }
