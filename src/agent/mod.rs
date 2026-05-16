@@ -1,3 +1,4 @@
+pub mod compressor;
 pub mod prompt;
 
 /// Maximum number of ReAct iterations per chat turn.

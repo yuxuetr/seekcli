@@ -152,22 +152,62 @@
 
 ---
 
-## 🧠 阶段十：L4 记忆层
+## ✅ 阶段十：L4 记忆层
 *目标：让长会话不爆 token，命中 prompt cache。*
 
-- [ ] **10.1 上下文压缩**
-    - [ ] 新增 `src/agent/compressor.rs::maybe_compress()`。
-    - [ ] 阈值：`messages` 总字符数 > 600KB（约 150K token）时触发。
-    - [ ] 策略：保留 system + 最近 6 条，中间段交给 DeepSeek 自己摘要。
-    - [ ] 摘要结果以特殊 user message `[Compressed earlier turns] ...` 插入。
-- [ ] **10.2 prompt cache 验证**
-    - [ ] 固定 system message 完全一致（不随时间戳变化）。
-    - [ ] streaming 结束时打印 `prompt_cache_hit_tokens`，验证命中率。
-- [ ] **10.3 Session 改造**
-    - [ ] 压缩前的原始 messages 落 `sessions/<id>.raw.json`，方便回溯。
-    - [ ] 压缩后的 messages 落 `sessions/<id>.json`，作为 `/load` 复活点。
+- [x] **10.1 上下文压缩** — `src/agent/compressor.rs` (~150 行 + 2 单测)
+    - [x] `maybe_compress(client, model, &mut messages)` 主入口。
+    - [x] 阈值 `COMPRESSION_THRESHOLD_BYTES = 600_000` 字节（约 150K~300K token，取决于中英占比）。
+    - [x] 策略：保留**所有前导 system message**（agent prompt + 可选 skill prompt，cache 前缀稳定）+ 最近 8 条尾部消息；中间段用 DeepSeek 自己摘要。
+    - [x] 摘要以 `[Compressed earlier turns]\n\n<summary>` 作为新 system message 插入。
+    - [x] `run_agent_loop` 仅在 `depth == 0`（主 agent）每轮顶部触发；子 agent 跳过。
+    - [x] 压缩失败时降级为日志告警 + 继续原 messages，不中断对话。
+- [x] **10.2 prompt cache 验证**
+    - [x] `api::StreamItem::Usage(UsageInfo)` 新增枚举变体。
+    - [x] SSE parser 识别 `usage` 字段（独立于 choices 块出现）。
+    - [x] `run_agent_loop` 每轮末尾打印 `[Usage] prompt=N (cache hit X%, M miss), completion=K`。
+    - [x] 系统提示自阶段六起即固定（`agent::prompt::agent_system_prompt`），cache 前缀稳定。
+- [ ] **10.3 Session raw/compressed 双存档** — **推迟**
+    - 评估后认为侵入度过高：history.rs 需要双路径写入 + /load 需要语义判断。
+    - 当前 session JSON 已是"压缩后状态"快照，足以满足 /load 续接。
+    - 若未来需要审计原始 trace，可作为独立小阶段补做。
 
-**验收**：模拟一次 30 轮对话，触发压缩后 token 总量回落 60%+，且后续推理仍能引用早期内容的关键点。
+**验收**：
+- `cargo test`: 17 通过（15 旧 + 2 新 compressor 单测）
+- `cargo clippy --no-deps`: 零告警
+- 实战测试待用户验证：长对话触发压缩后日志显示压缩率；多轮交互后 `[Usage]` 行 cache hit% 应递增（DeepSeek 缓存前缀生效）。
+
+---
+
+## 📦 阶段十二：Skill 存储格式标准化（agentskills.io 兼容）
+*目标：从 `<name>.json` 单文件迁移到 `<name>/SKILL.md` 目录形式，
+兼容 Anthropic Agent Skills / agentskills.io / Hermes 生态。*
+
+- [ ] **12.1 SKILL.md 格式定义**
+    - [ ] 主文件：`~/.seekcli/skills/<name>/SKILL.md`，YAML frontmatter + Markdown body。
+    - [ ] frontmatter 字段：`name` / `description` / `allowed_tools`（可选）/ `version`（可选）。
+    - [ ] body 即 system_prompt（Markdown 直写，无需 JSON escape）。
+    - [ ] 支持子目录：`scripts/`（skill 可调用的辅助脚本）、`references/`（参考文档/示例语料/术语表）。
+- [ ] **12.2 Parser 与依赖**
+    - [ ] 新增 dep：`gray_matter` 或 `serde_yaml`（择一，看体积权衡）。
+    - [ ] `SkillManager::read_skill_dir` 改为扫描子目录形式：遇到目录 → 找 SKILL.md → 解析。
+    - [ ] 向后兼容：仍能读取旧 `<name>.json` 形式，标记 "[legacy]"。
+- [ ] **12.3 migrate 工具**
+    - [ ] 新增 REPL 命令 `/skill migrate`：把 `<name>.json` 自动转成 `<name>/SKILL.md` 目录。
+    - [ ] 或独立 CLI 子命令 `seekcli migrate-skills`。
+    - [ ] 迁移后原 .json 自动备份到 `<name>.json.bak`。
+- [ ] **12.4 create_skill 工具更新**
+    - [ ] proposal 也走目录形式：`proposals/<name>/SKILL.md`。
+    - [ ] 工具 schema 描述提示模型用 Markdown 写 system_prompt（不再是 JSON 字符串）。
+- [ ] **12.5 scripts / references 支持**
+    - [ ] skill 加载时，把 `scripts/*.sh` 列表 / `references/*.md` 摘要注入到激活上下文。
+    - [ ] 或更激进：把 references 内容也作为 system context 附加。
+- [ ] **12.6 文档对齐**
+    - [ ] `AGENT_ARCHITECTURE.md §3` 表格更新："Skill 来源 = SKILL.md 目录策展"。
+    - [ ] `README.md` 加 skill 创作示例。
+
+**验收**：用户/模型可创建带 SKILL.md + references/ 的复杂 skill；
+现有 5 个 JSON skill 一键 migrate 成功后可用。
 
 ---
 

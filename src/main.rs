@@ -449,6 +449,19 @@ impl App {
     let mut completed = false;
 
     for _iter in 0..max_iter {
+      // Compression only at top-level main agent; sub-agents have short focused
+      // contexts and their own max_iter cap.
+      if depth == 0
+        && let Err(e) =
+          agent::compressor::maybe_compress(&self.brain, &self.model, &mut messages).await
+      {
+        println!(
+          "{} compression failed: {} (continuing without)",
+          "[Memory]".yellow(),
+          e
+        );
+      }
+
       let mut stream = self
         .brain
         .call_api_with_params(
@@ -510,6 +523,21 @@ impl App {
             {
               println!("\n{}", "[Note: Max output limit reached.]".yellow());
             }
+          }
+          StreamItem::Usage(info) => {
+            let pct = info
+              .prompt_cache_hit_tokens
+              .checked_mul(100)
+              .and_then(|n| n.checked_div(info.prompt_tokens))
+              .unwrap_or(0);
+            println!(
+              "{} prompt={} (cache hit {}%, {} miss), completion={}",
+              "[Usage]".dimmed(),
+              info.prompt_tokens,
+              pct,
+              info.prompt_cache_miss_tokens,
+              info.completion_tokens
+            );
           }
         }
         io::stdout().flush()?;

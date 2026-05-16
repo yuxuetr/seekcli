@@ -65,6 +65,18 @@ pub enum StreamItem {
   Content(String),
   ToolCall(ToolCall),
   Finish(Option<String>),
+  Usage(UsageInfo),
+}
+
+/// Token-level accounting reported by DeepSeek at the end of a streamed
+/// response. `prompt_cache_hit_tokens` is what we mainly care about — it
+/// tells us how much of the prefix was served from cache (free + faster).
+#[derive(Debug, Clone, Default)]
+pub struct UsageInfo {
+  pub prompt_tokens: u64,
+  pub completion_tokens: u64,
+  pub prompt_cache_hit_tokens: u64,
+  pub prompt_cache_miss_tokens: u64,
 }
 
 /// Accumulator for a single tool call as it streams in fragments.
@@ -224,8 +236,36 @@ impl Stream for StreamState {
                 break;
               }
 
-              if let Ok(val) = serde_json::from_str::<serde_json::Value>(data)
-                && let Some(choices) = val["choices"].as_array()
+              let val = match serde_json::from_str::<serde_json::Value>(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+              };
+
+              // Usage info can land in a chunk with empty `choices`, so
+              // parse it before the choices branch.
+              if let Some(usage) = val.get("usage").and_then(|u| u.as_object()) {
+                let info = UsageInfo {
+                  prompt_tokens: usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                  completion_tokens: usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                  prompt_cache_hit_tokens: usage
+                    .get("prompt_cache_hit_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                  prompt_cache_miss_tokens: usage
+                    .get("prompt_cache_miss_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                };
+                self.pending.push_back(Ok(StreamItem::Usage(info)));
+              }
+
+              if let Some(choices) = val["choices"].as_array()
                 && let Some(choice) = choices.first()
               {
                 let delta = &choice["delta"];
