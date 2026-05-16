@@ -103,7 +103,7 @@ impl App {
     println!("  /model [flash|pro]      Switch DeepSeek model");
     println!("  /thinking [n|h|m]       Switch thinking intensity (None/High/Max)");
     println!("  /skill list             List active skills");
-    println!("  /skill <name>           Activate a skill");
+    println!("  /skill <name> [prompt]  Activate a skill (optional: send prompt immediately)");
     println!("  /skill proposals        List pending skill proposals from the agent");
     println!("  /skill accept <name>    Promote a proposal to active skill");
     println!("  /skill reject <name>    Discard a skill proposal");
@@ -281,6 +281,12 @@ impl App {
           if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
             println!("{} Activated skill: {}", "✦".cyan(), skill.name.green());
             self.activate_skill(skill);
+            // If the user wrote `/skill <name> rest of prompt`, treat the
+            // trailing tokens as an immediate chat turn after activation.
+            if parts.len() > 2 {
+              let prompt = parts[2..].join(" ");
+              self.chat(&prompt).await?;
+            }
           } else {
             println!("{} Skill not found: {}", "Error:".red(), name);
           }
