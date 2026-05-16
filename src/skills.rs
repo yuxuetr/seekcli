@@ -81,30 +81,130 @@ impl SkillManager {
 
   pub fn accept_proposal(&self, name: &str) -> Result<()> {
     let safe = sanitize_name(name);
-    let src = self.proposals_dir.join(format!("{}.json", safe));
-    let dst = self.skills_dir.join(format!("{}.json", safe));
-    if !src.exists() {
-      anyhow::bail!("Proposal '{}' not found", name);
-    }
-    if dst.exists() {
+    let src_dir = self.proposals_dir.join(&safe);
+    let src_json = self.proposals_dir.join(format!("{}.json", safe));
+    let dst_dir = self.skills_dir.join(&safe);
+    let dst_json = self.skills_dir.join(format!("{}.json", safe));
+
+    if dst_dir.exists() || dst_json.exists() {
       anyhow::bail!(
         "A skill named '{}' already exists. Reject the proposal or rename it first.",
         name
       );
     }
-    fs::rename(&src, &dst)
-      .with_context(|| format!("Failed to promote proposal '{}' to active skill", name))?;
+
+    if src_dir.is_dir() {
+      fs::rename(&src_dir, &dst_dir).with_context(|| {
+        format!(
+          "Failed to promote proposal '{}' (dir) to active skill",
+          name
+        )
+      })?;
+    } else if src_json.exists() {
+      fs::rename(&src_json, &dst_json).with_context(|| {
+        format!(
+          "Failed to promote proposal '{}' (json) to active skill",
+          name
+        )
+      })?;
+    } else {
+      anyhow::bail!("Proposal '{}' not found", name);
+    }
     Ok(())
   }
 
   pub fn reject_proposal(&self, name: &str) -> Result<()> {
     let safe = sanitize_name(name);
-    let path = self.proposals_dir.join(format!("{}.json", safe));
-    if !path.exists() {
+    let src_dir = self.proposals_dir.join(&safe);
+    let src_json = self.proposals_dir.join(format!("{}.json", safe));
+
+    if src_dir.is_dir() {
+      fs::remove_dir_all(&src_dir)
+        .with_context(|| format!("Failed to delete proposal directory '{}'", name))?;
+    } else if src_json.exists() {
+      fs::remove_file(&src_json)
+        .with_context(|| format!("Failed to delete proposal file '{}'", name))?;
+    } else {
       anyhow::bail!("Proposal '{}' not found", name);
     }
-    fs::remove_file(&path).with_context(|| format!("Failed to delete proposal '{}'", name))?;
     Ok(())
+  }
+
+  /// Convert every legacy `<name>.json` skill in `skills_dir` to a
+  /// `<name>/SKILL.md` directory. The original `.json` is renamed to
+  /// `.json.bak` so the migration is reversible by hand.
+  ///
+  /// Returns `(migrated_count, skipped_count, errors)` where each entry of
+  /// `errors` describes one skill that could not be migrated.
+  pub fn migrate_legacy(&self) -> Result<MigrateReport> {
+    let mut report = MigrateReport::default();
+    for entry in fs::read_dir(&self.skills_dir)? {
+      let entry = entry?;
+      let path = entry.path();
+      let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+      if name == "proposals" {
+        continue;
+      }
+      if !path.is_file() {
+        continue;
+      }
+      if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        continue;
+      }
+
+      let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+          report.errors.push(format!("{}: read failed: {}", name, e));
+          continue;
+        }
+      };
+      let skill: Skill = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+          report.errors.push(format!("{}: invalid JSON: {}", name, e));
+          continue;
+        }
+      };
+
+      let safe = sanitize_name(&skill.name);
+      let dir = self.skills_dir.join(&safe);
+      if dir.exists() {
+        report
+          .skipped
+          .push(format!("{}: directory already exists", skill.name));
+        continue;
+      }
+
+      if let Err(e) = fs::create_dir(&dir) {
+        report
+          .errors
+          .push(format!("{}: mkdir failed: {}", skill.name, e));
+        continue;
+      }
+
+      let md = render_skill_md(&skill);
+      if let Err(e) = fs::write(dir.join("SKILL.md"), md) {
+        report
+          .errors
+          .push(format!("{}: write SKILL.md failed: {}", skill.name, e));
+        // Roll back the dir so a retry can succeed
+        let _ = fs::remove_dir_all(&dir);
+        continue;
+      }
+
+      let bak = path.with_extension("json.bak");
+      if let Err(e) = fs::rename(&path, &bak) {
+        report
+          .errors
+          .push(format!("{}: backup rename failed: {}", skill.name, e));
+        continue;
+      }
+
+      report.migrated.push(skill.name);
+    }
+    Ok(report)
   }
 
   /// Scan `dir` for skills in either format:
@@ -154,6 +254,67 @@ impl SkillManager {
 
 pub fn sanitize_name(name: &str) -> String {
   name.replace(['/', '\\'], "_")
+}
+
+#[derive(Debug, Default)]
+pub struct MigrateReport {
+  pub migrated: Vec<String>,
+  pub skipped: Vec<String>,
+  pub errors: Vec<String>,
+}
+
+/// Render a `Skill` into the `<name>/SKILL.md` body string. Used by both
+/// the `migrate_legacy` tool and `create_skill` when writing new proposals.
+pub fn render_skill_md(skill: &Skill) -> String {
+  let mut out = String::new();
+  out.push_str("---\n");
+  out.push_str(&format!("name: {}\n", quote_if_needed(&skill.name)));
+  out.push_str(&format!(
+    "description: {}\n",
+    quote_if_needed(&skill.description)
+  ));
+  if let Some(tools) = &skill.tools
+    && !tools.is_empty()
+  {
+    out.push_str("allowed_tools:\n");
+    for t in tools {
+      out.push_str(&format!("  - {}\n", quote_if_needed(&t.name)));
+    }
+  }
+  out.push_str("---\n\n");
+  out.push_str(&skill.system_prompt);
+  if !skill.system_prompt.ends_with('\n') {
+    out.push('\n');
+  }
+  out
+}
+
+/// Quote a scalar value for safe YAML emission. Conservative: quotes
+/// anything containing `:` or `#`, leading/trailing whitespace, or YAML
+/// indicator characters at the start.
+fn quote_if_needed(s: &str) -> String {
+  let needs_quotes = s.is_empty()
+    || s != s.trim()
+    || s.contains(':')
+    || s.contains('#')
+    || s.contains('\n')
+    || s.starts_with('-')
+    || s.starts_with('[')
+    || s.starts_with('{')
+    || s.starts_with('"')
+    || s.starts_with('\'')
+    || s.starts_with('&')
+    || s.starts_with('*')
+    || s.starts_with('!')
+    || s.starts_with('|')
+    || s.starts_with('>')
+    || s.starts_with('%')
+    || s.starts_with('@');
+  if needs_quotes {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+  } else {
+    s.to_string()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +542,75 @@ mod tests {
     let (_, body) = parse_skill_md(content).expect("parse ok");
     assert!(body.contains("```rust"));
     assert!(body.contains("let x = 1;"));
+  }
+
+  #[test]
+  fn render_skill_md_minimal() {
+    let skill = Skill {
+      name: "tester".to_string(),
+      description: "a test skill".to_string(),
+      system_prompt: "do the thing".to_string(),
+      tools: None,
+    };
+    let md = render_skill_md(&skill);
+    assert!(md.starts_with("---\n"));
+    assert!(md.contains("name: tester"));
+    assert!(md.contains("description: a test skill"));
+    assert!(md.ends_with("do the thing\n"));
+  }
+
+  #[test]
+  fn render_then_parse_roundtrips() {
+    let original = Skill {
+      name: "rt-test".to_string(),
+      description: "round: trip with # special chars".to_string(),
+      system_prompt: "Body line 1.\nBody line 2.".to_string(),
+      tools: None,
+    };
+    let md = render_skill_md(&original);
+    let (fm, body) = parse_skill_md(&md).expect("roundtrip parses");
+    assert_eq!(fm.name, original.name);
+    assert_eq!(fm.description, original.description);
+    assert!(body.contains("Body line 1."));
+    assert!(body.contains("Body line 2."));
+  }
+
+  #[test]
+  fn render_quotes_problematic_values() {
+    let skill = Skill {
+      name: "x".to_string(),
+      description: "has: colon and #hash".to_string(),
+      system_prompt: "body".to_string(),
+      tools: None,
+    };
+    let md = render_skill_md(&skill);
+    // description must be quoted since it contains both ':' and '#'
+    assert!(md.contains("description: \"has: colon and #hash\""));
+  }
+
+  #[test]
+  fn render_includes_allowed_tools() {
+    let skill = Skill {
+      name: "x".to_string(),
+      description: "y".to_string(),
+      system_prompt: "body".to_string(),
+      tools: Some(vec![
+        SkillTool {
+          name: "read_file".to_string(),
+          description: "".to_string(),
+          parameters: serde_json::json!({}),
+        },
+        SkillTool {
+          name: "run_shell".to_string(),
+          description: "".to_string(),
+          parameters: serde_json::json!({}),
+        },
+      ]),
+    };
+    let md = render_skill_md(&skill);
+    assert!(md.contains("allowed_tools:"));
+    assert!(md.contains("  - read_file"));
+    assert!(md.contains("  - run_shell"));
   }
 
   #[test]

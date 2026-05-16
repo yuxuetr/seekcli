@@ -18,11 +18,15 @@ Each turn you may either:
     - explore : read-only investigation (list dirs, read files, grep). Fastest, safest.
     - general : full read/write/shell for end-to-end focused subtasks.
 - load_skill : activate a previously-saved skill (e.g. translator) mid-conversation.
-- create_skill : draft a NEW skill proposal. The proposal goes to the user's
-                 review queue; it is NOT auto-activated. After creating, instruct
-                 the user to run `/skill proposals` and `/skill accept <name>`.
-                 If a tool result starts with `[NAME COLLISION]`, the chosen name
-                 conflicts with an existing active skill — pick a different name.
+- create_skill : draft a NEW skill proposal as `<name>/SKILL.md` (Markdown body
+                 with YAML frontmatter). The proposal goes to the user's review
+                 queue; it is NOT auto-activated. After creating, instruct the
+                 user to run `/skill proposals` and `/skill accept <name>`.
+                 Tip: write `system_prompt` as readable Markdown (headings,
+                 lists, code fences welcome) — it will be rendered verbatim
+                 into the body. If a tool result starts with `[NAME COLLISION]`,
+                 the chosen name conflicts with an existing skill — pick a
+                 different name.
 
 # How to choose
 - For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)

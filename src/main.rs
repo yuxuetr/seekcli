@@ -90,6 +90,7 @@ impl App {
     println!("  /skill proposals        List pending skill proposals from the agent");
     println!("  /skill accept <name>    Promote a proposal to active skill");
     println!("  /skill reject <name>    Discard a skill proposal");
+    println!("  /skill migrate          Convert legacy <name>.json skills to <name>/SKILL.md");
     println!("  /copy [index]           Copy code block from last response");
     println!("  /clear                  Reset conversation");
     println!("  /history                List previous sessions");
@@ -175,7 +176,7 @@ impl App {
       }
       "/skill" => match parts.get(1).copied() {
         None => println!(
-          "{} Usage: /skill list | /skill proposals | /skill <name> | /skill accept <name> | /skill reject <name>",
+          "{} Usage: /skill list | /skill proposals | /skill <name> | /skill accept <name> | /skill reject <name> | /skill migrate",
           "Info:".blue()
         ),
         Some("list") => {
@@ -220,6 +221,36 @@ impl App {
             Ok(()) => println!("{} Discarded proposal '{}'.", "Success:".green(), name),
             Err(e) => println!("{} {}", "Error:".red(), e),
           },
+        },
+        Some("migrate") => match self.skill_manager.migrate_legacy() {
+          Err(e) => println!("{} migrate failed: {}", "Error:".red(), e),
+          Ok(report) => {
+            if report.migrated.is_empty() && report.skipped.is_empty() && report.errors.is_empty() {
+              println!("{} No legacy .json skills to migrate.", "Info:".blue());
+            } else {
+              for name in &report.migrated {
+                println!(
+                  "{} migrated '{}' → {}/SKILL.md (backup: {}.json.bak)",
+                  "Success:".green(),
+                  name,
+                  name,
+                  name
+                );
+              }
+              for s in &report.skipped {
+                println!("{} skipped: {}", "Info:".blue(), s);
+              }
+              for e in &report.errors {
+                println!("{} {}", "Error:".red(), e);
+              }
+              println!(
+                "\nTotals: {} migrated, {} skipped, {} errors.",
+                report.migrated.len(),
+                report.skipped.len(),
+                report.errors.len()
+              );
+            }
+          }
         },
         Some(name) => {
           let skills = self.skill_manager.load_skills()?;
