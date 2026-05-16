@@ -598,6 +598,11 @@ impl App {
       }
 
       println!("\n{} Executing tools...", "Agent:".cyan());
+      // Side-effect system messages (e.g. from load_skill) must be appended
+      // AFTER all ToolResponse messages for this turn — DeepSeek's validator
+      // requires assistant{tool_calls} to be immediately followed by its
+      // matching tool messages, with no system message interleaved.
+      let mut deferred_system_msgs: Vec<Message> = Vec::new();
       for tc in tool_calls {
         let result_str = if tc.function.name == "invoke_agent" {
           let (subagent_type, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
@@ -678,7 +683,7 @@ impl App {
                       "# Activated Skill: {}\n\n{}",
                       skill.name, skill.system_prompt
                     );
-                    messages.push(Message::Simple {
+                    deferred_system_msgs.push(Message::Simple {
                       role: "system".to_string(),
                       content: prompt_text,
                       reasoning_content: None,
@@ -717,6 +722,9 @@ impl App {
           tool_call_id: tc.id,
         });
       }
+      // Now safe to append deferred system messages (skill activations etc).
+      // Order is: assistant{tool_calls} → tool{responses} → system{side-effects}.
+      messages.extend(deferred_system_msgs);
       println!("{} Returning tool results to model...", "Agent:".cyan());
     }
 
