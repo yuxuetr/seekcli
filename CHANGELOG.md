@@ -26,6 +26,18 @@ All notable changes to this project will be documented in this file. See [conven
 ---
 
 ## [unreleased]
+
+### 📐 Architecture
+- **项目重新定位**：从"DeepSeek + 多模态网关"收敛为"DeepSeek + Tools + Harness Agent 核心"。多模态 sensor (StepFun VLM / MinerU / GLM Web Search / Tavily / Jina) 将在阶段七剥离。
+- **引入七层架构纲领**：L0 基底 → L1 引擎 → L2 边界 → L3 安全 → L4 记忆 → L5 组合 → L6 界面。详见 `AGENT_ARCHITECTURE.md`。
+- **澄清三个心智区分**：模板 vs 实例、ReAct 无独立 Planner、SubAgent 作为运行时上下文压缩。
+- **修正 Hermes Agent 对位**：Skill 在主仓库是人工策展 bundle，在线自演化拆到独立仓库；SeekCLI 同步采用"create_skill → proposal → 人工审核"流程。
+
+### 📝 Docs
+- 全面重写 `AGENT_ARCHITECTURE.md`，替换原"三板斧"叙述。
+- `TODOs.md` 新增阶段六 ~ 阶段十一推进计划，并标记阶段五已知缺口。
+- `README.md` 更新定位、能力清单、路线图与心智模型速览。
+
 ### Features
 - support deepseek chat and r1 model for cli - ([200af21](https://github.com/yuxuetr/rust-template/commit/200af215b4f6973871bc105f16210946e4316392)) - yuxuetr
 

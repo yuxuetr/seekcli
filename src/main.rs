@@ -11,11 +11,11 @@ use std::env;
 use std::io::{self, Write};
 use termimad::MadSkin;
 
+mod agent;
 mod api;
 mod config;
 mod history;
 mod skills;
-#[allow(dead_code)]
 mod tools;
 
 #[cfg(test)]
@@ -785,8 +785,9 @@ impl App {
 
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
-    let messages = std::mem::take(&mut self.current_session.messages);
-    let (_final_content, updated_messages) = self.run_agent_loop(messages, tools).await?;
+    let mut messages = std::mem::take(&mut self.current_session.messages);
+    Self::ensure_agent_system_prompt(&mut messages);
+    let (_final_content, updated_messages) = self.run_agent_loop(messages, tools, 0).await?;
     self.current_session.messages = updated_messages;
 
     if self.current_session.title == "New Chat" {
@@ -806,24 +807,61 @@ impl App {
     arguments.to_string()
   }
 
+  fn ensure_agent_system_prompt(messages: &mut Vec<Message>) {
+    let target = agent::prompt::agent_system_prompt();
+    let already_present = messages.first().is_some_and(|m| {
+      matches!(
+        m,
+        Message::Simple { role, content: api::MessageContent::Text(t), .. }
+          if role == "system" && t == &target
+      )
+    });
+    if !already_present {
+      messages.insert(
+        0,
+        Message::Simple {
+          role: "system".to_string(),
+          content: api::MessageContent::Text(target),
+          reasoning_content: None,
+          tool_calls: None,
+        },
+      );
+    }
+  }
+
   async fn run_agent_loop(
     &mut self,
     mut messages: Vec<Message>,
     tools: Option<Vec<api::Tool>>,
+    depth: usize,
   ) -> Result<(String, Vec<Message>)> {
+    if depth > agent::MAX_SUBAGENT_DEPTH {
+      anyhow::bail!(
+        "Max sub-agent depth ({}) exceeded",
+        agent::MAX_SUBAGENT_DEPTH
+      );
+    }
+
     let tool_dispatcher = tools::ToolDispatcher::new();
+    let effective_tools = if depth == 0 {
+      tools::registry::merge_with_skill(tools)
+    } else {
+      tools.unwrap_or_default()
+    };
+
     let code_blocks_re = Regex::new(r"```(?:[a-zA-Z0-9]*)\n([\s\S]*?)```")?;
     let block_re = Regex::new(r"(?m)^```([a-zA-Z0-9]*)\n([\s\S]*?)^```")?;
-    let final_content;
+    let mut final_content = String::new();
+    let mut completed = false;
 
-    loop {
+    for _iter in 0..agent::MAX_ITER {
       let mut stream = self
         .brain
         .call_api_with_params(
           &self.model,
           messages.clone(),
           self.thinking_mode.as_str(),
-          tools.clone(),
+          Some(effective_tools.clone()),
         )
         .await?;
 
@@ -851,10 +889,23 @@ impl App {
             assistant_content.push_str(&c);
           }
           StreamItem::ToolCall(tc) => {
+            let preview = {
+              let args = &tc.function.arguments;
+              if args.len() > 160 {
+                let mut cut = 160;
+                while cut > 0 && !args.is_char_boundary(cut) {
+                  cut -= 1;
+                }
+                format!("{}…", &args[..cut])
+              } else {
+                args.clone()
+              }
+            };
             println!(
-              "\n{} Called: {}",
+              "\n{} Called: {} {}",
               "Agent:".cyan(),
-              tc.function.name.yellow()
+              tc.function.name.yellow(),
+              preview.bright_black()
             );
             tool_calls.push(tc);
           }
@@ -959,6 +1010,7 @@ impl App {
 
       if tool_calls.is_empty() {
         final_content = assistant_content;
+        completed = true;
         break;
       }
 
@@ -966,18 +1018,36 @@ impl App {
       for tc in tool_calls {
         let result_str = if tc.function.name == "invoke_agent" {
           let prompt = Self::parse_invoke_agent_args(&tc.function.arguments);
-          let mut sub_session = self.history.create_session(self.model.clone());
-          sub_session.messages.push(Message::Simple {
-            role: "user".to_string(),
-            content: api::MessageContent::Text(prompt),
-            reasoning_content: None,
-            tool_calls: None,
-          });
+          let next_depth = depth + 1;
+          if next_depth > agent::MAX_SUBAGENT_DEPTH {
+            format!(
+              "Cannot spawn sub-agent: max depth {} reached.",
+              agent::MAX_SUBAGENT_DEPTH
+            )
+          } else {
+            let sub_tools = tools::registry::filter_for_subagent(&effective_tools);
+            let mut sub_messages: Vec<Message> = Vec::new();
+            Self::ensure_agent_system_prompt(&mut sub_messages);
+            sub_messages.push(Message::Simple {
+              role: "user".to_string(),
+              content: api::MessageContent::Text(format!(
+                "{}{}",
+                agent::prompt::subagent_preamble(next_depth),
+                prompt
+              )),
+              reasoning_content: None,
+              tool_calls: None,
+            });
 
-          println!("{} Spawning sub-agent...", "Agent:".magenta());
-          match Box::pin(self.run_agent_loop(sub_session.messages, tools.clone())).await {
-            Ok((res, _)) => format!("Sub-agent completed. Summary:\n{}", res),
-            Err(e) => format!("Sub-agent failed: {}", e),
+            println!(
+              "{} Spawning sub-agent (depth={})...",
+              "Agent:".magenta(),
+              next_depth
+            );
+            match Box::pin(self.run_agent_loop(sub_messages, Some(sub_tools), next_depth)).await {
+              Ok((res, _)) => format!("Sub-agent completed. Summary:\n{}", res),
+              Err(e) => format!("Sub-agent failed: {}", e),
+            }
           }
         } else {
           match tool_dispatcher
@@ -996,6 +1066,16 @@ impl App {
         });
       }
       println!("{} Returning tool results to model...", "Agent:".cyan());
+    }
+
+    if !completed {
+      println!(
+        "\n{}",
+        format!("[Agent: reached max iterations ({})]", agent::MAX_ITER).yellow()
+      );
+      if final_content.is_empty() {
+        final_content = format!("[Stopped at max iterations ({})]", agent::MAX_ITER);
+      }
     }
 
     Ok((final_content, messages))

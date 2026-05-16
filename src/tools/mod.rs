@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub mod fs;
 pub mod meta;
+pub mod registry;
 pub mod shell;
 
 pub struct ToolDispatcher;

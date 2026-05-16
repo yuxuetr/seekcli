@@ -162,11 +162,54 @@ pub enum StreamItem {
   Finish(Option<String>),
 }
 
+/// Accumulator for a single tool call as it streams in fragments.
+/// OpenAI-style providers split a tool call across many SSE deltas:
+/// the first delta carries `id` / `name`, subsequent deltas carry only
+/// chunks of the JSON `arguments` string. We must concatenate by `index`.
+struct PartialToolCall {
+  id: String,
+  tool_type: String,
+  name: String,
+  arguments: String,
+}
+
 struct StreamState {
   stream: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
   buffer: Vec<u8>,
   pending: VecDeque<Result<StreamItem>>,
   finished: bool,
+  partial_tools: std::collections::BTreeMap<usize, PartialToolCall>,
+}
+
+impl StreamState {
+  fn flush_tool_calls(&mut self) {
+    let drained: Vec<(usize, PartialToolCall)> = std::mem::take(&mut self.partial_tools)
+      .into_iter()
+      .collect();
+    for (_, p) in drained {
+      if p.name.is_empty() {
+        continue;
+      }
+      let id = if p.id.is_empty() {
+        format!("call_{}", uuid::Uuid::new_v4())
+      } else {
+        p.id
+      };
+      let arguments = if p.arguments.is_empty() {
+        "{}".to_string()
+      } else {
+        p.arguments
+      };
+      self.pending.push_back(Ok(StreamItem::ToolCall(ToolCall {
+        id,
+        tool_type: p.tool_type,
+        function: FunctionCall {
+          name: p.name,
+          arguments,
+        },
+      })));
+    }
+  }
 }
 
 impl Message {
@@ -549,6 +592,7 @@ impl ApiClient {
       buffer: Vec::new(),
       pending: VecDeque::new(),
       finished: false,
+      partial_tools: std::collections::BTreeMap::new(),
     }))
   }
 }
@@ -581,6 +625,7 @@ impl Stream for StreamState {
             if let Some(data) = line.strip_prefix("data: ") {
               let data = data.trim();
               if data == "[DONE]" {
+                self.flush_tool_calls();
                 self.finished = true;
                 break;
               }
@@ -609,13 +654,39 @@ impl Stream for StreamState {
 
                 if let Some(tool_calls) = delta["tool_calls"].as_array() {
                   for tc in tool_calls {
-                    if let Ok(tool_call) = serde_json::from_value::<ToolCall>(tc.clone()) {
-                      self.pending.push_back(Ok(StreamItem::ToolCall(tool_call)));
+                    let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                    let entry = self
+                      .partial_tools
+                      .entry(idx)
+                      .or_insert_with(|| PartialToolCall {
+                        id: String::new(),
+                        tool_type: "function".to_string(),
+                        name: String::new(),
+                        arguments: String::new(),
+                      });
+                    if let Some(id) = tc["id"].as_str()
+                      && !id.is_empty()
+                    {
+                      entry.id = id.to_string();
+                    }
+                    if let Some(t) = tc["type"].as_str()
+                      && !t.is_empty()
+                    {
+                      entry.tool_type = t.to_string();
+                    }
+                    if let Some(name) = tc["function"]["name"].as_str()
+                      && !name.is_empty()
+                    {
+                      entry.name = name.to_string();
+                    }
+                    if let Some(args) = tc["function"]["arguments"].as_str() {
+                      entry.arguments.push_str(args);
                     }
                   }
                 }
 
                 if let Some(finish_reason) = choice["finish_reason"].as_str() {
+                  self.flush_tool_calls();
                   self
                     .pending
                     .push_back(Ok(StreamItem::Finish(Some(finish_reason.to_string()))));
