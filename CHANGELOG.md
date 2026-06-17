@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 ### Bug Fixes
 
+- **(api)** strip history reasoning from OpenAI requests too - ([da5dce2](https://github.com/yuxuetr/rust-template/commit/da5dce2295775093eb4500d47126ca766b2d2295)) - yuxuetr
 - **(clippy)** resolve unused import, variable, and dead code warnings - ([53f3abc](https://github.com/yuxuetr/rust-template/commit/53f3abc2681fab0c07d9a7be9bd8b464bee1ac05)) - yuxuetr
 - **(debug)** reduce excessive redundant debug information in third-party libraries - ([c9f1ddf](https://github.com/yuxuetr/rust-template/commit/c9f1ddfae98cef967f4418e38c7927f5a8530a35)) - yuxuetr
 - robust image processing in paste_image to avoid bus error - ([45f4ee0](https://github.com/yuxuetr/rust-template/commit/45f4ee0196d77649ac3a992936324d328c5237c5)) - yuxuetr
@@ -19,6 +20,8 @@ All notable changes to this project will be documented in this file. See [conven
 
 ### Documentation
 
+- **(architecture)** update module layout for main.rs split - ([2ebf300](https://github.com/yuxuetr/rust-template/commit/2ebf3003ba87aa728969fe07ca3a3fc81a571dad)) - yuxuetr
+- **(changelog)** regenerate for stages 13-17 - ([f26f34c](https://github.com/yuxuetr/rust-template/commit/f26f34c139778c7300e6df9e9d00fb4e9ff07831)) - yuxuetr
 - **(readme)** document stages 13-17 harness features - ([5304819](https://github.com/yuxuetr/rust-template/commit/5304819b8295e99ae1db63ce2a1d452d0a979907)) - yuxuetr
 - **(todos)** mark stage 13 (L1 runtime correction + L2 concurrency) complete - ([679bb67](https://github.com/yuxuetr/rust-template/commit/679bb67c87291ab6ec385daf9caba40342f49134)) - yuxuetr
 - **(todos)** mark stage 14 (L4 memory deepening) complete - ([fb8dfbc](https://github.com/yuxuetr/rust-template/commit/fb8dfbcdcba66198e70ce58d83250169ef0724d7)) - yuxuetr
@@ -30,6 +33,7 @@ All notable changes to this project will be documented in this file. See [conven
 - update TODOs.md to mark completed milestones - ([ac6202d](https://github.com/yuxuetr/rust-template/commit/ac6202dce8f96704c7dd5287b7adab68533c5d7e)) - yuxuetr
 - mark Phase 5 tasks as completed - ([4796547](https://github.com/yuxuetr/rust-template/commit/4796547d9357eb34050638d0a55fcb20410daae6)) - yuxuetr
 - mark stage 17 (L7 observability) and figure-3 checklist complete - ([ea3c9e7](https://github.com/yuxuetr/rust-template/commit/ea3c9e7b5a64119401a454437562aae3c8db3897)) - yuxuetr
+- document dual OpenAI/Anthropic provider support - ([4bdb848](https://github.com/yuxuetr/rust-template/commit/4bdb8480839e5da2afe707bba58bc25efdff60f6)) - yuxuetr
 
 ### Features
 
@@ -38,6 +42,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(agent)** Fork-Join — read-concurrent, write-serial tool execution - ([651696c](https://github.com/yuxuetr/rust-template/commit/651696cb0fb889922861e4ec846358f10dbb6a04)) - yuxuetr
 - **(agent)** dynamic Two-Stage ReAct planning phase - ([be5b0b0](https://github.com/yuxuetr/rust-template/commit/be5b0b04cbbc726404fee436cfc2b0e64247b0d9)) - yuxuetr
 - **(agent)** Plan Mode — externalize long-task state to PLAN.md/TODO.md - ([0d0eaf1](https://github.com/yuxuetr/rust-template/commit/0d0eaf1d848b89adde52d72798795551c431a563)) - yuxuetr
+- **(api)** Anthropic-compatible provider (DeepSeek /anthropic) - ([7444fd4](https://github.com/yuxuetr/rust-template/commit/7444fd4e3b80791e12a5580181a50c4b12583bd1)) - yuxuetr
 - **(cost)** persist per-session cost to session JSON; scope to session - ([2741d2a](https://github.com/yuxuetr/rust-template/commit/2741d2ae25a3da3c140a3aea8c7aacdfe966772c)) - yuxuetr
 - **(memory)** staged-degradation context compression - ([440d659](https://github.com/yuxuetr/rust-template/commit/440d65973d25190479e7738b989b17af38b4b0e9)) - yuxuetr
 - **(observability)** CostTracker — session token/CNY accounting (17.1) - ([d2380a0](https://github.com/yuxuetr/rust-template/commit/d2380a06924174e1d6bcbd820ee111163e8be94c)) - yuxuetr
@@ -68,6 +73,11 @@ All notable changes to this project will be documented in this file. See [conven
 
 ### Refactoring
 
+- **(api)** introduce LlmProvider trait; OpenAI client behind it - ([20f4302](https://github.com/yuxuetr/rust-template/commit/20f4302cffbb6a65823ce044a075c1a17faacc7c)) - yuxuetr
+- **(main)** extract rustyline completer to completer.rs - ([9c08ecf](https://github.com/yuxuetr/rust-template/commit/9c08ecfc7d8bfab2dd185b197cbc0286078b98f8)) - yuxuetr
+- **(main)** extract run_benchmark to benchmark.rs - ([346bf20](https://github.com/yuxuetr/rust-template/commit/346bf20a5627ed3a98b2648ebe794bd078841df5)) - yuxuetr
+- **(main)** extract ReAct engine to engine.rs - ([6a473ca](https://github.com/yuxuetr/rust-template/commit/6a473ca74d5d155f73e3df5f0d88bfcd8c0c38db)) - yuxuetr
+- **(main)** extract REPL command handling to commands.rs - ([71b7f44](https://github.com/yuxuetr/rust-template/commit/71b7f44e01e247283244f774a854e35fc22c7bf1)) - yuxuetr
 - **(observability)** store traces under ~/.seekcli/traces - ([4bab2cb](https://github.com/yuxuetr/rust-template/commit/4bab2cb0d8656fb86274e98a974e3ba2a55e4ff5)) - yuxuetr
 - remove arboard and use system commands for clipboard, revert to multi-threaded tokio - ([1d77a42](https://github.com/yuxuetr/rust-template/commit/1d77a42e07e4472bf5d4764534f0403e6bf1f28e)) - yuxuetr
 

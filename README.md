@@ -27,6 +27,7 @@ SeekCLI 选择**做减法**：
 
 | 能力              | 说明                                                                     |
 | ----------------- | ------------------------------------------------------------------------ |
+| 双 wire 协议      | `LlmProvider` trait 适配 OpenAI / Anthropic 兼容端点，引擎零感知，config 切换 |
 | ReAct Loop        | 模型在"思考 → tool_call → 观察"循环里自驱，迭代上限保护                    |
 | Two-Stage ReAct   | 动态触发"谋动分离"——开局/失败时先无工具纯推理，再带工具执行               |
 | System Reminders  | 检测重复工具轨迹（死循环），注入 user 消息打断                            |
@@ -71,7 +72,13 @@ export DEEPSEEK_ANTHROPIC_BASE="..."      # 可选，覆盖 Anthropic 兼容 end
 provider = "openai"     # DeepSeek /chat/completions（默认）
 # provider = "anthropic"  # DeepSeek /messages（Anthropic 兼容）
 ```
-两种协议经 `LlmProvider` trait 适配为同一套内部 schema，引擎层无感知；均已实测 3/3 跑通。
+两种协议经 `LlmProvider` trait 适配为同一套 provider 中立 schema（`Message`/`Tool`/`StreamItem`），
+引擎层（`engine.rs`）只依赖 `StreamItem`，换 provider 不碰一行引擎代码。两条链路均已实测：
+benchmark 3/3 PASS，长对话压缩 + trace 正常。
+
+**Reasoning 处理**：思维链是单轮草稿，两个 provider 在**发送请求时**都 strip 掉历史
+`reasoning_content`（Anthropic 的无签名 thinking block 会被拒，OpenAI 回放则纯属浪费 token）；
+本地 session 仍保留完整 reasoning，`/history` 可回看。
 
 > 阶段七完成后，SeekCLI 不再读取任何其它供应商的 env vars。如需外部能力（搜索 / 抓页 / OCR）请让模型通过 `run_shell` 自取，或等待后续 MCP 工具接入。
 
@@ -232,7 +239,7 @@ L4  记忆层      阶梯降级压缩 · PLAN/TODO 外部化 · 会话
 L3  安全层      三态命令审批 · 路径白名单
 L2  边界层      Tool Dispatcher · schema 注册 · 只读并发
 L1  引擎层      ReAct · Two-Stage · System Reminders · Error Recovery
-L0  基底层      LLM Provider · Streaming · 协议解析
+L0  基底层      LlmProvider trait（OpenAI/Anthropic 双适配）· Streaming · 协议解析
 ```
 
 理解三个关键区分：
