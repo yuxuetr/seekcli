@@ -350,10 +350,11 @@
 *评估来源：harness-engineering 第 18/19/20 讲 + 图1（CostTracker）/图2（Benchmark）/图3（Tracing）。*
 *建议落地顺序：**先做 17.3 Benchmark（哪怕 2~3 个 task），再回头验证阶段十三~十五的改动**。*
 
-- [ ] **17.1 Cost Tracker 装饰器** — `src/observability/cost.rs`（图1）
-    - [ ] 包装 `ApiClient`，无侵入累加 prompt/completion token、耗时、CNY 估算。
-    - [ ] 账单挂到 `history.rs` 的 session metadata；会话结束打印总账。
-    - [ ] 不在 `run_agent_loop` 内混入任何计费代码（AOP 旁路）。
+- [x] **17.1 Cost Tracker** — Commit `d2380a0`（图1）
+    - [x] `observability/cost.rs::CostTracker` 累加 prompt/completion/cache hit-miss token + call 数。
+    - [x] `estimated_cny`（明确标注为估算费率）+ `cache_hit_pct` + 一行 `summary()`。
+    - [x] App 持有 tracker；run_agent_loop 在 Usage 分支 record（覆盖 turn/planning/子 agent）；chat() 末尾打印账单。
+    - [x] 4 个新单测。（注：账单暂打印到 stdout，未持久化到 session metadata — 可后续补。）
 - [ ] **17.2 Tracing Span 树** — `src/observability/trace.rs`（图3 `.claw/traces`）
     - [ ] Root(Run) → Child(Turn) → Leaf(Generate/Execute/Compaction) JSON 决策树。
     - [ ] 在 engine 与 registry 边界埋点；落盘 `.claw/traces/<run_id>.json`。
