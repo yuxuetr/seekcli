@@ -126,6 +126,18 @@ pub fn system_tools() -> Vec<Tool> {
   ]
 }
 
+/// Whether a tool is safe to run concurrently with its siblings in the same
+/// turn. Only pure read-only tools qualify.
+///
+/// `run_shell` is deliberately excluded: a shell command can write files or
+/// have side effects, and detecting that reliably would require parsing shell
+/// AST. `write_file` / `create_skill` are writes; `invoke_agent` / `load_skill`
+/// mutate engine state. Per the harness "read-concurrent, write-serial" rule,
+/// a turn is parallelized only when EVERY call is read-only.
+pub fn is_parallel_readonly(tool_name: &str) -> bool {
+  matches!(tool_name, "read_file" | "list_dir")
+}
+
 /// Filter `tools` down to those listed in `allowed`. Used to apply a
 /// SubAgent template's `allowed_tools` whitelist at spawn time.
 pub fn filter_by_allowed(tools: &[Tool], allowed: &[&str]) -> Vec<Tool> {
@@ -160,5 +172,22 @@ fn make_tool(name: &str, description: &str, parameters: Value) -> Tool {
       description: description.to_string(),
       parameters,
     },
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn readonly_classification() {
+    assert!(is_parallel_readonly("read_file"));
+    assert!(is_parallel_readonly("list_dir"));
+    // Writes / shell / delegation must never be parallelized.
+    assert!(!is_parallel_readonly("write_file"));
+    assert!(!is_parallel_readonly("run_shell"));
+    assert!(!is_parallel_readonly("create_skill"));
+    assert!(!is_parallel_readonly("invoke_agent"));
+    assert!(!is_parallel_readonly("load_skill"));
   }
 }

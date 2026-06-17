@@ -700,147 +700,185 @@ impl App {
       // Snapshot this turn's trajectory for doom-loop detection before the
       // calls are consumed below.
       let turn_tool_calls = tool_calls.clone();
-      // Side-effect system messages (e.g. from load_skill) must be appended
-      // AFTER all ToolResponse messages for this turn — DeepSeek's validator
-      // requires assistant{tool_calls} to be immediately followed by its
-      // matching tool messages, with no system message interleaved.
-      let mut deferred_system_msgs: Vec<Message> = Vec::new();
-      for tc in tool_calls {
-        let result_str = if tc.function.name == "invoke_agent" {
-          let (subagent_type, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
-          let next_depth = depth + 1;
-          if next_depth > agent::MAX_SUBAGENT_DEPTH {
-            format!(
-              "Cannot spawn sub-agent: max depth {} reached.",
-              agent::MAX_SUBAGENT_DEPTH
-            )
-          } else {
-            match subagents::registry::lookup(&subagent_type) {
-              None => {
-                let listing: Vec<String> = subagents::registry::catalog()
-                  .iter()
-                  .map(|(name, desc)| format!("  - {}: {}", name, desc))
-                  .collect();
-                format!(
-                  "Unknown subagent_type '{}'. Available types:\n{}",
-                  subagent_type,
-                  listing.join("\n")
-                )
-              }
-              Some(template) => {
-                let sub_tools =
-                  tools::registry::filter_by_allowed(&effective_tools, template.allowed_tools);
-                let sub_messages = vec![
-                  Message::Simple {
-                    role: "system".to_string(),
-                    content: template.system_prompt.to_string(),
-                    reasoning_content: None,
-                    tool_calls: None,
-                  },
-                  Message::Simple {
-                    role: "user".to_string(),
-                    content: prompt,
-                    reasoning_content: None,
-                    tool_calls: None,
-                  },
-                ];
 
-                println!(
-                  "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
-                  "Agent:".magenta(),
-                  template.name.green(),
-                  next_depth,
-                  template.max_iter
-                );
-                match Box::pin(self.run_agent_loop(
-                  sub_messages,
-                  Some(sub_tools),
-                  next_depth,
-                  template.max_iter,
-                ))
-                .await
-                {
-                  Ok((res, _)) => {
-                    format!("Sub-agent '{}' completed. Summary:\n{}", template.name, res)
-                  }
-                  Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
-                }
-              }
-            }
+      // Fork-Join: if EVERY call this turn is pure read-only, run them
+      // concurrently (the harness "read-concurrent, write-serial" rule). Any
+      // write / shell / delegation forces the safe sequential path below.
+      let parallelizable = tool_calls.len() > 1
+        && tool_calls
+          .iter()
+          .all(|tc| tools::registry::is_parallel_readonly(&tc.function.name));
+
+      if parallelizable {
+        println!(
+          "{} {} read-only tools — running concurrently",
+          "Agent:".cyan(),
+          tool_calls.len()
+        );
+        let futs = tool_calls.iter().map(|tc| {
+          let disp = &tool_dispatcher;
+          let name = tc.function.name.clone();
+          let args = tc.function.arguments.clone();
+          let id = tc.id.clone();
+          async move {
+            let raw = match disp.execute(&name, &args).await {
+              Ok(res) => res,
+              Err(e) => format!("Error executing tool {}: {}", name, e),
+            };
+            (id, agent::recovery::augment(&name, raw))
           }
-        } else if tc.function.name == "load_skill" {
-          if depth > 0 {
-            "[ERROR] load_skill is restricted to the main agent. \
-             Sub-agents cannot switch skills."
-              .to_string()
-          } else {
-            let name = Self::parse_load_skill_args(&tc.function.arguments);
-            match self.skill_manager.load_skills() {
-              Err(e) => format!("Failed to enumerate skills: {}", e),
-              Ok(skills) => {
-                let found = skills.iter().find(|s| s.name == name).cloned();
-                match found {
-                  Some(skill) => {
-                    // Same dedup as activate_skill: drop any prior skill's
-                    // system message so personas don't accumulate.
-                    messages.retain(|m| {
-                      !matches!(
-                        m,
-                        Message::Simple { role, content, .. }
-                          if role == "system" && content.starts_with("# Activated Skill: ")
-                      )
-                    });
-
-                    let prompt_text = format!(
-                      "# Activated Skill: {}\n\n{}",
-                      skill.name, skill.system_prompt
-                    );
-                    deferred_system_msgs.push(Message::Simple {
+        });
+        let results = futures_util::future::join_all(futs).await;
+        for (id, content) in results {
+          messages.push(Message::ToolResponse {
+            role: "tool".to_string(),
+            content,
+            tool_call_id: id,
+          });
+        }
+      } else {
+        // Side-effect system messages (e.g. from load_skill) must be appended
+        // AFTER all ToolResponse messages for this turn — DeepSeek's validator
+        // requires assistant{tool_calls} to be immediately followed by its
+        // matching tool messages, with no system message interleaved.
+        let mut deferred_system_msgs: Vec<Message> = Vec::new();
+        for tc in tool_calls {
+          let result_str = if tc.function.name == "invoke_agent" {
+            let (subagent_type, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
+            let next_depth = depth + 1;
+            if next_depth > agent::MAX_SUBAGENT_DEPTH {
+              format!(
+                "Cannot spawn sub-agent: max depth {} reached.",
+                agent::MAX_SUBAGENT_DEPTH
+              )
+            } else {
+              match subagents::registry::lookup(&subagent_type) {
+                None => {
+                  let listing: Vec<String> = subagents::registry::catalog()
+                    .iter()
+                    .map(|(name, desc)| format!("  - {}: {}", name, desc))
+                    .collect();
+                  format!(
+                    "Unknown subagent_type '{}'. Available types:\n{}",
+                    subagent_type,
+                    listing.join("\n")
+                  )
+                }
+                Some(template) => {
+                  let sub_tools =
+                    tools::registry::filter_by_allowed(&effective_tools, template.allowed_tools);
+                  let sub_messages = vec![
+                    Message::Simple {
                       role: "system".to_string(),
-                      content: prompt_text,
+                      content: template.system_prompt.to_string(),
                       reasoning_content: None,
                       tool_calls: None,
-                    });
-                    let skill_name = skill.name.clone();
-                    self.current_skill = Some(skill);
-                    println!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
-                    format!(
-                      "Skill '{}' loaded. Its system prompt is now active. \
-                       Continue the user's task in this persona.",
-                      skill_name
-                    )
-                  }
-                  None => {
-                    let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
-                    format!("Skill '{}' not found. Available: {:?}", name, available)
+                    },
+                    Message::Simple {
+                      role: "user".to_string(),
+                      content: prompt,
+                      reasoning_content: None,
+                      tool_calls: None,
+                    },
+                  ];
+
+                  println!(
+                    "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
+                    "Agent:".magenta(),
+                    template.name.green(),
+                    next_depth,
+                    template.max_iter
+                  );
+                  match Box::pin(self.run_agent_loop(
+                    sub_messages,
+                    Some(sub_tools),
+                    next_depth,
+                    template.max_iter,
+                  ))
+                  .await
+                  {
+                    Ok((res, _)) => {
+                      format!("Sub-agent '{}' completed. Summary:\n{}", template.name, res)
+                    }
+                    Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
                   }
                 }
               }
             }
-          }
-        } else {
-          let raw = match tool_dispatcher
-            .execute(&tc.function.name, &tc.function.arguments)
-            .await
-          {
-            Ok(res) => res,
-            Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
-          };
-          // Context-aware Error Recovery: append an actionable hint when the
-          // result looks like a failure, so the model follows a debug SOP
-          // instead of blindly retrying.
-          agent::recovery::augment(&tc.function.name, raw)
-        };
+          } else if tc.function.name == "load_skill" {
+            if depth > 0 {
+              "[ERROR] load_skill is restricted to the main agent. \
+             Sub-agents cannot switch skills."
+                .to_string()
+            } else {
+              let name = Self::parse_load_skill_args(&tc.function.arguments);
+              match self.skill_manager.load_skills() {
+                Err(e) => format!("Failed to enumerate skills: {}", e),
+                Ok(skills) => {
+                  let found = skills.iter().find(|s| s.name == name).cloned();
+                  match found {
+                    Some(skill) => {
+                      // Same dedup as activate_skill: drop any prior skill's
+                      // system message so personas don't accumulate.
+                      messages.retain(|m| {
+                        !matches!(
+                          m,
+                          Message::Simple { role, content, .. }
+                            if role == "system" && content.starts_with("# Activated Skill: ")
+                        )
+                      });
 
-        messages.push(Message::ToolResponse {
-          role: "tool".to_string(),
-          content: result_str,
-          tool_call_id: tc.id,
-        });
+                      let prompt_text = format!(
+                        "# Activated Skill: {}\n\n{}",
+                        skill.name, skill.system_prompt
+                      );
+                      deferred_system_msgs.push(Message::Simple {
+                        role: "system".to_string(),
+                        content: prompt_text,
+                        reasoning_content: None,
+                        tool_calls: None,
+                      });
+                      let skill_name = skill.name.clone();
+                      self.current_skill = Some(skill);
+                      println!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
+                      format!(
+                        "Skill '{}' loaded. Its system prompt is now active. \
+                       Continue the user's task in this persona.",
+                        skill_name
+                      )
+                    }
+                    None => {
+                      let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                      format!("Skill '{}' not found. Available: {:?}", name, available)
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            let raw = match tool_dispatcher
+              .execute(&tc.function.name, &tc.function.arguments)
+              .await
+            {
+              Ok(res) => res,
+              Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
+            };
+            // Context-aware Error Recovery: append an actionable hint when the
+            // result looks like a failure, so the model follows a debug SOP
+            // instead of blindly retrying.
+            agent::recovery::augment(&tc.function.name, raw)
+          };
+
+          messages.push(Message::ToolResponse {
+            role: "tool".to_string(),
+            content: result_str,
+            tool_call_id: tc.id,
+          });
+        }
+        // Now safe to append deferred system messages (skill activations etc).
+        // Order is: assistant{tool_calls} → tool{responses} → system{side-effects}.
+        messages.extend(deferred_system_msgs);
       }
-      // Now safe to append deferred system messages (skill activations etc).
-      // Order is: assistant{tool_calls} → tool{responses} → system{side-effects}.
-      messages.extend(deferred_system_msgs);
 
       // System Reminder: if the main agent is repeating the same trajectory,
       // inject a high-priority user message at the point of decision to break

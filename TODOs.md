@@ -262,11 +262,12 @@
     - [ ] Phase 2：带 tools 发起执行请求，基于 Phase 1 推理决策。
     - [ ] **动态触发**：任务开局 / 工具连续失败 ≥2 次时开 thinking；确定性简单步骤跳过，省 token。
     - [ ] 复用现有 `thinking_mode`，区分"DeepSeek 原生 reasoning"与"架构级两阶段隔离"。
-- [ ] **13.2 System Reminders（防死循环干预）** — `src/agent/reminders.rs`（新增）
-    - [ ] `ReminderInjector { call_hashes: VecDeque<u64>, repeat_count }`，滚动窗口记录工具调用轨迹哈希。
-    - [ ] 连续 N（≥3）次相同调用轨迹 → 在下次推理前注入一条 **user 消息**（非 system）打断路径。
-    - [ ] 挂在每个 Turn 尾部，解耦于 `run_agent_loop` 主控流。
-    - [ ] 单测：构造重复轨迹验证注入触发；不同轨迹验证不误伤。
+- [x] **13.2 System Reminders（防死循环干预）** — Commit `07f2afb`
+    - [x] `agent/reminders.rs::ReminderInjector` 哈希每轮 (name, arguments) 轨迹 + repeat_count。
+    - [x] 连续 3 次相同轨迹（REPEAT_THRESHOLD=2）→ 注入一条 **user 消息** 打断；注入后 reset 重新计数避免刷屏。
+    - [x] `run_agent_loop`(depth==0) 在工具执行后 observe 本轮轨迹并 push 提醒。
+    - [x] 空轮（模型有进展）reset tracker，不误伤。
+    - [x] 4 个新单测（连续 3 次触发 / 不同调用不触发 / 空轮重置 / 重新触发）。
 - [x] **13.3 Error Recovery（恢复提示注入）** — Commit `fbebc58`
     - [x] `agent/recovery.rs` 按工具+错误类型分类，给 ToolResult 追加 `[Recovery]` 行动建议。
     - [x] `read_file` not-found → 提示"先 list_dir / find 确认路径再重试"。
