@@ -30,6 +30,14 @@ pub struct SecurityConfig {
 pub struct BrainConfig {
   pub flash_model: String,
   pub pro_model: String,
+  /// LLM wire protocol: "openai" (DeepSeek /chat/completions) or "anthropic"
+  /// (DeepSeek /anthropic). Defaults to openai for older config files.
+  #[serde(default = "default_provider")]
+  pub provider: String,
+}
+
+fn default_provider() -> String {
+  "openai".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -49,6 +57,7 @@ impl Config {
         brain: BrainConfig {
           flash_model: "deepseek-v4-flash".to_string(),
           pro_model: "deepseek-v4-pro".to_string(),
+          provider: default_provider(),
         },
         sensor: SensorConfig {
           vlm_model: "step-1.5v-mini".to_string(),

@@ -15,8 +15,10 @@ use anyhow::Result;
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 
+pub mod anthropic;
 pub mod openai;
 
+pub use anthropic::AnthropicProvider;
 pub use openai::OpenAiProvider;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

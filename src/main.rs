@@ -86,10 +86,16 @@ impl App {
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
     let deepseek_key = env::var("DEEPSEEK_API_KEY").context("Please set DEEPSEEK_API_KEY")?;
-    let brain: Box<dyn LlmProvider> = Box::new(api::OpenAiProvider::new(
-      deepseek_key,
-      api::OpenAiProvider::default_base_url(),
-    ));
+    let brain: Box<dyn LlmProvider> = match config.brain.provider.as_str() {
+      "anthropic" => Box::new(api::AnthropicProvider::new(
+        deepseek_key,
+        api::AnthropicProvider::default_base_url(),
+      )),
+      _ => Box::new(api::OpenAiProvider::new(
+        deepseek_key,
+        api::OpenAiProvider::default_base_url(),
+      )),
+    };
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();

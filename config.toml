@@ -1,4 +1,6 @@
 [brain]
+# provider: "openai" (DeepSeek /chat/completions) or "anthropic" (DeepSeek /anthropic)
+provider = "openai"
 flash_model = "deepseek-v4-flash"
 pro_model = "deepseek-v4-pro"
 
