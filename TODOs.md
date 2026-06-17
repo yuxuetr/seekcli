@@ -330,17 +330,18 @@
 
 ---
 
-## 🔲 阶段十六：Human-in-loop 三态权限 (P2)
+## ✅ 阶段十六：Human-in-loop 三态权限 (P2) — Commit `1b18b64`
 *目标：从单一同步 y/N 升级为 allow / ask / deny 三态。*
 *评估来源：harness-engineering 第 9 讲。*
 
-- [ ] **16.1 三态分类** — `tools/approval.rs`
-    - [ ] allow：白名单命令（git status / ls 等）直接放行，不打断。
-    - [ ] ask：敏感操作（git push / 大范围删除）触发交互审批。
-    - [ ] deny：黑名单直接拦截报错。
-- [ ] **16.2 可配置**：白/黑名单走 config.toml，用户可扩展。
-
-**验收**：`git status` 不弹审批；`git push` 弹 y/N；`rm -rf /` 直接 deny。
+- [x] **16.1 三态分类** — `approval::classify -> Decision{Allow,Ask,Deny}`
+    - [x] allow：安全命令（git status / ls 等）直接放行。
+    - [x] ask：敏感操作（sudo / git push -f / 大范围 rm）触发交互审批。
+    - [x] deny：内置 catastrophic（fork bomb / mkfs / dd of=/dev/）直接拦截不询问。
+    - [x] 优先级：user deny > 内置 deny > user allow > 内置 ask > allow。
+- [x] **16.2 可配置**：`config.toml [security]` allow/deny 子串列表，`init_policy` 启动注入；
+      serde default 保证旧 config 兼容。
+- [x] run_shell 改用 Decision 匹配；5 个新单测。
 
 ---
 
