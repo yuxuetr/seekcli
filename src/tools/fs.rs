@@ -10,15 +10,9 @@ pub async fn read_file(args: &Value) -> Result<String> {
     .await
     .context(format!("Failed to read file: {}", path))?;
 
-  // Truncate if too long to save tokens
-  if content.len() > 50_000 {
-    Ok(format!(
-      "{}...\n[Content truncated because it exceeds 50KB]",
-      &content[..50_000]
-    ))
-  } else {
-    Ok(content)
-  }
+  // Offload oversized reads to a temp file, returning a head+tail preview that
+  // points back at the original path (the model can re-read specific ranges).
+  Ok(super::offload::offload(content, Some(path)).await)
 }
 
 pub async fn write_file(args: &Value) -> Result<String> {

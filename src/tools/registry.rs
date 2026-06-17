@@ -5,8 +5,9 @@ pub fn system_tools() -> Vec<Tool> {
   vec![
     make_tool(
       "read_file",
-      "Read the content of a UTF-8 text file. \
-       Content is truncated at 50KB; for larger files use run_shell with grep/head/tail.",
+      "Read the content of a UTF-8 text file. Large files are offloaded to a \
+       temp file and returned as a head+tail preview; read specific ranges of \
+       the original path with run_shell (sed/grep/head/tail) when you need more.",
       json!({
         "type": "object",
         "properties": {

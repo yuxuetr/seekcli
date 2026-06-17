@@ -71,6 +71,11 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     result.push_str("Command executed successfully with no output.");
   }
 
+  // Offload bulky output (logs, large dumps) to a temp file, keeping a
+  // head+tail preview so the context isn't flooded. Ephemeral output, so no
+  // source hint.
+  let result = super::offload::offload(result, None).await;
+
   if output.status.success() {
     Ok(result)
   } else {

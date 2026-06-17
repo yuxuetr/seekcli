@@ -296,11 +296,11 @@
 *目标：让压缩不断裂意图链；让单条大输出不撑爆 context。*
 *评估来源：harness-engineering 第 5/12 讲。*
 
-- [ ] **14.1 阶梯降级压缩（改写 compressor.rs）**
-    - [ ] 远期历史：**保留 ToolCall**（保住意图链），ToolResult 掩码为 `[工具输出已清理, 原始 NKB]`。
-    - [ ] Working Memory 尾部：单条 ToolResult > 1000 字符做 Head-Tail 截断（前 500 + 后 500）。
-    - [ ] 当前"整段摘要"作为最后一级（远期历史过长时再叠加），而非唯一策略。
-    - [ ] 修正风险：现方案摘要掉 ToolCall 后模型可能误以为某步未执行 → 重复执行。
+- [x] **14.1 阶梯降级压缩（改写 compressor.rs）** — Commit `440d659`
+    - [x] Stage 1 远期历史：**保留 ToolCall**（保住意图链），ToolResult 掩码为占位符。
+    - [x] Stage 2 Working Memory 尾部：单条 ToolResult > 1000 字节做 Head-Tail 截断（前 500 + 后 500）。
+    - [x] Stage 3 摘要降级为最后一级：掩码+截断仍超阈值才触发 LLM 摘要。
+    - [x] marker 保证幂等（每轮重入不重复掩码/截断）；3 个新单测。
 - [ ] **14.2 工具大输出卸载（Tool Output Offloading）**
     - [ ] read_file / run_shell 输出 > 8K 字符 → 写入 `~/.seekcli/tmp/<hash>.txt`。
     - [ ] 返回"头部预览 + 尾部预览 + 文件路径引用"摘要，倒逼模型按需局部读取。

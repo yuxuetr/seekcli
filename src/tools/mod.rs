@@ -4,6 +4,7 @@ use serde_json::Value;
 pub mod approval;
 pub mod fs;
 pub mod meta;
+pub mod offload;
 pub mod path_security;
 pub mod registry;
 pub mod shell;
