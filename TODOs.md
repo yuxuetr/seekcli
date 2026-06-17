@@ -345,10 +345,9 @@
 
 ---
 
-## 🔲 阶段十七：L7 可观测与评估模块 (元层，优先于重型机制)
+## ✅ 阶段十七：L7 可观测与评估模块 (元层)
 *目标：让"引擎是否变好"可量化。无此模块，前述所有改动都是凭感觉。*
 *评估来源：harness-engineering 第 18/19/20 讲 + 图1（CostTracker）/图2（Benchmark）/图3（Tracing）。*
-*建议落地顺序：**先做 17.3 Benchmark（哪怕 2~3 个 task），再回头验证阶段十三~十五的改动**。*
 
 - [x] **17.1 Cost Tracker** — Commit `d2380a0`（图1）
     - [x] `observability/cost.rs::CostTracker` 累加 prompt/completion/cache hit-miss token + call 数。
@@ -361,14 +360,16 @@
     - [x] `SEEKCLI_TRACE` env 开关，关闭时 begin/end/flush 零成本 no-op。
     - [x] 与 session/skills/offload 统一归到 `~/.seekcli/` 下。
     - [x] 3 个新单测（disabled no-op / 嵌套树 / annotate）。
-- [ ] **17.3 Benchmark Runner** — `src/observability/bench.rs`（图2）
-    - [ ] Testsuite JSON 定义任务 + 验证命令（Fail-to-Pass 范式）。
-    - [ ] Init → Copy 靶机 → AgentRun → Eval（跑验证命令）→ Score → Report 循环。
-    - [ ] 综合得分 = 成功率 + token 成本 + 耗时 + 轮数。
-    - [ ] 至少 2~3 个种子任务（修 bug / 加接口），作为引擎回归基线。
+- [x] **17.3 Benchmark Runner** — Commit `acf2dae`（图2）
+    - [x] Testsuite JSON 定义任务（prompt + seed files + setup + eval），Fail-to-Pass 范式。
+    - [x] Init → seed 靶机 → AgentRun（chdir 沙箱）→ Eval（跑验证命令）→ Score → Report 闭环。
+    - [x] 报表 = 成功率 + token CNY 成本 + 耗时 + LLM 调用数。
+    - [x] `--bench <suite.json>` CLI flag + `App::run_headless`（无 REPL/session 状态运行）。
+    - [x] `examples/benchmarks/basic.json` 3 个种子任务（建文件 / 修 bug / 数行数）。
+    - [x] 4 个新单测（parse / testbed / eval / report 纯逻辑；agent run 需真实 API 不入单测）。
 
 **验收**：会话结束打印 token/CNY 总账；`~/.seekcli/traces/` 出现可读决策树；
-`cargo run --bin bench`（或子命令）跑出引擎跑分报表。
+`seekcli --bench examples/benchmarks/basic.json` 跑出引擎跑分报表。
 
 ---
 

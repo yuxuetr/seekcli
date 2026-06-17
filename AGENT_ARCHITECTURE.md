@@ -127,29 +127,30 @@
 | L4 记忆          | ⚠️    | session JSON + 阈值摘要压缩 + prompt cache 验证**已落地**；但压缩是整段摘要，**断裂 ToolCall 意图链**，无 PLAN.md 外部化 → 阶段十四 |
 | L5 组合          | ✅    | SubAgent 类型化 + 工具裁剪 + Skill proposal 流程齐备（阶段九/十二）         |
 | L6 界面          | ✅    | REPL 干净 + 命令补全 + 进度 spinner + Ctrl-C（阶段十一）                   |
-| **L7 可观测/评估** | 🔴    | **整模块缺失**：无 Cost Tracker 累加、无 Tracing、无 Benchmark → 阶段十七 |
-| **Prompt Composer** | 🔴 | `prompt.rs` **100% 静态硬编码**，不读工作区 `AGENTS.md` → 阶段十三       |
+| **L7 可观测/评估** | ✅    | Cost Tracker（17.1）+ Tracing（17.2）+ Benchmark Runner（17.3）齐备       |
+| **Prompt Composer** | ✅ | `prompt.rs::workspace_rules` 动态读工作区 `AGENTS.md`/`CLAUDE.md`（阶段十三）|
 | **外围资产**     | ✅    | MinerU/StepFun VLM/Tavily/GLM Search/Jina 已全部剥离（阶段七）              |
 
-### 4.1 Harness 全景图（图3）对照：尚缺组件清单
+### 4.1 Harness 全景图（图3）对照：组件清单（全部落地）
 
-| 图3 组件                       | 现状 | 缺口性质     | 落地阶段 |
-| ------------------------------ | ---- | ------------ | -------- |
-| Prompt Composer（动态 AGENTS.md）| ❌   | 架构级       | 阶段十三 |
-| System Reminders（死循环干预）  | ❌   | 机制级       | 阶段十三 |
-| Error Recovery（恢复提示注入）  | ❌   | 机制级       | 阶段十三 |
-| 只读并发 / 涉写串行（Fork-Join）| ❌   | 提效         | 阶段十三 |
-| 阶梯降级压缩（ToolCall 保留+掩码）| ⚠️  | 机制不达标   | 阶段十四 |
-| 工具大输出卸载（Offloading）    | ❌   | 机制级       | 阶段十四 |
-| 状态外部化 PLAN.md/TODO.md + Plan Mode | ❌ | 架构级 | 阶段十五 |
-| Cost Tracker 装饰器（图1）      | ❌   | 模块级       | 阶段十七 |
-| Tracing `~/.seekcli/traces` Span 树（图3）| ❌ | 模块级 | 阶段十七 |
-| Benchmark Runner（图2）         | ❌   | 模块级（元层）| 阶段十七 |
-| Human-in-loop 三态 allow/ask/deny | ⚠️ | 仅同步 y/N  | 阶段十六 |
+| 图3 组件                       | 现状 | 落地 |
+| ------------------------------ | ---- | -------- |
+| Prompt Composer（动态 AGENTS.md）| ✅   | 阶段十三 |
+| System Reminders（死循环干预）  | ✅   | 阶段十三 |
+| Error Recovery（恢复提示注入）  | ✅   | 阶段十三 |
+| 只读并发 / 涉写串行（Fork-Join）| ✅   | 阶段十三 |
+| Two-Stage ReAct（谋动分离）     | ✅   | 阶段十三 |
+| 阶梯降级压缩（ToolCall 保留+掩码）| ✅  | 阶段十四 |
+| 工具大输出卸载（Offloading）    | ✅   | 阶段十四 |
+| 状态外部化 PLAN.md/TODO.md + Plan Mode | ✅ | 阶段十五 |
+| Human-in-loop 三态 allow/ask/deny | ✅ | 阶段十六 |
+| Cost Tracker 装饰器（图1）      | ✅   | 阶段十七 |
+| Tracing `~/.seekcli/traces` Span 树（图3）| ✅ | 阶段十七 |
+| Benchmark Runner（图2）         | ✅   | 阶段十七 |
 
-**核心判断**：L0~L6 的"骨架"完成度高，但 Harness 真正区别于"玩具 demo"的是
-**运行时纠偏（L1 机制）+ 可观测/评估（L7 模块）**。后者整块空白意味着：
-做完任何引擎改动都**无法量化验证好坏**，故 Benchmark Runner 应优先于重型机制落地。
+**核心判断**：阶段十三~十七完成后，图3 全景的 12 项组件全部落地。
+SeekCLI 已从"有骨架"演进为具备**运行时纠偏（L1 机制）+ 可观测/评估（L7 模块）**
+的完整 Harness 引擎。后续是打磨（main.rs 瘦身、cost 持久化到 session）而非缺口。
 
 ---
 
