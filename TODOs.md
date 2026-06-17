@@ -312,18 +312,18 @@
 
 ---
 
-## 🔲 阶段十五：状态外部化 + Plan Mode (P1)
+## ✅ 阶段十五：状态外部化 + Plan Mode (P1) — Commit `0d0eaf1`
 *目标：长程任务跨压缩/断电不失忆；零成本人机协同。*
 *评估来源：harness-engineering 第 14 讲。注：非 plan-execute 框架，见 AGENT_ARCHITECTURE §7。*
 
-- [ ] **15.1 Plan Mode 开关** — REPL `/plan` 命令 + `App.plan_mode: bool`
-    - [ ] 开启时 `agent_system_prompt` 注入"复杂任务先写 PLAN.md/TODO.md，每轮开头先读"指令。
-    - [ ] 关闭时（默认）不注入，简单问答保持极速响应、不写文件。
-- [ ] **15.2 外部化记忆引导**
-    - [ ] 系统提示明确 PLAN.md（宏观架构/约束）与 TODO.md（细颗粒 checklist）职责分工。
-    - [ ] 引导"重启后先 read PLAN.md/TODO.md 定位断点续传"。
-- [ ] **15.3 与压缩协同**
-    - [ ] 确认 PLAN.md/TODO.md 落在工作区文件系统而非 context，压缩不影响其持久性。
+- [x] **15.1 Plan Mode 开关** — `App.plan_mode` + REPL `/plan [on|off]`（默认 toggle）。
+    - [x] 开启时 `plan_mode_rules()` 作为独立 system 消息注入；关闭（默认）不注入，问答极速。
+    - [x] `ensure_agent_system_prompt(messages, plan_mode)` 幂等增删；REPL 显示 `|plan` 指示。
+- [x] **15.2 外部化记忆引导**
+    - [x] 系统提示明确 PLAN.md（宏观架构/约束）vs TODO.md（细颗粒 checklist）职责分工。
+    - [x] 引导"重启/continue 后先 read PLAN.md/TODO.md 定位断点续传"。
+- [x] **15.3 与压缩协同**
+    - [x] 提示明确文件落工作区而非 context，压缩不影响其持久性、零 token 成本。
 
 **验收**：开 `/plan` 跑一个多步任务 → 工作区出现 PLAN.md/TODO.md 并被逐步勾选；
 关 `/plan` 问"go version" → 不应生成任何 .md 文件。
