@@ -253,15 +253,15 @@
 
 ---
 
-## 🔲 阶段十三：L1 运行时纠偏 + L2 提效 (P0)
+## ✅ 阶段十三：L1 运行时纠偏 + L2 提效 (P0)
 *目标：补齐 Harness 区别于"裸 ReAct"的运行时机制；让多工具调用并发提速。*
 *评估来源：harness-engineering 第 2/7/13/15 讲 + 图3 全景对照。*
 
-- [ ] **13.1 Two-Stage ReAct（谋动分离）** — `src/agent/mod.rs`
-    - [ ] Phase 1：不传 tools 发起纯文本推理请求（"小黑屋"），结果追加为 assistant 消息。
-    - [ ] Phase 2：带 tools 发起执行请求，基于 Phase 1 推理决策。
-    - [ ] **动态触发**：任务开局 / 工具连续失败 ≥2 次时开 thinking；确定性简单步骤跳过，省 token。
-    - [ ] 复用现有 `thinking_mode`，区分"DeepSeek 原生 reasoning"与"架构级两阶段隔离"。
+- [x] **13.1 Two-Stage ReAct（谋动分离）** — Commit `be5b0b0`
+    - [x] `planning_phase()`：不传 tools 发起纯文本推理，结果追加为 assistant 消息，action 调用据此决策。
+    - [x] **动态触发**：macro=首轮且 thinking 开启；micro=上一轮工具失败强制重新规划。避免每轮翻倍成本。
+    - [x] `result_is_failure()` 分类工具结果驱动 micro 触发；scoped depth==0，子 agent 保持单阶段。
+    - [x] 1 个新失败分类单测。
 - [x] **13.2 System Reminders（防死循环干预）** — Commit `07f2afb`
     - [x] `agent/reminders.rs::ReminderInjector` 哈希每轮 (name, arguments) 轨迹 + repeat_count。
     - [x] 连续 3 次相同轨迹（REPEAT_THRESHOLD=2）→ 注入一条 **user 消息** 打断；注入后 reset 重新计数避免刷屏。
