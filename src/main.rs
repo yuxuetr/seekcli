@@ -457,6 +457,72 @@ impl App {
     arguments.to_string()
   }
 
+  /// Heuristic: does a tool result indicate a failure? Drives the Two-Stage
+  /// ReAct micro trigger. `[Recovery]` is appended by recovery::augment on
+  /// every classified failure; the other markers cover delegation/skill paths.
+  fn result_is_failure(result: &str) -> bool {
+    result.contains("[Recovery]")
+      || result.contains("[BAD ARGS]")
+      || result.starts_with("[ERROR]")
+      || result.starts_with("Error executing")
+      || result.contains("' failed:")
+  }
+
+  /// Two-Stage ReAct planning pass: a tools-free completion that forces the
+  /// model to deliberate before acting. The plan text is appended to
+  /// `messages` as an assistant message so the subsequent action call sees it.
+  /// Called for the main agent only.
+  async fn planning_phase(&self, messages: &mut Vec<Message>) -> Result<()> {
+    println!("\n{}", "[Plan] deliberating (tools withheld)...".dimmed());
+    let mut stream = self
+      .brain
+      .call_api_with_params(
+        &self.model,
+        messages.clone(),
+        self.thinking_mode.as_str(),
+        None,
+      )
+      .await?;
+
+    let mut plan = String::new();
+    let mut is_reasoning = false;
+    while let Some(item) = stream.next().await {
+      if self.interrupt.load(Ordering::SeqCst) {
+        break;
+      }
+      match item? {
+        StreamItem::Reasoning(r) => {
+          if !is_reasoning {
+            print!("\n{}", "Thinking: ".italic().bright_black());
+            is_reasoning = true;
+          }
+          print!("{}", r.italic().bright_black());
+        }
+        StreamItem::Content(c) => {
+          if is_reasoning {
+            println!();
+            is_reasoning = false;
+          }
+          print!("{}", c.dimmed());
+          plan.push_str(&c);
+        }
+        _ => {}
+      }
+      io::stdout().flush()?;
+    }
+    println!();
+
+    if !plan.trim().is_empty() {
+      messages.push(Message::Simple {
+        role: "assistant".to_string(),
+        content: plan,
+        reasoning_content: None,
+        tool_calls: None,
+      });
+    }
+    Ok(())
+  }
+
   fn ensure_agent_system_prompt(messages: &mut Vec<Message>) {
     // Static kernel at index 0 — kept byte-identical so the prompt cache
     // prefix stays stable across turns/sessions.
@@ -563,8 +629,11 @@ impl App {
     // Doom-loop detector — main agent only. Persists across iterations of this
     // chat turn so it can spot repeated tool-call trajectories.
     let mut reminder_injector = agent::reminders::ReminderInjector::new();
+    // Two-Stage ReAct: set when the previous turn failed, forcing a tools-free
+    // planning pass before the next action (micro trigger).
+    let mut plan_next = false;
 
-    for _iter in 0..max_iter {
+    for iter in 0..max_iter {
       // Top-of-iteration interrupt check (Ctrl-C between turns).
       if depth == 0 && self.interrupt.swap(false, Ordering::SeqCst) {
         println!("\n{}", "[Agent] interrupted by user".yellow());
@@ -584,6 +653,24 @@ impl App {
           "[Memory]".yellow(),
           e
         );
+      }
+
+      // Two-Stage ReAct (dynamic): before acting, run a tools-free planning
+      // pass when (a) opening a task with thinking enabled — macro trigger,
+      // or (b) the previous turn hit a tool failure — micro trigger.
+      // Withholding tool schemas forces the model to deliberate instead of
+      // reflexively calling a tool. Main agent only.
+      if depth == 0 {
+        let macro_trigger = iter == 0 && self.thinking_mode != ThinkingMode::None;
+        if (macro_trigger || plan_next)
+          && let Err(e) = self.planning_phase(&mut messages).await
+        {
+          println!(
+            "{} planning phase failed: {} (continuing)",
+            "[Plan]".yellow(),
+            e
+          );
+        }
       }
 
       let mut stream = self
@@ -700,6 +787,9 @@ impl App {
       // Snapshot this turn's trajectory for doom-loop detection before the
       // calls are consumed below.
       let turn_tool_calls = tool_calls.clone();
+      // Tracks whether any tool failed this turn — drives the Two-Stage ReAct
+      // micro trigger (force a planning pass before the next action).
+      let mut turn_had_failure = false;
 
       // Fork-Join: if EVERY call this turn is pure read-only, run them
       // concurrently (the harness "read-concurrent, write-serial" rule). Any
@@ -730,6 +820,7 @@ impl App {
         });
         let results = futures_util::future::join_all(futs).await;
         for (id, content) in results {
+          turn_had_failure |= Self::result_is_failure(&content);
           messages.push(Message::ToolResponse {
             role: "tool".to_string(),
             content,
@@ -869,6 +960,7 @@ impl App {
             agent::recovery::augment(&tc.function.name, raw)
           };
 
+          turn_had_failure |= Self::result_is_failure(&result_str);
           messages.push(Message::ToolResponse {
             role: "tool".to_string(),
             content: result_str,
@@ -892,6 +984,10 @@ impl App {
         );
         messages.push(Message::new_user_text(reminder));
       }
+
+      // Two-Stage ReAct micro trigger: a failed turn forces a tools-free
+      // planning pass at the top of the next iteration.
+      plan_next = depth == 0 && turn_had_failure;
 
       println!("{} Returning tool results to model...", "Agent:".cyan());
     }

@@ -276,10 +276,11 @@
           由 recovery 转成"重新生成合法 JSON"提示。
     - [x] `run_agent_loop` 用 `recovery::augment` 包裹非委派工具结果；系统提示文档化语义。
     - [x] 6 个新单测（成功不提示 / 拒绝不提示 / 各类失败提示 / augment）。
-- [ ] **13.4 只读并发 / 涉写串行（Fork-Join）** — `src/agent/mod.rs` 工具分发环节
-    - [ ] 批次全为只读工具（read_file / list_dir / 只读 run_shell 难判→保守串行）→ `join_all` 并发。
-    - [ ] 批次含任一写操作（write_file / edit / invoke_agent / load_skill）→ 退化串行。
-    - [ ] 保持 ToolResponse 顺序与 tool_call 顺序一致（DeepSeek validator 要求）。
+- [x] **13.4 只读并发 / 涉写串行（Fork-Join）** — Commit `651696c`
+    - [x] `tools::registry::is_parallel_readonly` 仅 read_file / list_dir 可并发；run_shell 保守排除。
+    - [x] 批次全只读（len>1）→ `join_all` 并发，结果保序 + recovery::augment。
+    - [x] 批次含写 / shell / 委派 → 退化原串行路径（sub-agent / skill 副作用逻辑不变）。
+    - [x] ToolResponse 顺序与 tool_call 顺序一致；1 个新分类单测。
 - [x] **13.5 动态 Prompt Composer（读 AGENTS.md）** — Commit `4cec5e2`
     - [x] `prompt::workspace_rules(workspace)` 检测 cwd 下 `AGENTS.md` / `CLAUDE.md`（首个命中）。
     - [x] 存在则作为独立 system 消息注入到静态内核之后；不存在则零开销跳过。
