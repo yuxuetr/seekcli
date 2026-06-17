@@ -292,7 +292,7 @@
 
 ---
 
-## 🔲 阶段十四：L4 记忆层深化 (P1)
+## ✅ 阶段十四：L4 记忆层深化 (P1)
 *目标：让压缩不断裂意图链；让单条大输出不撑爆 context。*
 *评估来源：harness-engineering 第 5/12 讲。*
 
@@ -301,10 +301,11 @@
     - [x] Stage 2 Working Memory 尾部：单条 ToolResult > 1000 字节做 Head-Tail 截断（前 500 + 后 500）。
     - [x] Stage 3 摘要降级为最后一级：掩码+截断仍超阈值才触发 LLM 摘要。
     - [x] marker 保证幂等（每轮重入不重复掩码/截断）；3 个新单测。
-- [ ] **14.2 工具大输出卸载（Tool Output Offloading）**
-    - [ ] read_file / run_shell 输出 > 8K 字符 → 写入 `~/.seekcli/tmp/<hash>.txt`。
-    - [ ] 返回"头部预览 + 尾部预览 + 文件路径引用"摘要，倒逼模型按需局部读取。
-    - [ ] 替换 read_file 现有的粗暴硬截断（若有）。
+- [x] **14.2 工具大输出卸载（Tool Output Offloading）** — Commit `5aa4abc`
+    - [x] `tools/offload.rs`：read_file / run_shell 输出 > 8K 字节 → 写入 `~/.seekcli/tmp/<hash>.txt`。
+    - [x] 返回"头部 2K + 尾部 1K 预览 + 文件路径引用"，倒逼模型按需局部读取。
+    - [x] 替换 read_file 原 50KB 硬截断；预览指回原始路径。run_shell 保留 exit-code 前缀。
+    - [x] best-effort（写盘失败降级内联预览，不报错）；2 个新 async 单测。
 
 **验收**：长对话触发压缩后日志显示 ToolCall 仍在、ToolResult 已掩码；
 读 2 万行文件 → 返回预览 + 卸载路径而非全文。
