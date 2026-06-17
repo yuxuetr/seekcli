@@ -52,6 +52,34 @@ pub fn workspace_rules(workspace: &Path) -> Option<String> {
   None
 }
 
+/// Plan Mode guidance, injected as a system message only while `/plan` is on.
+/// Externalizes long-task state to the workspace filesystem (PLAN.md / TODO.md)
+/// so it survives context compression and process restarts — the harness
+/// "externalized state" pattern. Kept out of the default prompt so simple
+/// question-answer turns stay fast and don't get bossed into bureaucracy.
+pub fn plan_mode_rules() -> String {
+  r#"# Plan Mode (active)
+
+This is a complex, long-running task. Externalize your state to the workspace
+filesystem so it survives context compression and restarts — do NOT keep the
+plan only in your head.
+
+- PLAN.md — high-level approach, architecture, and global constraints. Write it
+  once at the start; revise only when the goal itself changes.
+- TODO.md — granular checklist with status markers (`- [ ]` / `- [x]`).
+
+Workflow:
+1. At the start of a complex task, write PLAN.md and TODO.md.
+2. When resuming or unsure, READ TODO.md to recover your place — conversation
+   memory may have been compressed away; the files are the source of truth.
+3. Mark items `- [x]` in TODO.md as you complete them.
+4. On "continue", read PLAN.md + TODO.md first to find the breakpoint.
+
+These files live in the working directory, not in this context, so retaining
+them costs no tokens. Use read_file / write_file to manage them."#
+    .to_string()
+}
+
 /// Base system prompt that turns DeepSeek into a SeekCLI Harness Agent.
 /// Kept stable across sessions to maximize prompt cache hit rate.
 pub fn agent_system_prompt() -> String {

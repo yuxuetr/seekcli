@@ -63,6 +63,9 @@ struct App {
   current_session: Session,
   model: String,
   thinking_mode: ThinkingMode,
+  /// When on, the agent is instructed to externalize long-task state to
+  /// PLAN.md / TODO.md in the workspace. Toggled with `/plan`.
+  plan_mode: bool,
   current_skill: Option<Skill>,
   last_code_blocks: Vec<String>,
   /// Set to true by the Ctrl-C watcher task. Polled at the top of each
@@ -92,6 +95,7 @@ impl App {
       current_session,
       model,
       thinking_mode: ThinkingMode::None,
+      plan_mode: false,
       current_skill: None,
       last_code_blocks: Vec::new(),
       interrupt,
@@ -102,6 +106,7 @@ impl App {
     println!("{}", "\nAvailable Commands:".bold().yellow());
     println!("  /model [flash|pro]      Switch DeepSeek model");
     println!("  /thinking [n|h|m]       Switch thinking intensity (None/High/Max)");
+    println!("  /plan [on|off]          Toggle Plan Mode (externalize state to PLAN.md/TODO.md)");
     println!("  /skill list             List active skills");
     println!("  /skill <name> [prompt]  Activate a skill (optional: send prompt immediately)");
     println!("  /skill proposals        List pending skill proposals from the agent");
@@ -138,10 +143,12 @@ impl App {
         .as_ref()
         .map(|s| format!("|{}", s.name))
         .unwrap_or_default();
+      let plan_label = if self.plan_mode { "|plan" } else { "" };
       let prompt = format!(
-        "{} ({}{}) {} ",
+        "{} ({}{}{}) {} ",
         self.model.blue(),
         self.thinking_mode.label().magenta(),
+        plan_label.cyan(),
         skill_label.yellow(),
         "❯".green()
       );
@@ -325,6 +332,23 @@ impl App {
         }
         println!("Thinking: {:?}", self.thinking_mode);
       }
+      "/plan" => {
+        // Optional explicit on/off, else toggle.
+        self.plan_mode = match parts.get(1).copied() {
+          Some("on") => true,
+          Some("off") => false,
+          _ => !self.plan_mode,
+        };
+        if self.plan_mode {
+          println!(
+            "{} Plan Mode {} — agent will externalize state to PLAN.md / TODO.md",
+            "✦".cyan(),
+            "ON".green()
+          );
+        } else {
+          println!("{} Plan Mode {}", "✦".cyan(), "OFF".yellow());
+        }
+      }
       "/history" => {
         let sessions = self.history.list_sessions()?;
         for s in sessions.iter().take(10) {
@@ -415,7 +439,7 @@ impl App {
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
     let mut messages = std::mem::take(&mut self.current_session.messages);
-    Self::ensure_agent_system_prompt(&mut messages);
+    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
     let (_final_content, updated_messages) = self
       .run_agent_loop(messages, tools, 0, agent::MAX_ITER)
       .await?;
@@ -523,7 +547,18 @@ impl App {
     Ok(())
   }
 
-  fn ensure_agent_system_prompt(messages: &mut Vec<Message>) {
+  fn ensure_agent_system_prompt(messages: &mut Vec<Message>, plan_mode: bool) {
+    // Plan Mode guidance is added/removed as the flag toggles. Marker-prefixed
+    // so we can find and drop it without touching other system messages.
+    let plan_msg = agent::prompt::plan_mode_rules();
+    messages.retain(|m| {
+      !matches!(
+        m,
+        Message::Simple { role, content, .. }
+          if role == "system" && content.starts_with("# Plan Mode (active)")
+      )
+    });
+
     // Static kernel at index 0 — kept byte-identical so the prompt cache
     // prefix stays stable across turns/sessions.
     let target = agent::prompt::agent_system_prompt();
@@ -578,6 +613,24 @@ impl App {
           },
         );
       }
+    }
+
+    // Plan Mode message goes after the leading run of system messages
+    // (kernel + workspace rules + any active-skill prompt).
+    if plan_mode {
+      let head_end = messages
+        .iter()
+        .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
+        .count();
+      messages.insert(
+        head_end,
+        Message::Simple {
+          role: "system".to_string(),
+          content: plan_msg,
+          reasoning_content: None,
+          tool_calls: None,
+        },
+      );
     }
   }
 
@@ -1020,6 +1073,7 @@ const SLASH_COMMANDS: &[&str] = &[
   "/copy",
   "/model",
   "/thinking",
+  "/plan",
   "/skill",
   "/load",
 ];
