@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 pub mod approval;
+pub mod edit;
 pub mod fs;
 pub mod meta;
 pub mod offload;
@@ -33,6 +34,7 @@ impl ToolDispatcher {
     match name {
       "read_file" => fs::read_file(&args).await,
       "write_file" => fs::write_file(&args).await,
+      "edit_file" => fs::edit_file(&args).await,
       "list_dir" => fs::list_dir(&args).await,
       "run_shell" => shell::run_shell(&args).await,
       "create_skill" => meta::create_skill(&args).await,

@@ -33,6 +33,25 @@ pub fn system_tools() -> Vec<Tool> {
       }),
     ),
     make_tool(
+      "edit_file",
+      "Make a surgical, in-place edit: replace one occurrence of old_text with \
+       new_text. PREFER this over write_file for changing existing files — it \
+       does not require rewriting the whole file. old_text is matched with \
+       whitespace/indentation tolerance, so copy it from read_file output; you \
+       do not need to reproduce indentation perfectly. If old_text matches more \
+       than one place, the edit is refused — add surrounding lines until it is \
+       unique. If it matches nothing, re-read the file and copy old_text again.",
+      json!({
+        "type": "object",
+        "properties": {
+          "path":     { "type": "string", "description": "File to edit (must exist)" },
+          "old_text": { "type": "string", "description": "Exact snippet to replace; include enough lines to be unique" },
+          "new_text": { "type": "string", "description": "Replacement snippet" }
+        },
+        "required": ["path", "old_text", "new_text"]
+      }),
+    ),
+    make_tool(
       "list_dir",
       "List entries in a directory (single level, no recursion). \
        Use run_shell with find/tree for deeper exploration.",

@@ -49,7 +49,7 @@ Your job: complete the user's specific subtask end-to-end and return a
 concise summary. You can read, write, and run shell — same as the parent
 agent — but you CANNOT spawn further sub-agents.
 
-Available tools: read_file, write_file, list_dir, run_shell.
+Available tools: read_file, write_file, edit_file, list_dir, run_shell.
 
 Rules:
 - Stay focused on the subtask. Don't expand scope.
@@ -58,7 +58,13 @@ Rules:
 - Cite file:line. Be terse. Parent agent will reformat for the user.
 - Stop calling tools as soon as the subtask is done.
 ",
-  allowed_tools: &["read_file", "write_file", "list_dir", "run_shell"],
+  allowed_tools: &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "run_shell",
+  ],
   max_iter: 20,
 };
 

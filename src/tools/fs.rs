@@ -42,6 +42,58 @@ pub async fn write_file(args: &Value) -> Result<String> {
   Ok(format!("Successfully wrote to {}", path))
 }
 
+pub async fn edit_file(args: &Value) -> Result<String> {
+  let path = args
+    .get("path")
+    .and_then(|v| v.as_str())
+    .context("Missing 'path' argument")?;
+  let old_text = args
+    .get("old_text")
+    .and_then(|v| v.as_str())
+    .context("Missing 'old_text' argument")?;
+  let new_text = args
+    .get("new_text")
+    .and_then(|v| v.as_str())
+    .context("Missing 'new_text' argument")?;
+
+  if let Err(e) = super::path_security::ensure_within_cwd(path) {
+    return Ok(format!("[PATH DENIED] {e}"));
+  }
+
+  let content = tokio::fs::read_to_string(path)
+    .await
+    .context(format!("Failed to read file: {}", path))?;
+
+  match super::edit::apply_edit(&content, old_text, new_text) {
+    super::edit::EditOutcome::Replaced {
+      level,
+      content: new,
+    } => {
+      tokio::fs::write(path, &new)
+        .await
+        .context(format!("Failed to write to file: {}", path))?;
+      let note = if level == 1 {
+        String::new()
+      } else {
+        format!(" (matched via fuzzy level {level})")
+      };
+      Ok(format!("Successfully edited {}{}", path, note))
+    }
+    super::edit::EditOutcome::NotFound => Ok(format!(
+      "old_text not found in {}. The text may have different whitespace, or you \
+       may be looking at a stale version. Re-read the file with read_file and \
+       copy old_text exactly, then retry.",
+      path
+    )),
+    super::edit::EditOutcome::Ambiguous { level, count } => Ok(format!(
+      "old_text matched {count} places in {} (at fuzzy level {level}). Refusing \
+       to edit ambiguously. Add more surrounding lines to old_text so it \
+       uniquely identifies the single region you mean.",
+      path
+    )),
+  }
+}
+
 pub async fn list_dir(args: &Value) -> Result<String> {
   let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 

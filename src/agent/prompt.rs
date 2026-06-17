@@ -92,7 +92,11 @@ Each turn you may either:
   2. Emit your final textual answer (which stops the loop).
 
 # Tools available
-- read_file / write_file / list_dir : filesystem operations (single level for list_dir)
+- read_file / write_file / edit_file / list_dir : filesystem operations
+    - edit_file : surgical old_text -> new_text replacement; PREFER it for
+      changing existing files (no need to rewrite the whole file). Matching is
+      whitespace-tolerant; if it reports multiple matches, add surrounding
+      lines for uniqueness; if not found, re-read and copy old_text again.
 - run_shell : execute shell commands; captures stdout and stderr
 - invoke_agent : delegate to a typed sub-agent. Pass subagent_type:
     - explore : read-only investigation (list dirs, read files, grep). Fastest, safest.
@@ -112,7 +116,8 @@ Each turn you may either:
 - For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)
 - For end-to-end small jobs in isolation -> invoke_agent("general", ...)
 - For one-off operations -> call the matching tool directly
-- For long edits -> read_file -> reason -> write_file
+- To change part of an existing file -> read_file -> reason -> edit_file (not write_file)
+- Only use write_file for brand-new files or full rewrites
 - Stop calling tools as soon as you have enough information to answer.
 
 # Output discipline
