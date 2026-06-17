@@ -28,15 +28,20 @@ SeekCLI 选择**做减法**：
 | 能力              | 说明                                                                     |
 | ----------------- | ------------------------------------------------------------------------ |
 | ReAct Loop        | 模型在"思考 → tool_call → 观察"循环里自驱，迭代上限保护                    |
+| Two-Stage ReAct   | 动态触发"谋动分离"——开局/失败时先无工具纯推理，再带工具执行               |
+| System Reminders  | 检测重复工具轨迹（死循环），注入 user 消息打断                            |
+| Error Recovery    | 工具失败时追加 `[Recovery]` 行动建议，引导模型走排障 SOP                  |
+| 只读并发          | 同一轮全为只读工具时并发执行（涉写自动退化串行）                          |
 | 类型化 SubAgent   | `invoke_agent("explore", ...)` 派发只读探索子任务，仅带摘要回主轴         |
 | Tool 调度         | 内置 `read_file / write_file / list_dir / run_shell` 等工具，schema 注入 LLM |
+| 大输出卸载        | 工具输出 > 8K 落盘 `~/.seekcli/tmp/`，仅回首尾预览 + 路径                 |
+| 动态 Prompt       | 启动时读工作区 `AGENTS.md` / `CLAUDE.md` 注入项目规约                     |
+| Plan Mode         | `/plan` 引导模型把长任务状态外部化到 `PLAN.md` / `TODO.md`                |
 | Skill 策展        | 内置 skill 模板 + `create_skill` proposal（用户审核后生效）              |
-| 上下文压缩        | 长会话自动摘要中段，复用 DeepSeek prompt cache                            |
-| 安全护栏          | 危险命令拦截 + fs 路径白名单                                              |
-| Session 持久化    | `~/.seekcli/sessions/*.json`，`/load` 可断点续接                          |
-
-> 说明：上表是 **目标形态**。当前代码状态见 [`TODOs.md`](./TODOs.md)。
-> 部分能力（schema 注入、审批、压缩、类型化 SubAgent）正在阶段六 ~ 阶段十陆续落地。
+| 阶梯降级压缩      | 远期 ToolResult 掩码（保留 ToolCall 意图链）+ 工作记忆掐头去尾 + 摘要兜底 |
+| 三态安全护栏      | allow / ask / deny 命令分类（可配置）+ fs 路径白名单                      |
+| 可观测性          | 每会话 token/CNY 账单 + `SEEKCLI_TRACE=1` 决策树 + `--bench` 跑分         |
+| Session 持久化    | `~/.seekcli/sessions/*.json`（含 cost），`/load` 可断点续接              |
 
 ---
 
@@ -69,24 +74,37 @@ export DEEPSEEK_API_BASE="..."            # 可选，覆盖默认 API endpoint
 | ----------------------- | --------------------------------- |
 | `/model [flash\|pro]`   | 切换 DeepSeek 模型                |
 | `/thinking [n\|h\|m]`   | 调整思考强度 (None/High/Max)      |
-| `/clear`                | 重置当前会话上下文                |
-| `/history`              | 查看历史会话列表                  |
+| `/plan [on\|off]`       | 切换 Plan Mode（外部化 PLAN.md/TODO.md）|
+| `/clear`                | 重置当前会话上下文（含 cost）     |
+| `/history`              | 查看历史会话列表（含 ¥ 估算）     |
 | `/load <id>`            | 加载并继续历史会话                |
+| `/copy [index]`         | 复制上条回复中的代码块            |
 | `/quit`                 | 退出                              |
 
 ### Skill 系统
-| 指令               | 说明                              |
-| ------------------ | --------------------------------- |
-| `/skill list`      | 列出所有可用 skill                |
-| `/skill <name>`    | 激活指定 skill                    |
-| `/skill review`    | 审核模型起草的 skill proposal（阶段九）|
+| 指令                    | 说明                              |
+| ----------------------- | --------------------------------- |
+| `/skill list`           | 列出所有可用 skill                |
+| `/skill <name>`         | 激活指定 skill                    |
+| `/skill proposals`      | 列出模型起草的 skill proposal     |
+| `/skill accept <name>`  | 通过 proposal 转为正式 skill      |
+| `/skill reject <name>`  | 丢弃 proposal                     |
+| `/skill migrate`        | 旧 `<name>.json` 一键转 `SKILL.md` |
 
 ### 工具能力（自动由模型调用）
 模型在 ReAct 循环中可自主调用：
-- `read_file / write_file / list_dir` —— 文件系统
-- `run_shell` —— 终端命令（危险命令需审批）
-- `invoke_agent` —— 派发子任务
+- `read_file / write_file / list_dir` —— 文件系统（大输出自动卸载）
+- `run_shell` —— 终端命令（三态 allow/ask/deny 护栏）
+- `invoke_agent` —— 派发类型化子任务（explore / general）
+- `load_skill` —— 会话中激活已保存的 skill
 - `create_skill` —— 起草新技能 proposal
+
+### 可观测性与评估
+```bash
+SEEKCLI_TRACE=1 seekcli                       # 决策树落盘 ~/.seekcli/traces/<id>.json
+seekcli --bench examples/benchmarks/basic.json  # Fail-to-Pass 跑分报表
+```
+每轮对话结束打印 `[Cost]` 账单（token + cache 命中率 + ¥ 估算），并随 session 持久化。
 
 ---
 
@@ -94,7 +112,10 @@ export DEEPSEEK_API_BASE="..."            # 可选，覆盖默认 API endpoint
 
 ```
 ~/.seekcli/
-├── sessions/                会话 JSON 记录
+├── sessions/                会话 JSON 记录（含 cost 账单）
+├── traces/                  SEEKCLI_TRACE=1 时的决策树（<run_id>.json）
+├── tmp/                     工具大输出卸载文件
+├── bench/                   benchmark 隔离靶机工作区
 └── skills/
     ├── <name>/              ← 推荐：agentskills.io 兼容格式
     │   ├── SKILL.md         主文件：YAML frontmatter + Markdown body
@@ -178,22 +199,29 @@ cp -r examples/skills/vision examples/skills/doc_parser ~/.seekcli/skills/
 | 阶段十   | L4 记忆层（压缩 + cache）             | ✅ 完成   |
 | 阶段十一 | L6 界面（Ctrl-C + spinner + 补全）    | ✅ 完成   |
 | 阶段十二 | Skill 格式标准化（SKILL.md 兼容）     | ✅ 完成   |
+| 阶段十三 | L1 运行时纠偏 + 只读并发 + 动态 Prompt | ✅ 完成   |
+| 阶段十四 | L4 深化（阶梯降级压缩 + 输出卸载）    | ✅ 完成   |
+| 阶段十五 | Plan Mode + 状态外部化                | ✅ 完成   |
+| 阶段十六 | 三态 allow/ask/deny 权限              | ✅ 完成   |
+| 阶段十七 | L7 可观测（Cost + Tracing + Benchmark）| ✅ 完成   |
 
-详细任务拆解见 [`TODOs.md`](./TODOs.md)。
+对照 Harness 全景图（图3）的 12 项组件已全部落地，详见
+[`AGENT_ARCHITECTURE.md §4.1`](./AGENT_ARCHITECTURE.md)；任务拆解见 [`TODOs.md`](./TODOs.md)。
 
 ---
 
 ## 🧠 心智模型速览
 
-SeekCLI 遵循"七层 Harness Agent 架构"：
+SeekCLI 遵循"分层 Harness Agent 架构"：
 
 ```
+L7  可观测层    Cost Tracker · Tracing · Benchmark
 L6  界面层      REPL · CLI 子命令
 L5  组合层      SubAgent 模板 · Skill 策展
-L4  记忆层      上下文压缩 · prompt cache · 会话
-L3  安全层      命令审批 · 路径白名单
-L2  边界层      Tool Dispatcher · schema 注册
-L1  引擎层      ReAct Loop · 迭代上限 · 中断处理
+L4  记忆层      阶梯降级压缩 · PLAN/TODO 外部化 · 会话
+L3  安全层      三态命令审批 · 路径白名单
+L2  边界层      Tool Dispatcher · schema 注册 · 只读并发
+L1  引擎层      ReAct · Two-Stage · System Reminders · Error Recovery
 L0  基底层      LLM Provider · Streaming · 协议解析
 ```
 
