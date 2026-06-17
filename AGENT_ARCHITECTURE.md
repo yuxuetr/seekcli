@@ -143,7 +143,7 @@
 | 工具大输出卸载（Offloading）    | ❌   | 机制级       | 阶段十四 |
 | 状态外部化 PLAN.md/TODO.md + Plan Mode | ❌ | 架构级 | 阶段十五 |
 | Cost Tracker 装饰器（图1）      | ❌   | 模块级       | 阶段十七 |
-| Tracing `.claw/traces` Span 树（图3）| ❌ | 模块级    | 阶段十七 |
+| Tracing `~/.seekcli/traces` Span 树（图3）| ❌ | 模块级 | 阶段十七 |
 | Benchmark Runner（图2）         | ❌   | 模块级（元层）| 阶段十七 |
 | Human-in-loop 三态 allow/ask/deny | ⚠️ | 仅同步 y/N  | 阶段十六 |
 
@@ -177,7 +177,7 @@ src/
 │   └── registry.rs      SubAgent 类型注册表（L5）
 ├── observability/                                         ★阶段十七（新增模块 L7）
 │   ├── cost.rs          CostTracker 装饰器（图1）
-│   ├── trace.rs         Span 树 → .claw/traces（图3）
+│   ├── trace.rs         Span 树 → ~/.seekcli/traces（图3）
 │   └── bench.rs         Benchmark Runner（图2）
 ├── skills.rs            模板持久化 + proposal 审核
 ├── history.rs           Session 持久化（待加：cost 账单挂载）

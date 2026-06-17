@@ -355,10 +355,11 @@
     - [x] `estimated_cny`（明确标注为估算费率）+ `cache_hit_pct` + 一行 `summary()`。
     - [x] App 持有 tracker；run_agent_loop 在 Usage 分支 record（覆盖 turn/planning/子 agent）；chat() 末尾打印账单。
     - [x] 4 个新单测。（注：账单暂打印到 stdout，未持久化到 session metadata — 可后续补。）
-- [x] **17.2 Tracing Span 树** — Commit `c32c6ea`（图3 `.claw/traces`）
+- [x] **17.2 Tracing Span 树** — Commit `c32c6ea`（图3，落盘 `~/.seekcli/traces`）
     - [x] Run → Turn → Generate/Execute/Planning/Compaction JSON 决策树 + 时延 + meta。
-    - [x] engine 边界埋点；落盘 `.claw/traces/<run_id>.json`；子 agent 嵌在 execute span 下。
-    - [x] `SEEKCLI_TRACE` env 开关，关闭时 begin/end/flush 零成本 no-op；`.claw/` 已 gitignore。
+    - [x] engine 边界埋点；落盘 `~/.seekcli/traces/<run_id>.json`（含 workspace 字段）；子 agent 嵌在 execute span 下。
+    - [x] `SEEKCLI_TRACE` env 开关，关闭时 begin/end/flush 零成本 no-op。
+    - [x] 与 session/skills/offload 统一归到 `~/.seekcli/` 下。
     - [x] 3 个新单测（disabled no-op / 嵌套树 / annotate）。
 - [ ] **17.3 Benchmark Runner** — `src/observability/bench.rs`（图2）
     - [ ] Testsuite JSON 定义任务 + 验证命令（Fail-to-Pass 范式）。
@@ -366,7 +367,7 @@
     - [ ] 综合得分 = 成功率 + token 成本 + 耗时 + 轮数。
     - [ ] 至少 2~3 个种子任务（修 bug / 加接口），作为引擎回归基线。
 
-**验收**：会话结束打印 token/CNY 总账；`.claw/traces/` 出现可读决策树；
+**验收**：会话结束打印 token/CNY 总账；`~/.seekcli/traces/` 出现可读决策树；
 `cargo run --bin bench`（或子命令）跑出引擎跑分报表。
 
 ---

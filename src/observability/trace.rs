@@ -8,7 +8,8 @@
 //! Opt-in via the `SEEKCLI_TRACE=1` environment variable. When disabled,
 //! `begin`/`end`/`flush` are cheap no-ops so normal runs pay nothing and no
 //! files are written. When enabled, each run flushes a JSON span tree to
-//! `.claw/traces/<run_id>.json` in the working directory.
+//! `~/.seekcli/traces/<run_id>.json` — alongside the other SeekCLI products
+//! (sessions, skills, offload tmp).
 //!
 //! Instrumentation lives at the engine boundary (the agent loop), keeping the
 //! tracer out of the tools and provider code.
@@ -109,17 +110,27 @@ impl Trace {
     self.origin.map(|o| o.elapsed().as_millis()).unwrap_or(0)
   }
 
-  /// Write the span tree to `.claw/traces/<run_id>.json`. Best-effort: a write
-  /// failure is reported but never propagated. No-op when disabled or empty.
+  /// Write the span tree to `~/.seekcli/traces/<run_id>.json`. Best-effort: a
+  /// write failure is reported but never propagated. No-op when disabled or
+  /// empty. The originating workspace is recorded in the doc, since traces from
+  /// every project share one global directory.
   pub fn flush(&self) -> std::io::Result<Option<std::path::PathBuf>> {
     if !self.enabled || self.spans.is_empty() {
       return Ok(None);
     }
-    let dir = std::path::Path::new(".claw").join("traces");
+    let home = std::env::var("HOME")
+      .map_err(|_| std::io::Error::other("HOME not set; cannot locate ~/.seekcli/traces"))?;
+    let dir = std::path::PathBuf::from(home)
+      .join(".seekcli")
+      .join("traces");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", self.run_id));
+    let cwd = std::env::current_dir()
+      .map(|p| p.display().to_string())
+      .unwrap_or_default();
     let doc = json!({
       "run_id": self.run_id,
+      "workspace": cwd,
       "total_ms": self.spans.first().map(|s| s.dur_ms).unwrap_or(0),
       "tree": self.tree_for(None),
     });
