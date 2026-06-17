@@ -77,6 +77,8 @@ struct App {
 impl App {
   fn new() -> Result<Self> {
     let config = Config::load()?;
+    // Install the user's shell-command allow/deny policy (three-state approval).
+    tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
     let deepseek_key = env::var("DEEPSEEK_API_KEY").context("Please set DEEPSEEK_API_KEY")?;
     let brain = ApiClient::new(deepseek_key);
     let history = HistoryManager::new()?;

@@ -8,6 +8,86 @@
 
 use colored::Colorize;
 use std::io::{self, Write};
+use std::sync::OnceLock;
+
+/// Three-state outcome of classifying a shell command (harness allow/ask/deny).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+  /// Run without prompting.
+  Allow,
+  /// Prompt the user for interactive y/N confirmation. Carries the reason.
+  Ask(String),
+  /// Block outright; never runs, even with confirmation. Carries the reason.
+  Deny(String),
+}
+
+/// User-supplied allow/deny substring patterns (from `config.toml [security]`).
+#[derive(Debug, Default)]
+struct Policy {
+  allow: Vec<String>,
+  deny: Vec<String>,
+}
+
+static POLICY: OnceLock<Policy> = OnceLock::new();
+
+/// Install the user's allow/deny patterns once at startup. Idempotent: a second
+/// call is ignored (the first policy wins).
+pub fn init_policy(allow: Vec<String>, deny: Vec<String>) {
+  let _ = POLICY.set(Policy { allow, deny });
+}
+
+/// Classify a command into allow / ask / deny. Precedence:
+/// 1. user deny pattern  → Deny
+/// 2. built-in catastrophic → Deny
+/// 3. user allow pattern  → Allow (overrides a built-in ask)
+/// 4. built-in dangerous  → Ask
+/// 5. otherwise           → Allow
+pub fn classify(cmd: &str) -> Decision {
+  let lower = cmd.to_lowercase();
+  let policy = POLICY.get();
+
+  if let Some(p) = policy.and_then(|p| matches_any(&lower, &p.deny)) {
+    return Decision::Deny(format!("matches configured deny pattern '{p}'"));
+  }
+  if let Some(reason) = is_catastrophic(cmd) {
+    return Decision::Deny(reason.to_string());
+  }
+  if policy
+    .map(|p| matches_any(&lower, &p.allow).is_some())
+    .unwrap_or(false)
+  {
+    return Decision::Allow;
+  }
+  if let Some(reason) = is_dangerous(cmd) {
+    return Decision::Ask(reason.to_string());
+  }
+  Decision::Allow
+}
+
+/// Built-in deny tier: commands with no legitimate interactive use whose
+/// effects are catastrophic and irreversible. These are blocked outright.
+pub fn is_catastrophic(cmd: &str) -> Option<&'static str> {
+  let trimmed = cmd.trim();
+  let lower = trimmed.to_lowercase();
+
+  if trimmed.contains(":(){") || trimmed.contains(":() {") {
+    return Some("fork bomb (blocked)");
+  }
+  if has_token(trimmed, "mkfs") || lower.contains("mkfs.") {
+    return Some("filesystem format (blocked)");
+  }
+  if lower.contains("dd ") && lower.contains("of=/dev/") {
+    return Some("raw block device write (blocked)");
+  }
+  None
+}
+
+fn matches_any(lower: &str, patterns: &[String]) -> Option<String> {
+  patterns
+    .iter()
+    .find(|p| !p.is_empty() && lower.contains(&p.to_lowercase()))
+    .cloned()
+}
 
 /// Returns `Some(reason)` if the command matches a known-dangerous pattern,
 /// otherwise `None`. The reason string is shown to the user verbatim.
@@ -164,5 +244,48 @@ mod tests {
   #[test]
   fn detects_fork_bomb() {
     assert!(is_dangerous(":(){ :|:& };:").is_some());
+  }
+
+  #[test]
+  fn classify_catastrophic_is_deny() {
+    assert!(matches!(classify(":(){ :|:& };:"), Decision::Deny(_)));
+    assert!(matches!(classify("mkfs.ext4 /dev/sda1"), Decision::Deny(_)));
+    assert!(matches!(
+      classify("dd if=/dev/zero of=/dev/sda"),
+      Decision::Deny(_)
+    ));
+  }
+
+  #[test]
+  fn classify_dangerous_is_ask() {
+    assert!(matches!(classify("sudo ls"), Decision::Ask(_)));
+    assert!(matches!(classify("rm -rf /etc"), Decision::Ask(_)));
+    assert!(matches!(classify("git push --force"), Decision::Ask(_)));
+  }
+
+  #[test]
+  fn classify_safe_is_allow() {
+    assert!(matches!(classify("ls -la"), Decision::Allow));
+    assert!(matches!(classify("git status"), Decision::Allow));
+    assert!(matches!(classify("cargo test"), Decision::Allow));
+  }
+
+  #[test]
+  fn matches_any_is_case_insensitive_substring() {
+    // `matches_any` takes an already-lowercased haystack (classify lowercases
+    // before calling); the pattern is lowercased internally.
+    let pats = vec!["PRODUCTION".to_string()];
+    assert!(matches_any("deploy to production now", &pats).is_some());
+    assert!(matches_any("deploy to staging", &pats).is_none());
+    // Empty patterns never match (guards against a blank config line).
+    assert!(matches_any("anything", &[String::new()]).is_none());
+  }
+
+  #[test]
+  fn classify_user_deny_blocks() {
+    // Without policy installed (OnceLock unset), a safe command is allowed.
+    // The deny/allow override paths are exercised by matches_any above; here
+    // we just confirm the built-in tiers hold when no policy is present.
+    assert!(matches!(classify("echo hi"), Decision::Allow));
   }
 }

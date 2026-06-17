@@ -7,6 +7,23 @@ use std::path::Path;
 pub struct Config {
   pub brain: BrainConfig,
   pub sensor: SensorConfig,
+  /// Optional shell-command permission policy. Absent in older config files,
+  /// so it defaults to empty (built-in rules only).
+  #[serde(default)]
+  pub security: SecurityConfig,
+}
+
+/// User-extensible allow/deny lists for the three-state command policy.
+/// Patterns are matched case-insensitively as substrings of the command.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct SecurityConfig {
+  /// Commands matching any allow pattern skip the interactive prompt even if
+  /// a built-in rule would otherwise ask.
+  #[serde(default)]
+  pub allow: Vec<String>,
+  /// Commands matching any deny pattern are blocked outright (no prompt).
+  #[serde(default)]
+  pub deny: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,6 +53,7 @@ impl Config {
         sensor: SensorConfig {
           vlm_model: "step-1.5v-mini".to_string(),
         },
+        security: SecurityConfig::default(),
       };
       let toml_str = toml::to_string_pretty(&default_config)?;
       fs::write(config_path, toml_str)?;
