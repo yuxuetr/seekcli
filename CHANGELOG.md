@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file. See [conven
 - mark Phase 5 tasks as completed - ([4796547](https://github.com/yuxuetr/rust-template/commit/4796547d9357eb34050638d0a55fcb20410daae6)) - yuxuetr
 - mark stage 17 (L7 observability) and figure-3 checklist complete - ([ea3c9e7](https://github.com/yuxuetr/rust-template/commit/ea3c9e7b5a64119401a454437562aae3c8db3897)) - yuxuetr
 - document dual OpenAI/Anthropic provider support - ([4bdb848](https://github.com/yuxuetr/rust-template/commit/4bdb8480839e5da2afe707bba58bc25efdff60f6)) - yuxuetr
+- README + CHANGELOG for dual provider & reasoning handling - ([4ce372b](https://github.com/yuxuetr/rust-template/commit/4ce372b7fb1b7110b527b82a91eae90de7f5c338)) - yuxuetr
 
 ### Features
 
@@ -50,6 +51,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(prompt)** dynamic Prompt Composer reads workspace AGENTS.md/CLAUDE.md - ([4cec5e2](https://github.com/yuxuetr/rust-template/commit/4cec5e293c26afd2ae889f209c9c4aa975180025)) - yuxuetr
 - **(security)** three-state allow/ask/deny command policy - ([1b18b64](https://github.com/yuxuetr/rust-template/commit/1b18b64465f95db54543d98e0cfaaa368b2f61eb)) - yuxuetr
 - **(tools)** offload oversized tool output to temp file with preview - ([5aa4abc](https://github.com/yuxuetr/rust-template/commit/5aa4abcea6150cd045466710471375350f91ac80)) - yuxuetr
+- **(tools)** add edit_file with L1-L4 fuzzy-match chain - ([209cb76](https://github.com/yuxuetr/rust-template/commit/209cb7684764b7c37f60bcad5079a823db5e6a51)) - yuxuetr
 - implement multimodal API and Sensor-Brain vision pipeline - ([d6fe6c7](https://github.com/yuxuetr/rust-template/commit/d6fe6c7ae57775c47c99e40c80282a458afbdf61)) - yuxuetr
 - integrate MinerU V4 API for PDF parsing and add configuration management - ([462e74a](https://github.com/yuxuetr/rust-template/commit/462e74af95a1f20287a8f3ed74af04b23283afa7)) - yuxuetr
 - unify sensor data integration with @paste syntax and refactor paste_image - ([146613e](https://github.com/yuxuetr/rust-template/commit/146613eb3c400638eaa17bc5acec35ad8a07947b)) - yuxuetr

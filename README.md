@@ -34,7 +34,8 @@ SeekCLI 选择**做减法**：
 | Error Recovery    | 工具失败时追加 `[Recovery]` 行动建议，引导模型走排障 SOP                  |
 | 只读并发          | 同一轮全为只读工具时并发执行（涉写自动退化串行）                          |
 | 类型化 SubAgent   | `invoke_agent("explore", ...)` 派发只读探索子任务，仅带摘要回主轴         |
-| Tool 调度         | 内置 `read_file / write_file / list_dir / run_shell` 等工具，schema 注入 LLM |
+| Tool 调度         | 内置 `read_file / write_file / edit_file / list_dir / run_shell` 等，schema 注入 LLM |
+| 容错 edit_file    | `old_text→new_text` 外科手术式替换，L1-L4 模糊匹配吸收缩进幻觉 + 唯一性校验 |
 | 大输出卸载        | 工具输出 > 8K 落盘 `~/.seekcli/tmp/`，仅回首尾预览 + 路径                 |
 | 动态 Prompt       | 启动时读工作区 `AGENTS.md` / `CLAUDE.md` 注入项目规约                     |
 | Plan Mode         | `/plan` 引导模型把长任务状态外部化到 `PLAN.md` / `TODO.md`                |
@@ -111,6 +112,7 @@ benchmark 3/3 PASS，长对话压缩 + trace 正常。
 ### 工具能力（自动由模型调用）
 模型在 ReAct 循环中可自主调用：
 - `read_file / write_file / list_dir` —— 文件系统（大输出自动卸载）
+- `edit_file` —— 局部修改现有文件（L1-L4 模糊匹配，优先于 write_file）
 - `run_shell` —— 终端命令（三态 allow/ask/deny 护栏）
 - `invoke_agent` —— 派发类型化子任务（explore / general）
 - `load_skill` —— 会话中激活已保存的 skill

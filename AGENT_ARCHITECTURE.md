@@ -180,7 +180,8 @@ src/
 │   ├── approval.rs      三态 allow/ask/deny 审批（L3）
 │   ├── path_security.rs 路径白名单（L3）
 │   ├── offload.rs       工具大输出卸载（L4）
-│   ├── fs.rs            read_file / write_file / list_dir
+│   ├── fs.rs            read_file / write_file / edit_file / list_dir
+│   ├── edit.rs          edit_file 的 L1-L4 模糊匹配引擎 + 唯一性校验（纯逻辑）
 │   ├── shell.rs         run_shell（带 approval 钩子）
 │   └── meta.rs          invoke_agent / create_skill
 ├── subagents/
