@@ -13,7 +13,7 @@
 
 SeekCLI 选择**做减法**：
 
-- ✅ **DeepSeek V4 单家深度适配** —— 不做多 LLM 路由
+- ✅ **DeepSeek V4 深度适配,双 wire 协议** —— OpenAI / Anthropic 兼容端点经 `LlmProvider` trait 二选一,但不做运行时多模型路由
 - ✅ **Tool Calling 是唯一能力扩展路径** —— 不再有"客户端预注入"
 - ✅ **ReAct + 类型化 SubAgent + 策展 Skill** —— 不引入 plan-execute / multi-agent 框架
 - ✅ **本地 CLI 即时性** —— 不引入跨会话语义记忆
@@ -60,8 +60,18 @@ cargo install --path .
 ### 环境变量
 ```bash
 export DEEPSEEK_API_KEY="your_key"        # 必选
-export DEEPSEEK_API_BASE="..."            # 可选，覆盖默认 API endpoint
+export DEEPSEEK_API_BASE="..."            # 可选，覆盖 OpenAI 兼容 endpoint
+export DEEPSEEK_ANTHROPIC_BASE="..."      # 可选，覆盖 Anthropic 兼容 endpoint
 ```
+
+### LLM Provider（wire 协议）
+`config.toml` 的 `[brain] provider` 选择对接协议（同一个 DeepSeek key 通用）：
+```toml
+[brain]
+provider = "openai"     # DeepSeek /chat/completions（默认）
+# provider = "anthropic"  # DeepSeek /messages（Anthropic 兼容）
+```
+两种协议经 `LlmProvider` trait 适配为同一套内部 schema，引擎层无感知；均已实测 3/3 跑通。
 
 > 阶段七完成后，SeekCLI 不再读取任何其它供应商的 env vars。如需外部能力（搜索 / 抓页 / OCR）请让模型通过 `run_shell` 自取，或等待后续 MCP 工具接入。
 

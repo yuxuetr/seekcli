@@ -164,7 +164,10 @@ src/
 ├── commands.rs          impl App：slash 命令分发 + help + skill 激活 + /copy
 ├── benchmark.rs         impl App：Benchmark 编排（驱动 agent 跑 testsuite）
 ├── completer.rs         rustyline Tab 补全（无 App 耦合）
-├── api.rs               DeepSeek client + StreamItem
+├── api/
+│   ├── mod.rs           provider 中立 schema（Message/Tool/StreamItem）+ LlmProvider trait
+│   ├── openai.rs        OpenAiProvider：/chat/completions + OpenAI SSE delta 解析
+│   └── anthropic.rs     AnthropicProvider：/messages + 结构化事件流解析 + schema 翻译
 ├── agent/
 │   ├── mod.rs           MAX_ITER / MAX_SUBAGENT_DEPTH 常量
 │   ├── prompt.rs        系统提示 + 动态 workspace_rules + Plan Mode 规则
@@ -226,7 +229,12 @@ src/
 - **凡是"客户端预注入"的能力都应改造为 Tool**：不要再加 `@xxx` 这种 client-side 解析路径。
 - **不引入跨会话语义记忆**：与 CLI 即时性目标背离。
 - **不做在线自演化 skill**：模型只能起草 proposal，落地必须人工审核。
-- **不做多 LLM provider 调度**：DeepSeek V4 单家深度适配。
+- **Provider 抽象,但不做"路由调度"**：通过 `LlmProvider` trait 同时支持
+  OpenAI 兼容(`/chat/completions`)与 Anthropic 兼容(`/messages`)两种 wire format
+  ——`Message`/`Tool` 是 provider 中立 schema,各 provider 负责双向翻译,引擎层
+  (`engine.rs`)只依赖 `StreamItem`,零感知。由 `config.toml [brain] provider`
+  静态选择,**不在运行时做多模型路由/负载均衡**(那才是被排除的复杂度)。
+  默认 DeepSeek,因其同一 key 同时暴露两个兼容端点。
 - **不引入 plan-execute / multi-agent 框架**：纯 ReAct + 类型化 SubAgent 已足够。
   - 注：阶段十五的 **Plan Mode 不是 plan-execute 框架**。它是"状态外部化"——
     由模型自驱把规划写进工作区的 `PLAN.md` / `TODO.md`，控制流仍是纯 ReAct，
