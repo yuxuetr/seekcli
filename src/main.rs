@@ -27,7 +27,7 @@ use completer::CmdCompleter;
 #[cfg(test)]
 mod test;
 
-pub use api::{ApiClient, Message, StreamItem, ToolCall};
+pub use api::{LlmProvider, Message, StreamItem, ToolCall};
 pub use config::Config;
 pub use history::{HistoryManager, Session};
 pub use skills::{Skill, SkillManager};
@@ -57,7 +57,7 @@ impl ThinkingMode {
 }
 
 struct App {
-  brain: ApiClient,
+  brain: Box<dyn LlmProvider>,
   config: Config,
   history: HistoryManager,
   skill_manager: SkillManager,
@@ -86,7 +86,10 @@ impl App {
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
     let deepseek_key = env::var("DEEPSEEK_API_KEY").context("Please set DEEPSEEK_API_KEY")?;
-    let brain = ApiClient::new(deepseek_key);
+    let brain: Box<dyn LlmProvider> = Box::new(api::OpenAiProvider::new(
+      deepseek_key,
+      api::OpenAiProvider::default_base_url(),
+    ));
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();

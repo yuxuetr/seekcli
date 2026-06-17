@@ -1,88 +1,29 @@
-use std::collections::VecDeque;
+//! OpenAI-compatible provider (DeepSeek's `/chat/completions` endpoint, and any
+//! other OpenAI-compatible backend). Reuses the neutral schema's OpenAI-shaped
+//! `Serialize` for the request body and parses the OpenAI SSE delta stream.
+
+use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum Message {
-  Simple {
-    role: String,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
-  },
-  ToolResponse {
-    role: String,
-    content: String,
-    tool_call_id: String,
-  },
-}
+use super::{
+  FunctionCall, LlmProvider, Message, StreamItem, StreamResult, Tool, ToolCall, UsageInfo,
+};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ToolCall {
-  pub id: String,
-  #[serde(rename = "type")]
-  pub tool_type: String,
-  pub function: FunctionCall,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FunctionCall {
-  pub name: String,
-  pub arguments: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Tool {
-  #[serde(rename = "type")]
-  pub tool_type: String,
-  pub function: FunctionDefinition,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FunctionDefinition {
-  pub name: String,
-  pub description: String,
-  pub parameters: serde_json::Value,
-}
-
-pub struct ApiClient {
+pub struct OpenAiProvider {
   client: Client,
   api_key: String,
   pub base_url: String,
 }
 
-#[derive(Debug, Clone)]
-pub enum StreamItem {
-  Reasoning(String),
-  Content(String),
-  ToolCall(ToolCall),
-  Finish(Option<String>),
-  Usage(UsageInfo),
-}
-
-/// Token-level accounting reported by DeepSeek at the end of a streamed
-/// response. `prompt_cache_hit_tokens` is what we mainly care about — it
-/// tells us how much of the prefix was served from cache (free + faster).
-#[derive(Debug, Clone, Default)]
-pub struct UsageInfo {
-  pub prompt_tokens: u64,
-  pub completion_tokens: u64,
-  pub prompt_cache_hit_tokens: u64,
-  pub prompt_cache_miss_tokens: u64,
-}
-
-/// Accumulator for a single tool call as it streams in fragments.
-/// OpenAI-style providers split a tool call across many SSE deltas:
-/// the first delta carries `id` / `name`, subsequent deltas carry only
-/// chunks of the JSON `arguments` string. We must concatenate by `index`.
+/// Accumulator for a single tool call as it streams in fragments. OpenAI-style
+/// providers split a tool call across many SSE deltas: the first carries
+/// `id`/`name`, later ones carry chunks of the JSON `arguments`. Concatenate
+/// by `index`.
 struct PartialToolCall {
   id: String,
   tool_type: String,
@@ -95,7 +36,7 @@ struct StreamState {
   buffer: Vec<u8>,
   pending: VecDeque<Result<StreamItem>>,
   finished: bool,
-  partial_tools: std::collections::BTreeMap<usize, PartialToolCall>,
+  partial_tools: BTreeMap<usize, PartialToolCall>,
 }
 
 impl StreamState {
@@ -129,21 +70,8 @@ impl StreamState {
   }
 }
 
-impl Message {
-  pub fn new_user_text(text: String) -> Self {
-    Self::Simple {
-      role: "user".to_string(),
-      content: text,
-      reasoning_content: None,
-      tool_calls: None,
-    }
-  }
-}
-
-impl ApiClient {
-  pub fn new(api_key: String) -> Self {
-    let base_url = std::env::var("DEEPSEEK_API_BASE")
-      .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
+impl OpenAiProvider {
+  pub fn new(api_key: String, base_url: String) -> Self {
     let client = Client::builder()
       .no_proxy()
       .build()
@@ -155,23 +83,33 @@ impl ApiClient {
     }
   }
 
-  pub async fn call_api_with_params(
+  /// Default DeepSeek OpenAI-compatible endpoint, overridable via env.
+  pub fn default_base_url() -> String {
+    std::env::var("DEEPSEEK_API_BASE").unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string())
+  }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for OpenAiProvider {
+  async fn call_api_with_params(
     &self,
     model: &str,
     messages: Vec<Message>,
     thinking_mode: &str,
     tools: Option<Vec<Tool>>,
-  ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamItem>> + Send>>> {
+  ) -> Result<StreamResult> {
     let mut body = serde_json::json!({
       "model": model,
       "messages": messages,
       "stream": true,
     });
 
+    // DeepSeek's OpenAI-compatible thinking control: a boolean `thinking`
+    // toggle plus `reasoning_effort` for intensity. (The old `{thinking:{mode}}`
+    // shape was silently ignored by the server.)
     if thinking_mode != "none" {
-      body["thinking"] = serde_json::json!({
-        "mode": thinking_mode,
-      });
+      body["thinking"] = serde_json::json!({ "type": "enabled" });
+      body["reasoning_effort"] = serde_json::json!(thinking_mode);
     }
 
     if let Some(t) = tools {
@@ -198,7 +136,7 @@ impl ApiClient {
       buffer: Vec::new(),
       pending: VecDeque::new(),
       finished: false,
-      partial_tools: std::collections::BTreeMap::new(),
+      partial_tools: BTreeMap::new(),
     }))
   }
 }
@@ -241,8 +179,8 @@ impl Stream for StreamState {
                 Err(_) => continue,
               };
 
-              // Usage info can land in a chunk with empty `choices`, so
-              // parse it before the choices branch.
+              // Usage info can land in a chunk with empty `choices`, so parse
+              // it before the choices branch.
               if let Some(usage) = val.get("usage").and_then(|u| u.as_object()) {
                 let info = UsageInfo {
                   prompt_tokens: usage

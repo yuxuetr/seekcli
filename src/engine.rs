@@ -324,7 +324,7 @@ impl App {
       if depth == 0 {
         let cspan = self.tracer.begin("compaction", "maybe_compress", turn_span);
         if let Err(e) =
-          agent::compressor::maybe_compress(&self.brain, &self.model, &mut messages).await
+          agent::compressor::maybe_compress(self.brain.as_ref(), &self.model, &mut messages).await
         {
           println!(
             "{} compression failed: {} (continuing without)",

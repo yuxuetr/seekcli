@@ -27,7 +27,7 @@ use anyhow::Result;
 use colored::Colorize;
 use futures_util::StreamExt;
 
-use crate::api::{ApiClient, Message, StreamItem};
+use crate::api::{LlmProvider, Message, StreamItem};
 
 /// Trigger compression when serialized messages exceed this many bytes.
 /// ~4 bytes/token (English) to ~2 (Chinese); 600KB ≈ 150K~300K tokens, well
@@ -54,7 +54,7 @@ const TRUNC_MARKER: &str = "[...truncated";
 /// Apply staged-degradation compression in place if `messages` exceeds the
 /// threshold. Returns `Ok(true)` when any compression happened.
 pub async fn maybe_compress(
-  client: &ApiClient,
+  client: &dyn LlmProvider,
   model: &str,
   messages: &mut Vec<Message>,
 ) -> Result<bool> {
@@ -196,7 +196,11 @@ fn estimate_bytes(messages: &[Message]) -> usize {
     .sum()
 }
 
-async fn summarize_messages(client: &ApiClient, model: &str, middle: &[Message]) -> Result<String> {
+async fn summarize_messages(
+  client: &dyn LlmProvider,
+  model: &str,
+  middle: &[Message],
+) -> Result<String> {
   let middle_json = serde_json::to_string_pretty(middle)?;
   let prompt = format!(
     "You are summarizing the middle portion of a long agent conversation \
