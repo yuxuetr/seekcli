@@ -2,3 +2,4 @@
 //! the engine rather than polluting its control flow.
 
 pub mod cost;
+pub mod trace;

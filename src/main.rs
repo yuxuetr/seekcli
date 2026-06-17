@@ -71,6 +71,8 @@ struct App {
   last_code_blocks: Vec<String>,
   /// Running token/cost total for this process (decorator-style accounting).
   cost: observability::cost::CostTracker,
+  /// Decision-path tracer (opt-in via SEEKCLI_TRACE); no-op when disabled.
+  tracer: observability::trace::Trace,
   /// Set to true by the Ctrl-C watcher task. Polled at the top of each
   /// agent loop iteration and during stream consumption to allow graceful
   /// mid-task interruption back to the REPL.
@@ -104,6 +106,7 @@ impl App {
       current_skill: None,
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
+      tracer: observability::trace::Trace::from_env(),
       interrupt,
     })
   }
@@ -446,9 +449,11 @@ impl App {
 
     let mut messages = std::mem::take(&mut self.current_session.messages);
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
+    let run_span = self.tracer.start_run();
     let (_final_content, updated_messages) = self
-      .run_agent_loop(messages, tools, 0, agent::MAX_ITER)
+      .run_agent_loop(messages, tools, 0, agent::MAX_ITER, run_span)
       .await?;
+    self.tracer.end(run_span);
     self.current_session.messages = updated_messages;
 
     if self.current_session.title == "New Chat" {
@@ -459,6 +464,12 @@ impl App {
     // Print the running session bill (token accounting + CNY estimate).
     if !self.cost.is_empty() {
       println!("{}", self.cost.summary());
+    }
+    // Flush the decision-path trace (no-op unless SEEKCLI_TRACE is set).
+    match self.tracer.flush() {
+      Ok(Some(path)) => println!("{} trace written to {}", "[Trace]".dimmed(), path.display()),
+      Ok(None) => {}
+      Err(e) => println!("{} trace write failed: {}", "[Trace]".yellow(), e),
     }
     Ok(())
   }
@@ -673,6 +684,7 @@ impl App {
     tools: Option<Vec<api::Tool>>,
     depth: usize,
     max_iter: usize,
+    parent_span: Option<usize>,
   ) -> Result<(String, Vec<Message>)> {
     if depth > agent::MAX_SUBAGENT_DEPTH {
       anyhow::bail!(
@@ -706,17 +718,26 @@ impl App {
         break;
       }
 
+      let turn_span = self.tracer.begin(
+        "turn",
+        &format!("iter {} (depth {})", iter, depth),
+        parent_span,
+      );
+
       // Compression only at top-level main agent; sub-agents have short focused
       // contexts and their own max_iter cap.
-      if depth == 0
-        && let Err(e) =
+      if depth == 0 {
+        let cspan = self.tracer.begin("compaction", "maybe_compress", turn_span);
+        if let Err(e) =
           agent::compressor::maybe_compress(&self.brain, &self.model, &mut messages).await
-      {
-        println!(
-          "{} compression failed: {} (continuing without)",
-          "[Memory]".yellow(),
-          e
-        );
+        {
+          println!(
+            "{} compression failed: {} (continuing without)",
+            "[Memory]".yellow(),
+            e
+          );
+        }
+        self.tracer.end(cspan);
       }
 
       // Two-Stage ReAct (dynamic): before acting, run a tools-free planning
@@ -726,17 +747,20 @@ impl App {
       // reflexively calling a tool. Main agent only.
       if depth == 0 {
         let macro_trigger = iter == 0 && self.thinking_mode != ThinkingMode::None;
-        if (macro_trigger || plan_next)
-          && let Err(e) = self.planning_phase(&mut messages).await
-        {
-          println!(
-            "{} planning phase failed: {} (continuing)",
-            "[Plan]".yellow(),
-            e
-          );
+        if macro_trigger || plan_next {
+          let pspan = self.tracer.begin("planning", "two-stage", turn_span);
+          if let Err(e) = self.planning_phase(&mut messages).await {
+            println!(
+              "{} planning phase failed: {} (continuing)",
+              "[Plan]".yellow(),
+              e
+            );
+          }
+          self.tracer.end(pspan);
         }
       }
 
+      let gen_span = self.tracer.begin("generate", "llm action", turn_span);
       let mut stream = self
         .brain
         .call_api_with_params(
@@ -825,6 +849,11 @@ impl App {
         }
         io::stdout().flush()?;
       }
+      self.tracer.annotate(
+        gen_span,
+        serde_json::json!({ "tool_calls": tool_calls.len() }),
+      );
+      self.tracer.end(gen_span);
 
       self.last_code_blocks = Self::extract_code_blocks(&assistant_content);
 
@@ -846,9 +875,15 @@ impl App {
       if tool_calls.is_empty() {
         final_content = assistant_content;
         completed = true;
+        self.tracer.end(turn_span);
         break;
       }
 
+      let exec_span = self.tracer.begin(
+        "execute",
+        &format!("{} tool(s)", tool_calls.len()),
+        turn_span,
+      );
       println!("\n{} Executing tools...", "Agent:".cyan());
       // Snapshot this turn's trajectory for doom-loop detection before the
       // calls are consumed below.
@@ -951,6 +986,7 @@ impl App {
                     Some(sub_tools),
                     next_depth,
                     template.max_iter,
+                    exec_span,
                   ))
                   .await
                   {
@@ -1037,6 +1073,11 @@ impl App {
         // Order is: assistant{tool_calls} → tool{responses} → system{side-effects}.
         messages.extend(deferred_system_msgs);
       }
+      self.tracer.annotate(
+        exec_span,
+        serde_json::json!({ "had_failure": turn_had_failure }),
+      );
+      self.tracer.end(exec_span);
 
       // System Reminder: if the main agent is repeating the same trajectory,
       // inject a high-priority user message at the point of decision to break
@@ -1055,6 +1096,7 @@ impl App {
       // planning pass at the top of the next iteration.
       plan_next = depth == 0 && turn_had_failure;
 
+      self.tracer.end(turn_span);
       println!("{} Returning tool results to model...", "Agent:".cyan());
     }
 
