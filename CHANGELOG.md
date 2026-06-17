@@ -35,6 +35,7 @@ All notable changes to this project will be documented in this file. See [conven
 - mark stage 17 (L7 observability) and figure-3 checklist complete - ([ea3c9e7](https://github.com/yuxuetr/rust-template/commit/ea3c9e7b5a64119401a454437562aae3c8db3897)) - yuxuetr
 - document dual OpenAI/Anthropic provider support - ([4bdb848](https://github.com/yuxuetr/rust-template/commit/4bdb8480839e5da2afe707bba58bc25efdff60f6)) - yuxuetr
 - README + CHANGELOG for dual provider & reasoning handling - ([4ce372b](https://github.com/yuxuetr/rust-template/commit/4ce372b7fb1b7110b527b82a91eae90de7f5c338)) - yuxuetr
+- document edit_file tool - ([00c99ca](https://github.com/yuxuetr/rust-template/commit/00c99cab1e718eef15baecf2695b9aeac6021654)) - yuxuetr
 
 ### Features
 
