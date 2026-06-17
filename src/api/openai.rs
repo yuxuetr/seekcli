@@ -98,9 +98,13 @@ impl LlmProvider for OpenAiProvider {
     thinking_mode: &str,
     tools: Option<Vec<Tool>>,
   ) -> Result<StreamResult> {
+    // Strip history reasoning before sending: it's single-turn scratch, wastes
+    // tokens on replay, and reasoning models don't expect it back. Session
+    // persistence keeps the full reasoning; only the wire payload drops it.
+    let sanitized = super::strip_reasoning(&messages);
     let mut body = serde_json::json!({
       "model": model,
-      "messages": messages,
+      "messages": sanitized,
       "stream": true,
     });
 

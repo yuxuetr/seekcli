@@ -96,6 +96,32 @@ impl Message {
   }
 }
 
+/// Drop per-message `reasoning_content` before sending to a provider.
+///
+/// Reasoning is single-turn scratch — the final answer already lives in
+/// `content`. Replaying history reasoning wastes tokens, and reasoning models
+/// don't expect it back (Anthropic outright rejects unsigned thinking blocks).
+/// Persisted sessions keep their reasoning; only the wire payload is stripped.
+pub fn strip_reasoning(messages: &[Message]) -> Vec<Message> {
+  messages
+    .iter()
+    .map(|m| match m {
+      Message::Simple {
+        role,
+        content,
+        tool_calls,
+        ..
+      } => Message::Simple {
+        role: role.clone(),
+        content: content.clone(),
+        reasoning_content: None,
+        tool_calls: tool_calls.clone(),
+      },
+      other => other.clone(),
+    })
+    .collect()
+}
+
 /// A streamed item or a hard error.
 pub type StreamResult = Pin<Box<dyn Stream<Item = Result<StreamItem>> + Send>>;
 
@@ -112,4 +138,49 @@ pub trait LlmProvider: Send + Sync {
     thinking_mode: &str,
     tools: Option<Vec<Tool>>,
   ) -> Result<StreamResult>;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn strip_reasoning_drops_reasoning_keeps_rest() {
+    let msgs = vec![
+      Message::Simple {
+        role: "assistant".into(),
+        content: "answer".into(),
+        reasoning_content: Some("long chain of thought".into()),
+        tool_calls: Some(vec![ToolCall {
+          id: "t1".into(),
+          tool_type: "function".into(),
+          function: FunctionCall {
+            name: "read_file".into(),
+            arguments: "{}".into(),
+          },
+        }]),
+      },
+      Message::ToolResponse {
+        role: "tool".into(),
+        content: "result".into(),
+        tool_call_id: "t1".into(),
+      },
+    ];
+    let out = strip_reasoning(&msgs);
+    match &out[0] {
+      Message::Simple {
+        content,
+        reasoning_content,
+        tool_calls,
+        ..
+      } => {
+        assert_eq!(content, "answer");
+        assert!(reasoning_content.is_none(), "reasoning must be stripped");
+        assert!(tool_calls.is_some(), "tool_calls must be preserved");
+      }
+      _ => panic!("expected Simple"),
+    }
+    // ToolResponse passes through untouched.
+    assert!(matches!(out[1], Message::ToolResponse { .. }));
+  }
 }
