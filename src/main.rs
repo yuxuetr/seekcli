@@ -560,6 +560,9 @@ impl App {
 
     let mut final_content = String::new();
     let mut completed = false;
+    // Doom-loop detector — main agent only. Persists across iterations of this
+    // chat turn so it can spot repeated tool-call trajectories.
+    let mut reminder_injector = agent::reminders::ReminderInjector::new();
 
     for _iter in 0..max_iter {
       // Top-of-iteration interrupt check (Ctrl-C between turns).
@@ -694,6 +697,9 @@ impl App {
       }
 
       println!("\n{} Executing tools...", "Agent:".cyan());
+      // Snapshot this turn's trajectory for doom-loop detection before the
+      // calls are consumed below.
+      let turn_tool_calls = tool_calls.clone();
       // Side-effect system messages (e.g. from load_skill) must be appended
       // AFTER all ToolResponse messages for this turn — DeepSeek's validator
       // requires assistant{tool_calls} to be immediately followed by its
@@ -835,6 +841,20 @@ impl App {
       // Now safe to append deferred system messages (skill activations etc).
       // Order is: assistant{tool_calls} → tool{responses} → system{side-effects}.
       messages.extend(deferred_system_msgs);
+
+      // System Reminder: if the main agent is repeating the same trajectory,
+      // inject a high-priority user message at the point of decision to break
+      // the doom loop. Sub-agents rely on their max_iter cap instead.
+      if depth == 0
+        && let Some(reminder) = reminder_injector.observe(&turn_tool_calls)
+      {
+        println!(
+          "\n{}",
+          "[System Reminder] doom loop detected — intervening".red()
+        );
+        messages.push(Message::new_user_text(reminder));
+      }
+
       println!("{} Returning tool results to model...", "Agent:".cyan());
     }
 

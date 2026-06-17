@@ -267,12 +267,14 @@
     - [ ] 连续 N（≥3）次相同调用轨迹 → 在下次推理前注入一条 **user 消息**（非 system）打断路径。
     - [ ] 挂在每个 Turn 尾部，解耦于 `run_agent_loop` 主控流。
     - [ ] 单测：构造重复轨迹验证注入触发；不同轨迹验证不误伤。
-- [ ] **13.3 Error Recovery（恢复提示注入）** — `src/agent/recovery.rs`（新增）
-    - [ ] 按工具+错误类型分类，给 ToolResult 追加带行动建议的"锦囊"。
-    - [ ] `edit_file` old_text not found → 提示"先 read_file 重新获取内容再比对"。
-    - [ ] `run_shell` command not found → 提示"先 bash 确认命令/路径存在"。
-    - [ ] **合并修复 dispatcher 畸形 JSON 静默吞**：`tools/mod.rs:19` 的 `unwrap_or(Value::Null)` 改为
-          解析失败返回 `[BAD ARGS] arguments 非合法 JSON，请重新生成` 而非静默传 Null。
+- [x] **13.3 Error Recovery（恢复提示注入）** — Commit `fbebc58`
+    - [x] `agent/recovery.rs` 按工具+错误类型分类，给 ToolResult 追加 `[Recovery]` 行动建议。
+    - [x] `read_file` not-found → 提示"先 list_dir / find 确认路径再重试"。
+    - [x] `run_shell` command not found → 提示"先 `command -v` 确认命令存在"；非零退出 → 提示先读 STDERR。
+    - [x] **修复 dispatcher 畸形 JSON 静默吞**：`tools/mod.rs` 解析失败返回 `[BAD ARGS]`，
+          由 recovery 转成"重新生成合法 JSON"提示。
+    - [x] `run_agent_loop` 用 `recovery::augment` 包裹非委派工具结果；系统提示文档化语义。
+    - [x] 6 个新单测（成功不提示 / 拒绝不提示 / 各类失败提示 / augment）。
 - [ ] **13.4 只读并发 / 涉写串行（Fork-Join）** — `src/agent/mod.rs` 工具分发环节
     - [ ] 批次全为只读工具（read_file / list_dir / 只读 run_shell 难判→保守串行）→ `join_all` 并发。
     - [ ] 批次含任一写操作（write_file / edit / invoke_agent / load_skill）→ 退化串行。
