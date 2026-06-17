@@ -69,7 +69,8 @@ struct App {
   plan_mode: bool,
   current_skill: Option<Skill>,
   last_code_blocks: Vec<String>,
-  /// Running token/cost total for this process (decorator-style accounting).
+  /// Token/cost accounting for the current session (decorator-style). Reset on
+  /// /clear, restored on /load, persisted into the session JSON.
   cost: observability::cost::CostTracker,
   /// Decision-path tracer (opt-in via SEEKCLI_TRACE); no-op when disabled.
   tracer: observability::trace::Trace,
@@ -224,6 +225,7 @@ impl App {
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
         self.current_skill = None;
+        self.cost = observability::cost::CostTracker::new();
         println!("{}", "Conversation reset.".yellow());
       }
       "/skill" => match parts.get(1).copied() {
@@ -361,10 +363,16 @@ impl App {
       "/history" => {
         let sessions = self.history.list_sessions()?;
         for s in sessions.iter().take(10) {
+          let cost_note = if s.cost.is_empty() {
+            String::new()
+          } else {
+            format!(" · ≈¥{:.4}", s.cost.estimated_cny())
+          };
           println!(
-            "- {} ({})",
+            "- {} ({}){}",
             s.title,
-            s.id.chars().take(8).collect::<String>()
+            s.id.chars().take(8).collect::<String>(),
+            cost_note.dimmed()
           );
         }
       }
@@ -374,6 +382,9 @@ impl App {
           let sessions = self.history.list_sessions()?;
           if let Some(s) = sessions.iter().find(|s| s.id.starts_with(prefix)) {
             self.current_session = self.history.load_session(&s.id)?;
+            // Restore the loaded session's cost so the bill continues from
+            // where it left off rather than mixing with the prior session.
+            self.cost = self.current_session.cost.clone();
             println!("{} Loaded session: {}", "✦".cyan(), s.title);
           } else {
             println!("{} No session matching: {}", "Error:".red(), prefix);
@@ -459,9 +470,11 @@ impl App {
     if self.current_session.title == "New Chat" {
       self.current_session.title = content.chars().take(30).collect::<String>();
     }
+    // Persist the session's running cost so it can be audited / restored later.
+    self.current_session.cost = self.cost.clone();
     self.history.save_session(&self.current_session)?;
 
-    // Print the running session bill (token accounting + CNY estimate).
+    // Print the session bill (token accounting + CNY estimate).
     if !self.cost.is_empty() {
       println!("{}", self.cost.summary());
     }

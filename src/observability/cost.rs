@@ -11,6 +11,7 @@
 //! yuan as a ballpark. Adjust [`CNY_PER_M_CACHE_HIT`] etc. if rates move.
 
 use colored::Colorize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::UsageInfo;
 
@@ -21,8 +22,9 @@ const CNY_PER_M_CACHE_MISS: f64 = 2.0;
 /// Estimated CNY per 1M output (completion) tokens.
 const CNY_PER_M_OUTPUT: f64 = 3.0;
 
-/// Running token/cost total across a session. One per `App`; reset on restart.
-#[derive(Debug, Default, Clone)]
+/// Running token/cost total for a session. Reset on `/clear`, restored on
+/// `/load`, and persisted into the session JSON for cross-session audit.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CostTracker {
   pub prompt_tokens: u64,
   pub completion_tokens: u64,

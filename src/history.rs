@@ -13,6 +13,10 @@ pub struct Session {
   pub messages: Vec<Message>,
   pub model: String,
   pub timestamp: DateTime<Utc>,
+  /// Token/cost accounting for this session. Defaulted for older session
+  /// files that predate cost persistence.
+  #[serde(default)]
+  pub cost: crate::observability::cost::CostTracker,
 }
 
 pub struct HistoryManager {
@@ -89,6 +93,7 @@ impl HistoryManager {
       messages: Vec::new(),
       model,
       timestamp: Utc::now(),
+      cost: crate::observability::cost::CostTracker::new(),
     }
   }
 }
