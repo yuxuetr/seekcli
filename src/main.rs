@@ -19,6 +19,7 @@ mod agent;
 mod api;
 mod config;
 mod history;
+mod observability;
 mod skills;
 mod subagents;
 mod tools;
@@ -68,6 +69,8 @@ struct App {
   plan_mode: bool,
   current_skill: Option<Skill>,
   last_code_blocks: Vec<String>,
+  /// Running token/cost total for this process (decorator-style accounting).
+  cost: observability::cost::CostTracker,
   /// Set to true by the Ctrl-C watcher task. Polled at the top of each
   /// agent loop iteration and during stream consumption to allow graceful
   /// mid-task interruption back to the REPL.
@@ -100,6 +103,7 @@ impl App {
       plan_mode: false,
       current_skill: None,
       last_code_blocks: Vec::new(),
+      cost: observability::cost::CostTracker::new(),
       interrupt,
     })
   }
@@ -451,6 +455,11 @@ impl App {
       self.current_session.title = content.chars().take(30).collect::<String>();
     }
     self.history.save_session(&self.current_session)?;
+
+    // Print the running session bill (token accounting + CNY estimate).
+    if !self.cost.is_empty() {
+      println!("{}", self.cost.summary());
+    }
     Ok(())
   }
 
@@ -810,6 +819,8 @@ impl App {
               info.prompt_cache_miss_tokens,
               info.completion_tokens
             );
+            // Fold into the running session bill (decorator-style accounting).
+            self.cost.record(&info);
           }
         }
         io::stdout().flush()?;
