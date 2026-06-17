@@ -1,0 +1,26 @@
+{
+  "tasks": [
+    {
+      "name": "create_file",
+      "prompt": "Create a file named hello.txt in the current directory containing exactly the text: hello world",
+      "eval": "grep -qx 'hello world' hello.txt"
+    },
+    {
+      "name": "fix_bug",
+      "prompt": "The file calc.py has a bug: add() should return the sum but returns the difference. Fix it so add(2, 3) returns 5.",
+      "files": {
+        "calc.py": "def add(a, b):\n    return a - b\n",
+        "test_calc.py": "from calc import add\nassert add(2, 3) == 5, 'add is broken'\nprint('ok')\n"
+      },
+      "eval": "python3 test_calc.py"
+    },
+    {
+      "name": "count_lines",
+      "prompt": "Read data.txt and write the number of lines it contains (as a plain integer, no extra text) into count.txt.",
+      "files": {
+        "data.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "eval": "test \"$(cat count.txt)\" = \"4\""
+    }
+  ]
+}

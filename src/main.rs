@@ -474,6 +474,110 @@ impl App {
     Ok(())
   }
 
+  /// Run the agent headlessly on a single prompt in the current working
+  /// directory, returning the LLM-call count consumed (proxy for turns). Used
+  /// by the benchmark runner; no session save, no REPL state.
+  async fn run_headless(&mut self, prompt: &str) -> Result<u64> {
+    let calls_before = self.cost.api_calls;
+    let mut messages = vec![Message::new_user_text(prompt.to_string())];
+    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
+    self
+      .run_agent_loop(messages, None, 0, agent::MAX_ITER, None)
+      .await?;
+    Ok(self.cost.api_calls - calls_before)
+  }
+
+  /// Benchmark entry point: load a testsuite, run each task in an isolated
+  /// testbed (Init → seed → AgentRun → Eval → Score), and print a report.
+  /// Fail-to-Pass: a task passes iff its eval command exits 0.
+  async fn run_benchmark(&mut self, suite_path: &std::path::Path) -> Result<()> {
+    use observability::bench::{Report, TaskResult, TestSuite};
+
+    let suite = TestSuite::load(suite_path)?;
+    let home = env::var("HOME").context("HOME not set")?;
+    let bench_root = PathBuf::from(home).join(".seekcli").join("bench");
+    std::fs::create_dir_all(&bench_root)?;
+
+    println!(
+      "{} running {} task(s) from {}",
+      "[Bench]".cyan().bold(),
+      suite.tasks.len(),
+      suite_path.display()
+    );
+
+    let original_cwd = env::current_dir()?;
+    let mut report = Report::default();
+
+    for task in &suite.tasks {
+      println!("\n{} {}", "[Bench] task:".cyan(), task.name.bold());
+      let cost_before = self.cost.estimated_cny();
+      let start = std::time::Instant::now();
+
+      // Init + seed the testbed.
+      let testbed = match task.prepare_testbed(&bench_root) {
+        Ok(p) => p,
+        Err(e) => {
+          println!("{} setup failed: {}", "[Bench]".red(), e);
+          report.push(TaskResult {
+            name: task.name.clone(),
+            passed: false,
+            duration_ms: start.elapsed().as_millis(),
+            llm_calls: 0,
+            cny: 0.0,
+            note: format!("setup error: {e}"),
+          });
+          continue;
+        }
+      };
+
+      // AgentRun: tools resolve against process cwd, so sandbox by chdir.
+      env::set_current_dir(&testbed)?;
+      let run = self.run_headless(&task.prompt).await;
+      env::set_current_dir(&original_cwd)?;
+
+      let llm_calls = match run {
+        Ok(c) => c,
+        Err(e) => {
+          println!("{} agent error: {}", "[Bench]".red(), e);
+          report.push(TaskResult {
+            name: task.name.clone(),
+            passed: false,
+            duration_ms: start.elapsed().as_millis(),
+            llm_calls: 0,
+            cny: self.cost.estimated_cny() - cost_before,
+            note: format!("agent error: {e}"),
+          });
+          continue;
+        }
+      };
+
+      // Eval + score.
+      let (passed, output) = task.run_eval(&testbed).unwrap_or((false, String::new()));
+      let note = if passed {
+        String::new()
+      } else {
+        output.lines().next().unwrap_or("").to_string()
+      };
+      println!(
+        "{} {} ({} calls)",
+        "[Bench] result:".cyan(),
+        if passed { "PASS".green() } else { "FAIL".red() },
+        llm_calls
+      );
+      report.push(TaskResult {
+        name: task.name.clone(),
+        passed,
+        duration_ms: start.elapsed().as_millis(),
+        llm_calls,
+        cny: self.cost.estimated_cny() - cost_before,
+        note,
+      });
+    }
+
+    println!("{}", report.render());
+    Ok(())
+  }
+
   /// Parse `{"subagent_type": "...", "prompt": "..."}` from a tool-call
   /// arguments string. Falls back to `("general", arguments)` if the payload
   /// is not the expected shape.
@@ -1299,7 +1403,11 @@ impl rustyline::Helper for CmdCompleter {}
 
 #[derive(Parser)]
 #[command(author, version, about = "DeepSeek V4 Harness Agent for CLI", long_about = None)]
-struct Cli {}
+struct Cli {
+  /// Run a benchmark testsuite (JSON) headlessly instead of the REPL.
+  #[arg(long, value_name = "TESTSUITE.json")]
+  bench: Option<PathBuf>,
+}
 
 /// Background task that flips `flag` to `true` on each Ctrl-C. Rustyline
 /// catches Ctrl-C at the readline prompt directly (returns `Interrupted`),
@@ -1320,7 +1428,10 @@ fn spawn_interrupt_watcher(flag: Arc<AtomicBool>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  let _cli = Cli::parse();
+  let cli = Cli::parse();
   let mut app = App::new()?;
-  app.run().await
+  match cli.bench {
+    Some(path) => app.run_benchmark(&path).await,
+    None => app.run().await,
+  }
 }
