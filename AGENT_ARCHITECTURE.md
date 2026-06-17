@@ -158,32 +158,42 @@ SeekCLI 已从"有骨架"演进为具备**运行时纠偏（L1 机制）+ 可观
 
 ```
 src/
-├── main.rs              REPL + CLI 入口（现 1023 行，目标瘦身 < 300，loop 迁出）
+├── main.rs              薄壳：App struct + new + run(REPL) + Cli + main（207 行）
+├── engine.rs            impl App：ReAct 主循环 + Two-Stage + Reminders/Recovery
+│                        + Fork-Join 分发 + SubAgent 委派 + chat/headless（710 行）
+├── commands.rs          impl App：slash 命令分发 + help + skill 激活 + /copy
+├── benchmark.rs         impl App：Benchmark 编排（驱动 agent 跑 testsuite）
+├── completer.rs         rustyline Tab 补全（无 App 耦合）
 ├── api.rs               DeepSeek client + StreamItem
 ├── agent/
-│   ├── mod.rs           run_agent_loop（含 max_iter / 深度 / 并发分发）
-│   ├── prompt.rs        Agent 系统提示构建（待加：动态读 AGENTS.md）★阶段十三
-│   ├── compressor.rs    上下文压缩（L4，待改阶梯降级）★阶段十四
-│   ├── reminders.rs     System Reminders 死循环检测注入   ★阶段十三（新增）
-│   └── recovery.rs      Error Recovery 恢复提示注入       ★阶段十三（新增）
+│   ├── mod.rs           MAX_ITER / MAX_SUBAGENT_DEPTH 常量
+│   ├── prompt.rs        系统提示 + 动态 workspace_rules + Plan Mode 规则
+│   ├── compressor.rs    阶梯降级压缩（L4）
+│   ├── reminders.rs     System Reminders 死循环检测注入
+│   └── recovery.rs      Error Recovery 恢复提示注入
 ├── tools/
-│   ├── mod.rs           ToolDispatcher（待加：只读并发 / 大输出卸载）★阶段十三/十四
-│   ├── registry.rs      工具 schema 注册（L2 核心）
-│   ├── approval.rs      危险命令审批（L3）
+│   ├── mod.rs           ToolDispatcher（含 BAD ARGS 处理）
+│   ├── registry.rs      工具 schema 注册 + is_parallel_readonly（L2 核心）
+│   ├── approval.rs      三态 allow/ask/deny 审批（L3）
 │   ├── path_security.rs 路径白名单（L3）
+│   ├── offload.rs       工具大输出卸载（L4）
 │   ├── fs.rs            read_file / write_file / list_dir
 │   ├── shell.rs         run_shell（带 approval 钩子）
 │   └── meta.rs          invoke_agent / create_skill
 ├── subagents/
 │   └── registry.rs      SubAgent 类型注册表（L5）
-├── observability/                                         ★阶段十七（新增模块 L7）
-│   ├── cost.rs          CostTracker 装饰器（图1）
+├── observability/                                         ★ L7
+│   ├── cost.rs          CostTracker（图1，随 session 持久化）
 │   ├── trace.rs         Span 树 → ~/.seekcli/traces（图3）
-│   └── bench.rs         Benchmark Runner（图2）
+│   └── bench.rs         Benchmark 纯逻辑：parse/testbed/eval/report（图2）
 ├── skills.rs            模板持久化 + proposal 审核
-├── history.rs           Session 持久化（待加：cost 账单挂载）
-└── config.rs
+├── history.rs           Session 持久化（含 cost 账单）
+└── config.rs            含 [security] allow/deny 策略
 ```
+
+> 注：`engine.rs` / `commands.rs` / `benchmark.rs` 都是 `impl App` 的分块——
+> 利用 Rust「子模块可见祖先私有项」规则，逻辑零改动地把 main.rs 从 1450 行
+> 拆到 207 行。App struct 仍定义在 crate root，故各子模块均可访问其私有字段。
 
 ---
 
