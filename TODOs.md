@@ -253,6 +253,115 @@
 
 ---
 
+## 🔲 阶段十三：L1 运行时纠偏 + L2 提效 (P0)
+*目标：补齐 Harness 区别于"裸 ReAct"的运行时机制；让多工具调用并发提速。*
+*评估来源：harness-engineering 第 2/7/13/15 讲 + 图3 全景对照。*
+
+- [ ] **13.1 Two-Stage ReAct（谋动分离）** — `src/agent/mod.rs`
+    - [ ] Phase 1：不传 tools 发起纯文本推理请求（"小黑屋"），结果追加为 assistant 消息。
+    - [ ] Phase 2：带 tools 发起执行请求，基于 Phase 1 推理决策。
+    - [ ] **动态触发**：任务开局 / 工具连续失败 ≥2 次时开 thinking；确定性简单步骤跳过，省 token。
+    - [ ] 复用现有 `thinking_mode`，区分"DeepSeek 原生 reasoning"与"架构级两阶段隔离"。
+- [ ] **13.2 System Reminders（防死循环干预）** — `src/agent/reminders.rs`（新增）
+    - [ ] `ReminderInjector { call_hashes: VecDeque<u64>, repeat_count }`，滚动窗口记录工具调用轨迹哈希。
+    - [ ] 连续 N（≥3）次相同调用轨迹 → 在下次推理前注入一条 **user 消息**（非 system）打断路径。
+    - [ ] 挂在每个 Turn 尾部，解耦于 `run_agent_loop` 主控流。
+    - [ ] 单测：构造重复轨迹验证注入触发；不同轨迹验证不误伤。
+- [ ] **13.3 Error Recovery（恢复提示注入）** — `src/agent/recovery.rs`（新增）
+    - [ ] 按工具+错误类型分类，给 ToolResult 追加带行动建议的"锦囊"。
+    - [ ] `edit_file` old_text not found → 提示"先 read_file 重新获取内容再比对"。
+    - [ ] `run_shell` command not found → 提示"先 bash 确认命令/路径存在"。
+    - [ ] **合并修复 dispatcher 畸形 JSON 静默吞**：`tools/mod.rs:19` 的 `unwrap_or(Value::Null)` 改为
+          解析失败返回 `[BAD ARGS] arguments 非合法 JSON，请重新生成` 而非静默传 Null。
+- [ ] **13.4 只读并发 / 涉写串行（Fork-Join）** — `src/agent/mod.rs` 工具分发环节
+    - [ ] 批次全为只读工具（read_file / list_dir / 只读 run_shell 难判→保守串行）→ `join_all` 并发。
+    - [ ] 批次含任一写操作（write_file / edit / invoke_agent / load_skill）→ 退化串行。
+    - [ ] 保持 ToolResponse 顺序与 tool_call 顺序一致（DeepSeek validator 要求）。
+- [ ] **13.5 动态 Prompt Composer（读 AGENTS.md）** — `src/agent/prompt.rs`
+    - [ ] `agent_system_prompt(workspace: &Path)` 启动时检测 cwd 下 `AGENTS.md` / `CLAUDE.md`。
+    - [ ] 存在则注入到静态内核之后、对话之前；不存在则零开销跳过。
+    - [ ] 保持 cache 前缀稳定：静态内核在前，工作区规约段落在后。
+
+**验收**：`cargo test` + `cargo clippy --no-deps` 零告警；
+实战：构造模型连续重试同一失败调用 → 应看到 reminder 打断 + recovery 提示。
+
+---
+
+## 🔲 阶段十四：L4 记忆层深化 (P1)
+*目标：让压缩不断裂意图链；让单条大输出不撑爆 context。*
+*评估来源：harness-engineering 第 5/12 讲。*
+
+- [ ] **14.1 阶梯降级压缩（改写 compressor.rs）**
+    - [ ] 远期历史：**保留 ToolCall**（保住意图链），ToolResult 掩码为 `[工具输出已清理, 原始 NKB]`。
+    - [ ] Working Memory 尾部：单条 ToolResult > 1000 字符做 Head-Tail 截断（前 500 + 后 500）。
+    - [ ] 当前"整段摘要"作为最后一级（远期历史过长时再叠加），而非唯一策略。
+    - [ ] 修正风险：现方案摘要掉 ToolCall 后模型可能误以为某步未执行 → 重复执行。
+- [ ] **14.2 工具大输出卸载（Tool Output Offloading）**
+    - [ ] read_file / run_shell 输出 > 8K 字符 → 写入 `~/.seekcli/tmp/<hash>.txt`。
+    - [ ] 返回"头部预览 + 尾部预览 + 文件路径引用"摘要，倒逼模型按需局部读取。
+    - [ ] 替换 read_file 现有的粗暴硬截断（若有）。
+
+**验收**：长对话触发压缩后日志显示 ToolCall 仍在、ToolResult 已掩码；
+读 2 万行文件 → 返回预览 + 卸载路径而非全文。
+
+---
+
+## 🔲 阶段十五：状态外部化 + Plan Mode (P1)
+*目标：长程任务跨压缩/断电不失忆；零成本人机协同。*
+*评估来源：harness-engineering 第 14 讲。注：非 plan-execute 框架，见 AGENT_ARCHITECTURE §7。*
+
+- [ ] **15.1 Plan Mode 开关** — REPL `/plan` 命令 + `App.plan_mode: bool`
+    - [ ] 开启时 `agent_system_prompt` 注入"复杂任务先写 PLAN.md/TODO.md，每轮开头先读"指令。
+    - [ ] 关闭时（默认）不注入，简单问答保持极速响应、不写文件。
+- [ ] **15.2 外部化记忆引导**
+    - [ ] 系统提示明确 PLAN.md（宏观架构/约束）与 TODO.md（细颗粒 checklist）职责分工。
+    - [ ] 引导"重启后先 read PLAN.md/TODO.md 定位断点续传"。
+- [ ] **15.3 与压缩协同**
+    - [ ] 确认 PLAN.md/TODO.md 落在工作区文件系统而非 context，压缩不影响其持久性。
+
+**验收**：开 `/plan` 跑一个多步任务 → 工作区出现 PLAN.md/TODO.md 并被逐步勾选；
+关 `/plan` 问"go version" → 不应生成任何 .md 文件。
+
+---
+
+## 🔲 阶段十六：Human-in-loop 三态权限 (P2)
+*目标：从单一同步 y/N 升级为 allow / ask / deny 三态。*
+*评估来源：harness-engineering 第 9 讲。*
+
+- [ ] **16.1 三态分类** — `tools/approval.rs`
+    - [ ] allow：白名单命令（git status / ls 等）直接放行，不打断。
+    - [ ] ask：敏感操作（git push / 大范围删除）触发交互审批。
+    - [ ] deny：黑名单直接拦截报错。
+- [ ] **16.2 可配置**：白/黑名单走 config.toml，用户可扩展。
+
+**验收**：`git status` 不弹审批；`git push` 弹 y/N；`rm -rf /` 直接 deny。
+
+---
+
+## 🔲 阶段十七：L7 可观测与评估模块 (元层，优先于重型机制)
+*目标：让"引擎是否变好"可量化。无此模块，前述所有改动都是凭感觉。*
+*评估来源：harness-engineering 第 18/19/20 讲 + 图1（CostTracker）/图2（Benchmark）/图3（Tracing）。*
+*建议落地顺序：**先做 17.3 Benchmark（哪怕 2~3 个 task），再回头验证阶段十三~十五的改动**。*
+
+- [ ] **17.1 Cost Tracker 装饰器** — `src/observability/cost.rs`（图1）
+    - [ ] 包装 `ApiClient`，无侵入累加 prompt/completion token、耗时、CNY 估算。
+    - [ ] 账单挂到 `history.rs` 的 session metadata；会话结束打印总账。
+    - [ ] 不在 `run_agent_loop` 内混入任何计费代码（AOP 旁路）。
+- [ ] **17.2 Tracing Span 树** — `src/observability/trace.rs`（图3 `.claw/traces`）
+    - [ ] Root(Run) → Child(Turn) → Leaf(Generate/Execute/Compaction) JSON 决策树。
+    - [ ] 在 engine 与 registry 边界埋点；落盘 `.claw/traces/<run_id>.json`。
+    - [ ] 用途：回放死循环/失败决策路径，验证 System Reminders 是否真触发。
+- [ ] **17.3 Benchmark Runner** — `src/observability/bench.rs`（图2）
+    - [ ] Testsuite JSON 定义任务 + 验证命令（Fail-to-Pass 范式）。
+    - [ ] Init → Copy 靶机 → AgentRun → Eval（跑验证命令）→ Score → Report 循环。
+    - [ ] 综合得分 = 成功率 + token 成本 + 耗时 + 轮数。
+    - [ ] 至少 2~3 个种子任务（修 bug / 加接口），作为引擎回归基线。
+
+**验收**：会话结束打印 token/CNY 总账；`.claw/traces/` 出现可读决策树；
+`cargo run --bin bench`（或子命令）跑出引擎跑分报表。
+
+---
+
 ## 📌 三项待用户拍板的决策
 
 | # | 决策                       | 默认方案（推荐）                | 备选                       |

@@ -19,17 +19,19 @@
 
 ```
 ┌────────────────────────────────────────────────────┐
+│  L7  可观测层    Cost Tracker · Tracing · Benchmark │  ← 🔴 整模块缺失
+├────────────────────────────────────────────────────┤
 │  L6  界面层      REPL · CLI 子命令                  │
 ├────────────────────────────────────────────────────┤
 │  L5  组合层      SubAgent 模板 · Skill 策展 · MCP   │
 ├────────────────────────────────────────────────────┤
-│  L4  记忆层      上下文压缩 · prompt cache · 会话    │
+│  L4  记忆层      上下文压缩 · PLAN/TODO 外部化 · 会话│
 ├────────────────────────────────────────────────────┤
 │  L3  安全层      命令审批 · 路径白名单 · 工具守卫    │
 ├────────────────────────────────────────────────────┤
-│  L2  边界层      Tool Dispatcher · 工具 schema 注册 │
+│  L2  边界层      Tool Dispatcher · schema 注册 · 并发│
 ├────────────────────────────────────────────────────┤
-│  L1  引擎层      ReAct Loop · 迭代上限 · 中断处理    │
+│  L1  引擎层      ReAct · Two-Stage · Reminders · 恢复│
 ├────────────────────────────────────────────────────┤
 │  L0  基底层      LLM Provider · Streaming · 协议解析 │
 └────────────────────────────────────────────────────┘
@@ -38,6 +40,8 @@
 **核心判断**：
 - **L0/L1** 是必要骨架，写得快（合计 ~500 行）；
 - **L3/L4/L5** 是工程深水区，决定"玩具 demo 还是日常可用工具"的分水岭；
+- **L1 的运行时纠偏机制**（Two-Stage ReAct / System Reminders / Error Recovery）
+  与 **L7 可观测/评估** 是 Harness 区别于"裸 ReAct"的真正分界 —— 当前均未落地；
 - **外围资产**（多模态网关）不在七层之内 —— 它们应被工具化或剥离。
 
 ---
@@ -108,18 +112,44 @@
 
 ---
 
-## 4. SeekCLI 当前分层评估（阶段八完成后）
+## 4. SeekCLI 当前分层评估（阶段十一完成后 + Harness 全景对照）
+
+> 对照基准：`/Users/hal/agent/harness-engineering` 全 20 讲讲义 + 三张架构图
+> （图1 CostTracker 装饰器 / 图2 Benchmark Runner / 图3 Harness OS 全景）。
+> 图3 本质是一份"应有组件验收清单"，逐框比对后完成度约 **60%**。
 
 | 层               | 状态  | 说明                                                                      |
 | ---------------- | ----- | ------------------------------------------------------------------------- |
 | L0 LLM 基底      | ✅    | DeepSeek + streaming + ToolCall 协议解析；streaming tool-call 分片重组已修 |
-| L1 引擎          | ✅    | ReAct + MAX_ITER=25 + MAX_SUBAGENT_DEPTH=3；Ctrl-C 中断推迟到阶段十一      |
-| L2 工具          | ✅    | `tools/registry::system_tools()` 全量 schema 注入；6 个内置工具齐备         |
-| L3 安全          | ✅    | `approval.rs` 危险命令审批 + `path_security.rs` write 路径白名单（见 §8）  |
-| L4 记忆          | 🔴    | 仅有 session JSON，无压缩、无 prompt cache 验证 → 阶段十                    |
-| L5 组合          | ⚠️    | SubAgent depth + 工具裁剪已落地，类型化模板与 Skill proposal 待阶段九       |
-| L6 界面          | ✅    | REPL 干净，渲染框已删（阶段七）；进度条 + Ctrl-C 留阶段十一                 |
+| L1 引擎          | ⚠️    | ReAct + MAX_ITER + 深度限制 + Ctrl-C **已落地**；但缺 Two-Stage ReAct、System Reminders、Error Recovery、只读并发 → 阶段十三 |
+| L2 工具          | ⚠️    | 全量 schema 注入 + 6 工具齐备；但**工具串行执行**、**无大输出卸载**、dispatcher 畸形 JSON 静默吞 → 阶段十三/十四 |
+| L3 安全          | ✅    | `approval.rs` 危险命令审批 + `path_security.rs` write 路径白名单（见 §8）；三态 allow/ask/deny 待阶段十六 |
+| L4 记忆          | ⚠️    | session JSON + 阈值摘要压缩 + prompt cache 验证**已落地**；但压缩是整段摘要，**断裂 ToolCall 意图链**，无 PLAN.md 外部化 → 阶段十四 |
+| L5 组合          | ✅    | SubAgent 类型化 + 工具裁剪 + Skill proposal 流程齐备（阶段九/十二）         |
+| L6 界面          | ✅    | REPL 干净 + 命令补全 + 进度 spinner + Ctrl-C（阶段十一）                   |
+| **L7 可观测/评估** | 🔴    | **整模块缺失**：无 Cost Tracker 累加、无 Tracing、无 Benchmark → 阶段十七 |
+| **Prompt Composer** | 🔴 | `prompt.rs` **100% 静态硬编码**，不读工作区 `AGENTS.md` → 阶段十三       |
 | **外围资产**     | ✅    | MinerU/StepFun VLM/Tavily/GLM Search/Jina 已全部剥离（阶段七）              |
+
+### 4.1 Harness 全景图（图3）对照：尚缺组件清单
+
+| 图3 组件                       | 现状 | 缺口性质     | 落地阶段 |
+| ------------------------------ | ---- | ------------ | -------- |
+| Prompt Composer（动态 AGENTS.md）| ❌   | 架构级       | 阶段十三 |
+| System Reminders（死循环干预）  | ❌   | 机制级       | 阶段十三 |
+| Error Recovery（恢复提示注入）  | ❌   | 机制级       | 阶段十三 |
+| 只读并发 / 涉写串行（Fork-Join）| ❌   | 提效         | 阶段十三 |
+| 阶梯降级压缩（ToolCall 保留+掩码）| ⚠️  | 机制不达标   | 阶段十四 |
+| 工具大输出卸载（Offloading）    | ❌   | 机制级       | 阶段十四 |
+| 状态外部化 PLAN.md/TODO.md + Plan Mode | ❌ | 架构级 | 阶段十五 |
+| Cost Tracker 装饰器（图1）      | ❌   | 模块级       | 阶段十七 |
+| Tracing `.claw/traces` Span 树（图3）| ❌ | 模块级    | 阶段十七 |
+| Benchmark Runner（图2）         | ❌   | 模块级（元层）| 阶段十七 |
+| Human-in-loop 三态 allow/ask/deny | ⚠️ | 仅同步 y/N  | 阶段十六 |
+
+**核心判断**：L0~L6 的"骨架"完成度高，但 Harness 真正区别于"玩具 demo"的是
+**运行时纠偏（L1 机制）+ 可观测/评估（L7 模块）**。后者整块空白意味着：
+做完任何引擎改动都**无法量化验证好坏**，故 Benchmark Runner 应优先于重型机制落地。
 
 ---
 
@@ -127,14 +157,16 @@
 
 ```
 src/
-├── main.rs              REPL + CLI 入口（< 200 行）
-├── api.rs               DeepSeek client + StreamItem（< 250 行）
+├── main.rs              REPL + CLI 入口（现 1023 行，目标瘦身 < 300，loop 迁出）
+├── api.rs               DeepSeek client + StreamItem
 ├── agent/
-│   ├── mod.rs           run_agent_loop（含 max_iter / 深度）
-│   ├── prompt.rs        Agent 系统提示构建
-│   └── compressor.rs    上下文压缩（L4）
+│   ├── mod.rs           run_agent_loop（含 max_iter / 深度 / 并发分发）
+│   ├── prompt.rs        Agent 系统提示构建（待加：动态读 AGENTS.md）★阶段十三
+│   ├── compressor.rs    上下文压缩（L4，待改阶梯降级）★阶段十四
+│   ├── reminders.rs     System Reminders 死循环检测注入   ★阶段十三（新增）
+│   └── recovery.rs      Error Recovery 恢复提示注入       ★阶段十三（新增）
 ├── tools/
-│   ├── mod.rs           ToolDispatcher
+│   ├── mod.rs           ToolDispatcher（待加：只读并发 / 大输出卸载）★阶段十三/十四
 │   ├── registry.rs      工具 schema 注册（L2 核心）
 │   ├── approval.rs      危险命令审批（L3）
 │   ├── path_security.rs 路径白名单（L3）
@@ -143,8 +175,12 @@ src/
 │   └── meta.rs          invoke_agent / create_skill
 ├── subagents/
 │   └── registry.rs      SubAgent 类型注册表（L5）
+├── observability/                                         ★阶段十七（新增模块 L7）
+│   ├── cost.rs          CostTracker 装饰器（图1）
+│   ├── trace.rs         Span 树 → .claw/traces（图3）
+│   └── bench.rs         Benchmark Runner（图2）
 ├── skills.rs            模板持久化 + proposal 审核
-├── history.rs           Session 持久化
+├── history.rs           Session 持久化（待加：cost 账单挂载）
 └── config.rs
 ```
 
@@ -154,12 +190,21 @@ src/
 
 具体任务拆解见 `TODOs.md`，按以下阶段推进：
 
-1. **阶段六：Harness 核心修补**（L1/L2 致命缺口）
-2. **阶段七：外围资产剥离**（砍 MinerU/VLM/Tavily/GLM Search 等）
-3. **阶段八：L3 安全层**（审批 + 路径白名单）
-4. **阶段九：L5 组合层升级**（SubAgent 类型化 + Skill proposal）
-5. **阶段十：L4 记忆层**（压缩 + prompt cache）
-6. **阶段十一：L6 界面瘦身**（渲染抽离，纯文本优先）
+1. **阶段六：Harness 核心修补**（L1/L2 致命缺口）✅
+2. **阶段七：外围资产剥离**（砍 MinerU/VLM/Tavily/GLM Search 等）✅
+3. **阶段八：L3 安全层**（审批 + 路径白名单）✅
+4. **阶段九：L5 组合层升级**（SubAgent 类型化 + Skill proposal）✅
+5. **阶段十：L4 记忆层**（压缩 + prompt cache）✅
+6. **阶段十一：L6 界面瘦身**（渲染抽离，纯文本优先）✅
+7. **阶段十二：Skill 存储标准化**（SKILL.md / agentskills.io 兼容）✅
+
+> 以下为 Harness 全景对照评估（2026-06）后识别的缺口，按优先级推进：
+
+8. **阶段十三：L1 运行时纠偏 + L2 提效**（P0：Two-Stage ReAct / System Reminders / Error Recovery / 只读并发 / 动态 AGENTS.md）
+9. **阶段十四：L4 记忆层深化**（P1：阶梯降级压缩 + 工具大输出卸载）
+10. **阶段十五：状态外部化 + Plan Mode**（P1：PLAN.md / TODO.md 引导 + `/plan` 开关）
+11. **阶段十六：Human-in-loop 三态权限**（P2：allow / ask / deny）
+12. **阶段十七：L7 可观测与评估模块**（Cost Tracker + Tracing + Benchmark Runner）
 
 ---
 
@@ -172,6 +217,11 @@ src/
 - **不做在线自演化 skill**：模型只能起草 proposal，落地必须人工审核。
 - **不做多 LLM provider 调度**：DeepSeek V4 单家深度适配。
 - **不引入 plan-execute / multi-agent 框架**：纯 ReAct + 类型化 SubAgent 已足够。
+  - 注：阶段十五的 **Plan Mode 不是 plan-execute 框架**。它是"状态外部化"——
+    由模型自驱把规划写进工作区的 `PLAN.md` / `TODO.md`，控制流仍是纯 ReAct，
+    不引入独立 Planner Agent 或 DAG 调度器。两者本质不同，不冲突。
+- **可观测性走装饰器/旁路，不污染主控流**：Cost Tracker 包装 `ApiClient`，
+  Tracing 在 engine/registry 边界埋点，二者均不得在 `run_agent_loop` 里混入计费/埋点代码。
 - **任何长度超过 50 行的"渲染美化"逻辑必须独立成模块**，不得污染 agent loop。
 
 ---

@@ -458,6 +458,8 @@ impl App {
   }
 
   fn ensure_agent_system_prompt(messages: &mut Vec<Message>) {
+    // Static kernel at index 0 — kept byte-identical so the prompt cache
+    // prefix stays stable across turns/sessions.
     let target = agent::prompt::agent_system_prompt();
     let already_present = messages.first().is_some_and(|m| {
       matches!(
@@ -476,6 +478,40 @@ impl App {
           tool_calls: None,
         },
       );
+    }
+
+    // Dynamic Prompt Composer: inject workspace rules (AGENTS.md / CLAUDE.md)
+    // as a SEPARATE system message right after the kernel, if present and not
+    // already injected. Cache prefix (index 0) is unaffected.
+    if let Ok(cwd) = std::env::current_dir()
+      && let Some(rules) = agent::prompt::workspace_rules(&cwd)
+    {
+      let rules_present = messages.iter().any(|m| {
+        matches!(
+          m,
+          Message::Simple { role, content: t, .. }
+            if role == "system" && t == &rules
+        )
+      });
+      if !rules_present {
+        let insert_at = if messages
+          .first()
+          .is_some_and(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
+        {
+          1
+        } else {
+          0
+        };
+        messages.insert(
+          insert_at,
+          Message::Simple {
+            role: "system".to_string(),
+            content: rules,
+            reasoning_content: None,
+            tool_calls: None,
+          },
+        );
+      }
     }
   }
 
