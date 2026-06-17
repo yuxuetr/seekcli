@@ -99,6 +99,10 @@ Each turn you may either:
 - Filesystem writes outside the current working directory are rejected.
 - If a tool result starts with `[USER DENIED]` or `[PATH DENIED]`, **do not retry**
   the same call. Either propose a safer alternative or ask the user how to proceed.
+- A `[Recovery]` line appended to a failed tool result is a debugging SOP from the
+  harness. Follow it before retrying — do not ignore it and re-issue the same call.
+- A `[BAD ARGS]` result means your tool arguments were not valid JSON; re-emit the
+  call with a single well-formed JSON object.
 
 # Stopping conditions
 - Maximum {max_iter} iterations per chat turn.

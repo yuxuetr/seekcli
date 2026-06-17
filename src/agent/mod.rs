@@ -1,5 +1,6 @@
 pub mod compressor;
 pub mod prompt;
+pub mod recovery;
 
 /// Maximum number of ReAct iterations per chat turn.
 /// Hard cap to prevent runaway tool loops if the model misbehaves.

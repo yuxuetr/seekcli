@@ -277,10 +277,11 @@
     - [ ] 批次全为只读工具（read_file / list_dir / 只读 run_shell 难判→保守串行）→ `join_all` 并发。
     - [ ] 批次含任一写操作（write_file / edit / invoke_agent / load_skill）→ 退化串行。
     - [ ] 保持 ToolResponse 顺序与 tool_call 顺序一致（DeepSeek validator 要求）。
-- [ ] **13.5 动态 Prompt Composer（读 AGENTS.md）** — `src/agent/prompt.rs`
-    - [ ] `agent_system_prompt(workspace: &Path)` 启动时检测 cwd 下 `AGENTS.md` / `CLAUDE.md`。
-    - [ ] 存在则注入到静态内核之后、对话之前；不存在则零开销跳过。
-    - [ ] 保持 cache 前缀稳定：静态内核在前，工作区规约段落在后。
+- [x] **13.5 动态 Prompt Composer（读 AGENTS.md）** — Commit `4cec5e2`
+    - [x] `prompt::workspace_rules(workspace)` 检测 cwd 下 `AGENTS.md` / `CLAUDE.md`（首个命中）。
+    - [x] 存在则作为独立 system 消息注入到静态内核之后；不存在则零开销跳过。
+    - [x] 保持 cache 前缀稳定：静态内核 byte-identical 在 index 0，工作区规约在 index 1。
+    - [x] 8KB 上限截断；3 个单测（absent / present / oversized）。
 
 **验收**：`cargo test` + `cargo clippy --no-deps` 零告警；
 实战：构造模型连续重试同一失败调用 → 应看到 reminder 打断 + recovery 提示。

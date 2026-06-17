@@ -813,13 +813,17 @@ impl App {
             }
           }
         } else {
-          match tool_dispatcher
+          let raw = match tool_dispatcher
             .execute(&tc.function.name, &tc.function.arguments)
             .await
           {
             Ok(res) => res,
             Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
-          }
+          };
+          // Context-aware Error Recovery: append an actionable hint when the
+          // result looks like a failure, so the model follows a debug SOP
+          // instead of blindly retrying.
+          agent::recovery::augment(&tc.function.name, raw)
         };
 
         messages.push(Message::ToolResponse {

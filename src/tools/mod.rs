@@ -16,7 +16,18 @@ impl ToolDispatcher {
   }
 
   pub async fn execute(&self, name: &str, arguments: &str) -> Result<String> {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    // A malformed arguments payload used to be silently coerced to `Null`,
+    // which then surfaced as a confusing "missing argument" error. Surface it
+    // explicitly so Error Recovery can hand the model an actionable hint.
+    let args: Value = match serde_json::from_str(arguments) {
+      Ok(v) => v,
+      Err(e) => {
+        return Ok(format!(
+          "[BAD ARGS] arguments for `{}` is not valid JSON: {}",
+          name, e
+        ));
+      }
+    };
 
     match name {
       "read_file" => fs::read_file(&args).await,
