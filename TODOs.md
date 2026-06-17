@@ -355,10 +355,11 @@
     - [x] `estimated_cny`（明确标注为估算费率）+ `cache_hit_pct` + 一行 `summary()`。
     - [x] App 持有 tracker；run_agent_loop 在 Usage 分支 record（覆盖 turn/planning/子 agent）；chat() 末尾打印账单。
     - [x] 4 个新单测。（注：账单暂打印到 stdout，未持久化到 session metadata — 可后续补。）
-- [ ] **17.2 Tracing Span 树** — `src/observability/trace.rs`（图3 `.claw/traces`）
-    - [ ] Root(Run) → Child(Turn) → Leaf(Generate/Execute/Compaction) JSON 决策树。
-    - [ ] 在 engine 与 registry 边界埋点；落盘 `.claw/traces/<run_id>.json`。
-    - [ ] 用途：回放死循环/失败决策路径，验证 System Reminders 是否真触发。
+- [x] **17.2 Tracing Span 树** — Commit `c32c6ea`（图3 `.claw/traces`）
+    - [x] Run → Turn → Generate/Execute/Planning/Compaction JSON 决策树 + 时延 + meta。
+    - [x] engine 边界埋点；落盘 `.claw/traces/<run_id>.json`；子 agent 嵌在 execute span 下。
+    - [x] `SEEKCLI_TRACE` env 开关，关闭时 begin/end/flush 零成本 no-op；`.claw/` 已 gitignore。
+    - [x] 3 个新单测（disabled no-op / 嵌套树 / annotate）。
 - [ ] **17.3 Benchmark Runner** — `src/observability/bench.rs`（图2）
     - [ ] Testsuite JSON 定义任务 + 验证命令（Fail-to-Pass 范式）。
     - [ ] Init → Copy 靶机 → AgentRun → Eval（跑验证命令）→ Score → Report 循环。
