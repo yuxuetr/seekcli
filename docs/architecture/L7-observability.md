@@ -23,7 +23,7 @@
 | # | 缺口 | 证据 | 影响 |
 | --- | --- | --- | --- |
 | L7-1 | **eval 数据集只有 1 个文件 3 个任务** | `examples/benchmarks/basic.json` | 有跑道没有车，回归检测力接近零 |
-| L7-2 | **agent 循环本身零自动化测试** | 87 单测全是纯逻辑 | 主控流任何重构只能靠手测 |
+| L7-2 | **agent 循环本身零自动化测试** | 87 单测全是纯逻辑；`engine.rs` 行覆盖率 **13.8%**，`tools/shell.rs` / `tools/fs.rs` / `api/openai.rs` / `commands.rs` 均为 **0%**（2026-08-22 实测） | 主控流任何重构只能靠手测 |
 | L7-3 | 无快照回归 | 无 | 提示词 / 流程变更无差异可看 |
 | L7-4 | 覆盖率门禁形同虚设 | `build.yml` 装了 `cargo-llvm-cov` 却从未调用 | CI 里那一步是死代码 |
 | L7-5 | 无 OTel 导出 | 取舍级 | |
@@ -74,12 +74,16 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
 `build.yml` 补上实际调用：
 
 ```yaml
-- run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-- run: cargo llvm-cov report --fail-under-lines 60
+- run: >-
+    cargo llvm-cov nextest --all-features --workspace
+    --summary-only --fail-under-lines 45
 ```
 
-阈值从 60 起步，随重构逐步上调；**不追求高覆盖率数字**，
-目的是防止「新增模块零测试」这一类退化。
+一条命令同时跑测试与测覆盖率，门禁不会与实际跑的测试脱节。
+
+阈值取 **45**：2026-08-22 采纳时实测行覆盖率为 46.29%，取略低于基线的值作为**棘轮**。
+**不追求高覆盖率数字**，目的是防止「新增模块零测试」这类退化——
+随重构上调，**永远不为了让 CI 变绿而下调**。
 
 ### 4.4 Cost / Trace 小改
 

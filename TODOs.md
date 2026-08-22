@@ -66,12 +66,20 @@
           部分层保留默认 / 迁移提示触发与消失 / 坏 TOML 指名文件。
 - [x] **20.3 补 LICENSE**
     - [x] 根目录补 MIT LICENSE 文件（`Cargo.toml` 已声明 MIT，此前声明与事实不符，README 链接亦断开）。
-- [ ] **20.4 补仓库自身的 AGENTS.md**
-    - [ ] `prompt.rs::workspace_rules` 专门读工作区 AGENTS.md，本仓库却没有。
-    - [ ] 内容：2 空格缩进、禁 unwrap/expect、提交规范、先跑 `cargo deny`。
-- [ ] **20.5 CI 覆盖率门禁**（L7-4）
-    - [ ] `build.yml` 里 `cargo-llvm-cov` 已安装却从未调用，是死代码；补上实际执行。
-    - [ ] `--fail-under-lines 60` 起步，目的是防止「新增模块零测试」，不追求高数字。
+- [x] **20.4 补仓库自身的 AGENTS.md**
+    - [x] `prompt.rs::workspace_rules` 专门读工作区 AGENTS.md，本仓库却没有。
+    - [x] 内容：先读哪份设计文档、2 空格缩进、禁 unwrap/expect、架构约束、
+          改 LLM 交互时的专项注意事项、提交前门禁、提交规范、目录速览。
+    - [x] 4664 字节，在 `WORKSPACE_RULES_CAP = 8192` 之内（超限会被截断注入）。
+- [x] **20.5 CI 覆盖率门禁**（L7-4）
+    - [x] `build.yml` 里 `cargo-llvm-cov` 已安装却从未调用，是死代码；改为
+          `cargo llvm-cov nextest --summary-only --fail-under-lines 45`，
+          一条命令同时跑测试与测覆盖率，门禁不会与实际跑的测试脱节。
+    - [x] 阈值按**实测**定为 45（原计划 60 是拍脑袋）：采纳时行覆盖率 46.29%，
+          取略低于基线的值作为棘轮。已验证 45 通过、60 失败（退出码 1）。
+    - [x] 实测顺带量化了 L7-2：`engine.rs` 行覆盖率仅 13.8%，
+          `tools/shell.rs` / `tools/fs.rs` / `api/openai.rs` / `commands.rs` 为 0%
+          —— 印证阶段二十五（录制回放）必须前置于三次结构性重构。
 
 **验收**：在任意目录运行 SeekCLI 不再产生 `config.toml`；CI 输出覆盖率并在低于阈值时失败。
 

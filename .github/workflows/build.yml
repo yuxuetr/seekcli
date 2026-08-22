@@ -39,8 +39,15 @@ jobs:
         run: cargo check --all
       - name: Lint rust sources
         run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
-      - name: Execute rust tests
-        run: cargo nextest run --all-features
+      # Runs the tests AND measures coverage in one pass, so the gate cannot
+      # drift out of sync with what the test step actually ran.
+      # Threshold is a ratchet against "new module with zero tests", not an
+      # aspiration: raise it as coverage improves, never lower it to go green.
+      # Baseline at adoption (2026-08-22) was 46.29% lines.
+      - name: Execute rust tests with coverage gate
+        run: >-
+          cargo llvm-cov nextest --all-features --workspace
+          --summary-only --fail-under-lines 45
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff
