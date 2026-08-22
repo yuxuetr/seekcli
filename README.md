@@ -103,6 +103,20 @@ seekcli -p "..." --yes                          # 危险命令自动批准（默
 
 headless 下**绝不等待输入**：审批默认自动拒绝，模型收到 `[USER DENIED]` 后自行调整。
 
+### 安全边界
+所有工具走同一个策略门（`tools/policy.rs`）：**模式门 → 路径门 → 命令门**。
+
+- **只读模式**（`--read-only` / REPL `/readonly`）拒绝一切写工具；`run_shell` 降级为
+  「每个子命令都在只读名单内且无重定向」。
+- **复合命令逐条判定取最严**：`ls; rm -rf /` 由 `rm` 决定，不再被无害前缀带过。
+  `$(...)` 与反引号里的命令同样计入。
+- **越界写**：重定向或写动词指向工作区外的绝对 / `~` 路径 → 需要审批。
+- **审计日志** `~/.seekcli/audit.jsonl`：参数记摘要不记原文（避免日志自身变成泄露源），
+  `run_shell` 记完整命令。
+
+边界的**范围**与刻意不做的部分见 [`security-model.md`](./docs/architecture/security-model.md)。
+注意 **Plan Mode 不是写入限制** —— 它意为「状态外部化」，要求模型写 PLAN.md / TODO.md。
+
 ### 配置文件
 ```
 ~/.seekcli/config.toml   用户级主配置，首次运行自动生成（带注释）

@@ -201,26 +201,47 @@
 
 ## 🟠 P1：边界与地基
 
-### 阶段二十四：L3 安全边界一致性
+### ✅ 阶段二十四：L3 安全边界一致性
 
 *目标：消除「声明的边界与实际执行的边界不一致」——这比边界画得小危险得多。*
 *来源：L3-1 / L3-2 / L3-3 / L3-4。设计：[L3 §4](docs/architecture/L3-security.md#4-目标设计)*
 
-- [ ] **24.1 统一策略门**
-    - [ ] `PolicyGate::check(tool, args) -> Verdict`，所有工具（含未来的 MCP 工具）走同一个门。
-    - [ ] **模式门**：`Mode::{Normal, Plan, ReadOnly}`。Plan / ReadOnly 下 `write_file` /
-          `edit_file` / `create_skill` 直接 `Deny`，`run_shell` 降级为只读白名单。
-          —— 让 Plan Mode 从「提示模型别写」变成「写不了」（L3-2）。
-    - [ ] **路径门**：`run_shell` 新增轻量写意图 + 路径提取（`>` `>>` `tee` `cp` `mv` `rm` `install`
-          且路径在工作区外 → `Ask`）（L3-1）。**不做完整 shell AST 解析。**
-- [ ] **24.2 命令解析升级**（L3-3）
-    - [ ] `shlex` 分词后按 token 匹配，替代裸子串。
-    - [ ] 识别 `;` / `&&` / `|` / `$(...)` 分隔的子命令，逐条判定取最严结果。
-- [ ] **24.3 审计日志**（L3-4）
-    - [ ] `~/.seekcli/audit.jsonl` 每次工具调用一行；记 `args_digest` 而非原文（避免写入密钥），
-          `run_shell` 例外记完整命令。
-- [ ] **24.4 单测**：模式门各组合 / 子命令取最严 / 路径提取 / 审计行格式。
-- [ ] **24.5 同步更新** [`security-model.md`](docs/architecture/security-model.md) §5 的「已知不自洽」表。
+- [x] **24.1 统一策略门**
+    - [x] `tools/policy.rs::check(tool, args) -> Verdict`，所有工具（含未来的 MCP 工具）
+          走同一个门：模式门 → 路径门 → 命令门。
+    - [x] **模式门**：`Mode::{Normal, ReadOnly}`。ReadOnly 下 `write_file` / `edit_file` /
+          `create_skill` 直接 `Deny`；`run_shell` 降级为「每个子命令 argv[0] 在只读名单内
+          且全句无重定向」，`git push` / `cargo build` 这类只读程序的写子命令也排除。
+    - [x] ⚠️ **计划修正**：原计划让 Plan Mode 也进模式门，实施时发现是**误判**——
+          本项目的 Plan Mode 意为「状态外部化」，提示词明确要求模型写 PLAN.md / TODO.md，
+          限制写入会破坏它所命名的功能。改为独立的 `--read-only` / `/readonly`，
+          Plan Mode 语义不变。已同步订正评估 L3-2、L3 架构文档与 security-model §5，
+          并留了一个回归单测 `plan_mode_is_not_a_write_restriction`。
+    - [x] **路径门**：`policy::escaping_write_targets` 检测重定向或写动词
+          （tee/cp/mv/rm/install/touch/mkdir/dd/chmod/chown/ln/…）指向绝对或 `~` 路径 → `Ask`（L3-1）。
+          **不做完整 shell AST 解析。**
+- [x] **24.2 命令解析升级**（L3-3）
+    - [x] `policy::split_subcommands` 按 `;` `&&` `||` `|` `&` 拆分，并把 `$(...)` 与反引号
+          的内容当作独立命令递归处理。逐条判定取最严——`ls; rm -rf /` 不再由 `ls` 决定。
+    - [x] `shlex` 分词取 argv[0] 判定只读名单；危险模式检测仍走既有 token 边界匹配
+          （重写检测器风险高于收益，且已有 11 个单测覆盖）。
+- [x] **24.3 审计日志**（L3-4）
+    - [x] `tools/audit.rs` → `~/.seekcli/audit.jsonl`，每次工具调用一行。
+    - [x] 参数记 FNV-1a 摘要而非原文——工具参数常含文件内容、偶尔含密钥，
+          **为安全而写的日志不能自己变成泄露源**；`run_shell` 例外记完整命令
+          （反正执行前已打印到终端，隐藏它只会丢掉价值而不减少暴露）。
+    - [x] 写盘失败只告警不中断，但不静默。
+- [x] **24.4 单测**（8 个）：子命令拆分各分隔符 / 无害前缀不再决定判定 / 取最严 /
+      只读 shell 名单（含 git push、cargo build、重定向、未知程序、单条污染全句）/
+      越界写检测（工作区内不误报、读取不误报）/ 只读模式各工具 / 普通模式路径与命令门 /
+      **Plan Mode 不是写入限制**的回归守卫。
+- [x] **24.5 同步更新** security-model §5、L3 架构文档、评估 L3-2 订正。
+
+**真实端到端验证**（4 项全过）：
+- headless 下 `echo pwned > <工作区外路径>` 被拒，磁盘验证文件未创建
+- `ls && sudo whoami` 被 sudo 决定判定（此前 `ls` 前缀会让整行看起来无害）
+- `--read-only` 下 `ls` 可执行、`rm victim.txt` 被 `[MODE DENIED]`，文件仍在
+- `~/.seekcli/audit.jsonl` 记录了 executed 与 denied 两类条目
 
 **验收**：`/plan on` 后模型改文件被拒且文件未变；`run_shell("echo x > ~/.zshrc")` 触发审批；
 `ls; rm -rf /tmp/foo` 按 `rm` 档位判定。

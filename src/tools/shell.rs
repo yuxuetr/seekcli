@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::approval;
+use super::{approval, audit, policy};
 
 /// Delay before showing the progress spinner. Below this threshold, a
 /// command finishes too quickly for the spinner to be useful.
@@ -19,7 +19,8 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     .and_then(|v| v.as_str())
     .context("Missing 'command' argument")?;
 
-  match approval::classify(command) {
+  // Sub-command aware: `ls; rm -rf /tmp/x` is judged by the `rm`, not the `ls`.
+  match policy::classify_command(command) {
     approval::Decision::Allow => {}
     approval::Decision::Deny(reason) => {
       eprintln!("{} command blocked by policy: {}", "[Agent]".red(), reason);
@@ -39,6 +40,26 @@ pub async fn run_shell(args: &Value) -> Result<String> {
       eprintln!("{} command approved by user.", "[Agent]".green());
     }
   }
+
+  // Writing outside the workspace was previously unchecked for shell, so the
+  // file-tool whitelist only ever stopped honest mistakes. Not a full shell
+  // parse -- see security-model.md -- but a redirect or a write verb aimed at
+  // an absolute / `~` path now costs a prompt.
+  let escaping = policy::escaping_write_targets(command);
+  if !escaping.is_empty() {
+    let reason = format!("writes outside the workspace: {}", escaping.join(", "));
+    if !approval::confirm(command, &reason) {
+      audit::record_command(command, audit::Outcome::Denied, &reason);
+      eprintln!("{} out-of-workspace write denied.", "[Agent]".red());
+      return Ok(format!(
+        "[PATH DENIED] Refused ({reason}): {command}\n\
+         Do not retry. Write inside the working directory, or ask the user to \
+         run SeekCLI from the intended directory."
+      ));
+    }
+  }
+
+  audit::record_command(command, audit::Outcome::Executed, "");
 
   eprintln!("\n{} {}", "[Agent Executing]".cyan(), command);
 

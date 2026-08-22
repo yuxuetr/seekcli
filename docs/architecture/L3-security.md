@@ -1,6 +1,6 @@
 # L3 安全层：审批 · 路径策略 · 模式门禁
 
-> 完成度 **50%，且边界不自洽** ｜ 缺口来源：[评估 §3 L3](../evaluation/2026-08-harness-gap-analysis.md#l3-安全层--50且边界不一致)
+> 完成度 **80%**（阶段二十四后）｜ 缺口来源：[评估 §3 L3](../evaluation/2026-08-harness-gap-analysis.md#l3-安全层--50且边界不一致)
 > 安全模型的**范围声明**（做什么 / 不做什么 / 用户责任）见 [security-model.md](security-model.md)。
 
 ## 1. 职责边界
@@ -15,17 +15,21 @@
 | --- | --- | --- |
 | 三态命令审批 | `tools/approval.rs::classify -> Decision{Allow,Ask,Deny}` | `run_shell` |
 | 优先级 | user deny > 内置 deny > user allow > 内置 ask > allow | |
-| 写路径白名单 | `tools/path_security.rs::ensure_within_cwd` | `write_file`（`fs.rs:28`）、`edit_file`（`fs.rs:59`） |
+| 写路径白名单 | `tools/path_security.rs::ensure_within_cwd` | `write_file`、`edit_file`、**shell 越界写意图** |
+| 统一策略门 | `tools/policy.rs::check` | **所有工具**：模式门 → 路径门 → 命令门 |
+| 子命令拆分 | `policy::split_subcommands` | `;` `&&` `\|\|` `\|` `&` `$()` 反引号 |
+| 只读模式 | `policy::Mode::ReadOnly` | `--read-only` / `/readonly` |
+| 审计日志 | `tools/audit.rs` | `~/.seekcli/audit.jsonl` |
 | 用户可配 | `config.toml [security] allow/deny` 子串列表 | |
 
 ## 3. 缺口
 
 | # | 缺口 | 证据 | 性质 |
 | --- | --- | --- | --- |
-| L3-1 | **写受限、shell 不受限** | 路径检查只挂在两个 fs 工具上；`sh -c "cat > ~/.ssh/x"` 不过路径检查 | **边界不自洽** |
-| L3-2 | **Plan Mode 只是 prompt** | `engine.rs:339` 仅注入 `plan_mode_rules()`，不阻断写工具 | **名不副实** |
-| L3-3 | 审批是子串匹配 | `matches_any` 大小写不敏感子串 | 可绕过 |
-| L3-4 | 无审计日志 | 无 | 事后不可追溯 |
+| ~~L3-1~~ | ~~写受限、shell 不受限~~ | **阶段二十四已落地** | — |
+| ~~L3-2~~ | ~~无模式真正限制写入~~ | **阶段二十四以 `Mode::ReadOnly` 落地**；初稿对 Plan Mode 的表述有误，见[评估订正](../evaluation/2026-08-harness-gap-analysis.md#l3-安全层--50且边界不一致) | — |
+| ~~L3-3~~ | ~~审批是子串匹配~~ | **阶段二十四已落地**（子命令拆分 + shlex argv） | — |
+| ~~L3-4~~ | ~~无审计日志~~ | **阶段二十四已落地** | — |
 | L3-5 | 无进程沙箱 | 无 | **取舍级**，见 security-model |
 
 > L3-1 与 L3-2 的共同点：**声明的边界与实际执行的边界不一致**。
@@ -33,7 +37,7 @@
 
 ## 4. 目标设计
 
-### 4.1 统一策略门（L3-1 / L3-2）
+### 4.1 统一策略门（L3-1 / L3-2）✅ 阶段二十四已落地
 
 三个正交维度合成一次判定，所有工具**走同一个门**：
 
@@ -55,15 +59,18 @@ impl PolicyGate {
 
 判定顺序：
 
-1. **模式门**：`Plan` / `ReadOnly` 下，`write_file` / `edit_file` / `create_skill` 直接 `Deny`；
-   `run_shell` 降级为「仅 allow 名单内的只读命令」。
-   —— 这让 Plan Mode 从「提示模型别写」变成「写不了」。
+1. **模式门**：`ReadOnly` 下 `write_file` / `edit_file` / `create_skill` 直接 `Deny`；
+   `run_shell` 降级为「每个子命令的 argv[0] 都在只读名单内，且全句无重定向」，
+   `git push` / `cargo build` 这类只读程序的写子命令也被排除。
+   **Plan Mode 不接入此门**：它在本项目里意为「状态外部化」，提示词要求模型写
+   PLAN.md / TODO.md，限制写入会破坏它所命名的功能。「只看不改」是独立的
+   `--read-only` / `/readonly`。
 2. **路径门**：对声明了路径参数的工具做 `ensure_within_cwd`。
    **`run_shell` 新增轻量路径提取**：扫描命令中的绝对路径与 `~` 展开，
    任一指向工作区外 + 该命令含写意图（`>` `>>` `tee` `cp` `mv` `rm` `install`）→ `Ask`。
 3. **命令门**：`run_shell` 走现有 `classify`。
 
-### 4.2 命令解析升级（L3-3）
+### 4.2 命令解析升级（L3-3）✅ 阶段二十四已落地
 
 `matches_any` 的裸子串换成 `shlex` 分词后按 token 匹配：
 
@@ -72,7 +79,7 @@ impl PolicyGate {
 - **明确不做** shell AST 完整解析——见 security-model §8.2 的既有取舍。
   目标是「显著提高绕过成本」，不是「不可绕过」。
 
-### 4.3 审计日志（L3-4）
+### 4.3 审计日志（L3-4）✅ 阶段二十四已落地
 
 `~/.seekcli/audit.jsonl`，每次工具调用一行：
 

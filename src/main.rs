@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
     });
   }
   if cli.read_only {
-    tools::set_exec_mode(tools::ExecMode::ReadOnly);
+    tools::policy::set_mode(tools::policy::Mode::ReadOnly);
   }
 
   let mut app = App::new()?;

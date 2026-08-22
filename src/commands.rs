@@ -16,6 +16,7 @@ impl App {
     println!("  /model [flash|pro]      Switch DeepSeek model");
     println!("  /thinking [n|h|m]       Switch thinking intensity (None/High/Max)");
     println!("  /plan [on|off]          Toggle Plan Mode (externalize state to PLAN.md/TODO.md)");
+    println!("  /readonly [on|off]      Toggle read-only mode (refuse all mutating tools)");
     println!("  /skill list             List active skills");
     println!("  /skill <name> [prompt]  Activate a skill (optional: send prompt immediately)");
     println!("  /skill proposals        List pending skill proposals from the agent");
@@ -192,6 +193,12 @@ impl App {
           Some("off") => false,
           _ => !self.plan_mode,
         };
+        // NOTE: Plan Mode deliberately does NOT restrict writes. In SeekCLI it
+        // means "externalize state to PLAN.md / TODO.md" (stage 15), and its
+        // prompt instructs the model to write those files. It is not the
+        // dsh/Claude-Code sense of "change nothing until approved" -- that is
+        // `/readonly`, a separate switch. Wiring the two together would break
+        // the feature it is named after.
         if self.plan_mode {
           println!(
             "{} Plan Mode {} — agent will externalize state to PLAN.md / TODO.md",
@@ -200,6 +207,28 @@ impl App {
           );
         } else {
           println!("{} Plan Mode {}", "✦".cyan(), "OFF".yellow());
+        }
+      }
+      "/readonly" => {
+        let on = match parts.get(1).copied() {
+          Some("on") => true,
+          Some("off") => false,
+          _ => crate::tools::policy::mode() != crate::tools::policy::Mode::ReadOnly,
+        };
+        crate::tools::policy::set_mode(if on {
+          crate::tools::policy::Mode::ReadOnly
+        } else {
+          crate::tools::policy::Mode::Normal
+        });
+        if on {
+          println!(
+            "{} Read-only {} — write_file / edit_file / create_skill refused; \
+             run_shell limited to reporting commands",
+            "✦".cyan(),
+            "ON".green()
+          );
+        } else {
+          println!("{} Read-only {}", "✦".cyan(), "OFF".yellow());
         }
       }
       "/history" => {

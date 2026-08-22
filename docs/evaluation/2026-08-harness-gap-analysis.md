@@ -159,13 +159,21 @@ write 路径工作区白名单（`path_security.rs`，词法归一化不跟随�
 | # | 缺口 | 证据 | 影响 |
 | --- | --- | --- | --- |
 | L3-1 | **写受限、shell 不受限** | `ensure_within_cwd` 只挂在 `fs.rs:28`（write_file）与 `fs.rs:59`（edit_file） | `sh -c "cat > ~/.ssh/authorized_keys"` 只要不匹配 deny 子串就通过；文件白名单在有自由 shell 时只是防手滑 |
-| L3-2 | **Plan Mode 只是 prompt** | `engine.rs:339` 仅注入 `plan_mode_rules()` | 开着 plan 模式模型照样能 `write_file`。dsh 的 plan mode 是策略状态 + `exit_plan_mode` 审批退出 |
+| L3-2 | **没有任何模式真正限制写入** | `engine.rs:339` 的 Plan Mode 只注入 `plan_mode_rules()` | 见下方订正 |
 | L3-3 | 审批是子串匹配 | `approval::matches_any` 大小写不敏感子串 | `rm -rf` 变形、`$(...)`、别名均可绕过 |
 | L3-4 | 无审计日志 | 无 | 事后无法追溯模型做了什么 |
 | L3-5 | 无进程沙箱 | 无 | 越狱面是整个 `sh`。dsh 有 `packages/sandbox/` 四件套 + `native/landlock-run` |
 
 > L3-5 已在 `AGENT_ARCHITECTURE §8.2` 主动声明为设计取舍，本评估**认可该取舍**，
 > 但 L3-1 / L3-2 属于**边界不自洽**，应当补齐。
+
+> **L3-2 订正**（2026-08-22，阶段二十四实施时发现）：本条初稿写作
+> 「Plan Mode 只是 prompt，不阻断写工具」，是对照 dsh 时的**误判**。
+> dsh 的 plan mode 意为「批准前不改任何东西」；SeekCLI 的 Plan Mode 是阶段十五的
+> **状态外部化**，其提示词明确要求模型用 `write_file` 维护 PLAN.md / TODO.md。
+> 两者同名而不同义——把 Plan Mode 接上写入限制，会直接破坏它所命名的功能。
+> 真实缺口是**没有任何模式能表达「只看不改」**：阶段二十四以独立的
+> `Mode::ReadOnly`（`--read-only` / `/readonly`）补齐，Plan Mode 语义保持不变。
 
 → 补全设计：[L3-security.md](../architecture/L3-security.md)、[security-model.md](../architecture/security-model.md)
 
