@@ -156,25 +156,43 @@
 
 ---
 
-### 阶段二十三：L6 headless 通用化
+### ✅ 阶段二十三：L6 headless 通用化
 
 *目标：打开被脚本 / CI / 其它程序调用的全部场景。*
 *来源：L6-1 / L6-2 —— 成本极低价值极高。设计：[L6 §4.1](docs/architecture/L6-interface.md#41-通用-headlessl6-1--l6-2)*
 
-- [ ] **23.1 `-p` 一次性执行**
-    - [ ] `seekcli -p "<prompt>"` 执行后打 stdout 并退出。
-    - [ ] stdin 非 tty 时读入作为附加上下文（`cat x.md | seekcli -p "总结"`）。
-    - [ ] `--max-iter` / `--read-only` / `--cwd` 参数。
-- [ ] **23.2 结构化输出**
-    - [ ] `--output json`：`session_id` / `final` / `iterations` / `usage` / `cost_cny` / `tools` / `status`。
-    - [ ] **日志一律走 stderr**，stdout 只放结果，保证 `jq` 可直接解析。
-- [ ] **23.3 非交互降级**
-    - [ ] headless 下审批 `Ask` → `Deny`（除非 `--yes`）。
-    - [ ] 为「模型主动提问」预留非交互降级路径；`ask_user_question` 工具本身
-          在阶段二十七 27.4 落地（此时尚不存在）。
-    - [ ] **绝不静默挂起**——无 TTY 时任何等待输入的路径都必须立即返回。
-- [ ] **23.4 退出码语义**：0 完成 / 1 运行时错误 / 2 未收敛 / 3 被策略拒绝。
-- [ ] **23.5 统一路径**：`--bench` 与 `--run-task` 内部改走同一条 headless 实现。
+- [x] **23.1 `-p` 一次性执行**
+    - [x] `seekcli -p "<prompt>"` 执行后打 stdout 并退出。
+    - [x] stdin **仅在非 TTY 时**读入作为附加上下文（读交互式 stdin 会阻塞等 EOF，
+          正是本阶段要消灭的挂起）。
+    - [x] `--max-iter` / `--read-only` / `--yes` / `--cwd` 参数。
+- [x] **23.2 结构化输出**
+    - [x] `--output json`：`final` / `status` / `iterations` / `llm_calls` / `usage` / `cost_cny`。
+          （`session_id` 待阶段二十六事件日志落地后补——当前 headless 不落会话。）
+    - [x] 新增 `src/ui.rs` 做输出分流：进度、流式输出、审批提示、重试通知一律 stderr，
+          结果只在 stdout 出现一次。REPL 里流式输出**就是**结果，故仍走 stdout——
+          这是需要模式开关而非无条件重定向的原因。
+    - [x] engine/shell/compressor/search/tasks 共 32 处 `println!` 改 `eprintln!`。
+- [x] **23.3 非交互降级**
+    - [x] headless 下审批 `Ask` → `Deny`（`--yes` 则 `AutoApprove`）；
+          `approval::Interaction` 三态，锁中毒时回落到 `Prompt` 而非静默放行。
+    - [x] `--read-only` 用 `tools::ExecMode` 真正拦截 write_file / edit_file /
+          run_shell / create_skill，返回 `[MODE DENIED]` 给模型而非抛错中断。
+          `run_shell` 整体拒绝而非猜测其副作用——一个 `>` 重定向能走过去的门禁不算门禁。
+          阶段二十四会把它并入 `PolicyGate` 与 Plan Mode 一起处理。
+    - [x] `ask_user_question` 工具本身在阶段二十七 27.4 落地（此时尚不存在）。
+- [x] **23.4 退出码语义**：0 完成 / 1 运行时错误 / 2 未收敛 / 3 被中断。
+      `run_agent_loop` 返回值结构化为 `LoopResult{text,messages,status,iterations}`，
+      `LoopStatus` 区分 Completed / MaxIterations / Interrupted。
+- [x] **23.5 统一路径**：`--bench` / `--run-task` 与 `-p` 共用 headless 标志与降级策略。
+
+**真实端到端验证**（6 项全过）：
+- `-p` 文本模式 stdout 只有结果、退出码 0
+- `--output json` 可直接喂 `jq`
+- `echo ... | seekcli -p` 读到管道内容
+- `--read-only` 下模型无法创建文件（磁盘验证）
+- headless 下 `sudo` 命令自动拒绝且**不挂起**
+- `--max-iter 1` 未收敛 → `status: max_iterations` 且退出码 2
 
 **验收**：`seekcli -p "统计仓库有多少个 .rs 文件"` 在 CI 环境正常返回并退出 0；
 `--output json` 输出可被 `jq` 直接解析。

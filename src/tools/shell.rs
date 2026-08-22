@@ -22,7 +22,7 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   match approval::classify(command) {
     approval::Decision::Allow => {}
     approval::Decision::Deny(reason) => {
-      println!("{} command blocked by policy: {}", "[Agent]".red(), reason);
+      eprintln!("{} command blocked by policy: {}", "[Agent]".red(), reason);
       return Ok(format!(
         "[USER DENIED] Command blocked by policy ({reason}): {command}\n\
          This command is not permitted. Do not retry; propose a safer alternative."
@@ -30,17 +30,17 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     }
     approval::Decision::Ask(reason) => {
       if !approval::confirm(command, &reason) {
-        println!("{} command denied by user.", "[Agent]".red());
+        eprintln!("{} command denied by user.", "[Agent]".red());
         return Ok(format!(
           "[USER DENIED] User refused to run dangerous command ({reason}): {command}\n\
            Do not retry. Suggest a safer alternative or ask the user how to proceed."
         ));
       }
-      println!("{} command approved by user.", "[Agent]".green());
+      eprintln!("{} command approved by user.", "[Agent]".green());
     }
   }
 
-  println!("\n{} {}", "[Agent Executing]".cyan(), command);
+  eprintln!("\n{} {}", "[Agent Executing]".cyan(), command);
 
   // Spawn a side task that activates a progress spinner only if the command
   // takes longer than SPINNER_DELAY. The spinner clears itself when the

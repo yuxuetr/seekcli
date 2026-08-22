@@ -90,6 +90,19 @@ stream_idle_timeout_secs = 60             # 两个 chunk 之间的静默上限
 只重试「返回流之前」的那次调用；一旦开始出字节就永不重试，避免重放已产生副作用的
 工具调用——中途失败交给 L1 的 Error Recovery。
 
+### Headless（脚本 / CI 调用）
+```bash
+seekcli -p "统计仓库有多少个 .rs 文件"          # 结果打 stdout，进度打 stderr
+seekcli -p "总结这个报错" --output json | jq .  # stdout 只有 JSON
+cat bug.log | seekcli -p "分析这个 bug"         # stdin 非 TTY 时作为附加上下文
+seekcli -p "..." --read-only                    # 拒绝一切写工具
+seekcli -p "..." --max-iter 10 --cwd /path      # 限制迭代上限 / 指定工作目录
+seekcli -p "..." --yes                          # 危险命令自动批准（默认自动拒绝）
+```
+退出码：`0` 完成 ｜ `1` 运行时错误 ｜ `2` 未收敛（达到迭代上限）｜ `3` 被中断。
+
+headless 下**绝不等待输入**：审批默认自动拒绝，模型收到 `[USER DENIED]` 后自行调整。
+
 ### 配置文件
 ```
 ~/.seekcli/config.toml   用户级主配置，首次运行自动生成（带注释）

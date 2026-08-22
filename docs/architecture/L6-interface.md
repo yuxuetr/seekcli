@@ -1,6 +1,6 @@
 # L6 界面层：REPL · CLI · headless 入口
 
-> 完成度 **35%** ｜ 缺口来源：[评估 §3 L6](../evaluation/2026-08-harness-gap-analysis.md#l6-界面层--35)
+> 完成度 **75%**（阶段二十、二十三后）｜ 缺口来源：[评估 §3 L6](../evaluation/2026-08-harness-gap-analysis.md#l6-界面层--35)
 
 ## 1. 职责边界
 
@@ -17,21 +17,24 @@
 | slash 命令 | `commands.rs::handle_command`（13 条） |
 | 状态指示 | prompt 显示 `model (thinking\|plan\|skill) ❯`；`run_shell` >800ms 显示 spinner |
 | Ctrl-C | `spawn_interrupt_watcher` + 循环轮询 |
+| 通用 headless | `-p <prompt>` / stdin 管道 / `--output json` / `--max-iter` / `--read-only` / `--yes` / `--cwd` |
 | 特化 headless 入口 | `--bench <suite>` / `--run-task <name>` |
+| 输出分流 | `ui.rs`：进度与流式输出走 stderr，结果走 stdout |
+| 配置分层 | `config.rs`：用户级 + 项目级 + `$SEEKCLI_CONFIG` |
 
 ## 3. 缺口
 
 | # | 缺口 | 影响 | 性质 |
 | --- | --- | --- | --- |
-| L6-1 | **无通用 headless 模式** | 堵死被脚本 / CI / 其它程序调用的**全部**场景 | 功能级，**成本极低价值极高** |
-| L6-2 | 无结构化输出 | 无法被上层程序消费 | 功能级 |
+| ~~L6-1~~ | ~~无通用 headless 模式~~ | **阶段二十三已落地** | — |
+| ~~L6-2~~ | ~~无结构化输出~~ | **阶段二十三已落地** | — |
 | L6-3 | 无编辑器 / IDE 集成通道 | 取舍级 | |
 | L6-4 | 无 TUI / Web UI | 取舍级，**不追求** | |
-| L6-5 | 配置文件读 CWD | `config.rs:63` 在任何目录写 `config.toml` | **缺陷级** |
+| ~~L6-5~~ | ~~配置文件读 CWD~~ | **阶段二十 20.2 已落地** | — |
 
 ## 4. 目标设计
 
-### 4.1 通用 headless（L6-1 / L6-2）
+### 4.1 通用 headless（L6-1 / L6-2）✅ 阶段二十三已落地
 
 ```
 seekcli -p "重构 foo.rs 里的错误处理"     # 一次性执行，结果打到 stdout
@@ -61,11 +64,16 @@ seekcli -p "..." --max-iter 10 --read-only
 
 设计要点：
 
-- headless 下**所有交互式提示自动降级**：审批 `Ask` → `Deny`（除非 `--yes`），
-  `ask_user_question` → 非交互拒绝。**绝不静默挂起。**
+- headless 下**所有交互式提示自动降级**：审批 `Ask` → `Deny`（除非 `--yes`）。
+  **绝不静默挂起** —— 一个停在隐藏 `[y/N]` 上的无人值守任务，和进程卡死无法区分。
+  拒绝反而让运行继续，并把模型早已认识的 `[USER DENIED]` 交给它自行调整。
+- stdin **只在非 TTY 时读取**：读交互式 stdin 会阻塞等 EOF，正是本阶段要消灭的挂起。
+- 输出分流由 `ui.rs` 承担：进度、流式输出、审批提示、重试通知一律 stderr；
+  结果只在 stdout 出现一次。REPL 里流式输出**就是**结果，故仍走 stdout——
+  这是它需要一个模式开关而非无条件重定向的原因。
 - `--bench` / `--run-task` 保留，内部统一走同一条 headless 路径。
 
-### 4.2 配置定位修复（L6-5）
+### 4.2 配置定位修复（L6-5）✅ 阶段二十 20.2 已落地
 
 ```
 ~/.seekcli/config.toml     用户级（主）

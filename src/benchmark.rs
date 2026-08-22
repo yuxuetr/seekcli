@@ -59,7 +59,7 @@ impl App {
       env::set_current_dir(&original_cwd)?;
 
       let llm_calls = match run {
-        Ok((_final_text, calls)) => calls,
+        Ok(outcome) => outcome.llm_calls,
         Err(e) => {
           println!("{} agent error: {}", "[Bench]".red(), e);
           report.push(TaskResult {

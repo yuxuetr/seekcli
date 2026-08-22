@@ -4,6 +4,7 @@ use colored::*;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,7 @@ mod skills;
 mod subagents;
 mod tasks;
 mod tools;
+mod ui;
 
 use completer::CmdCompleter;
 
@@ -74,6 +76,10 @@ struct App {
   cost: observability::cost::CostTracker,
   /// Decision-path tracer (opt-in via SEEKCLI_TRACE); no-op when disabled.
   tracer: observability::trace::Trace,
+  /// Iteration ceiling for a run. Defaults to `agent::MAX_ITER`; a headless
+  /// run can lower it with `--max-iter` so an unattended job has a bounded
+  /// worst-case cost.
+  max_iter: usize,
   /// Set to true by the Ctrl-C watcher task. Polled at the top of each
   /// agent loop iteration and during stream consumption to allow graceful
   /// mid-task interruption back to the REPL.
@@ -107,6 +113,7 @@ impl App {
       current_session,
       model,
       thinking_mode: ThinkingMode::None,
+      max_iter: agent::MAX_ITER,
       plan_mode: false,
       current_skill: None,
       last_code_blocks: Vec::new(),
@@ -178,8 +185,37 @@ impl App {
 }
 
 #[derive(Parser)]
-#[command(author, version, about = "DeepSeek V4 Harness Agent for CLI", long_about = None)]
+#[command(author, version, about = "DeepSeek Harness Agent for CLI", long_about = None)]
 struct Cli {
+  /// Run one prompt headlessly and exit. Reads extra context from stdin when
+  /// it is piped. Result goes to stdout; progress goes to stderr.
+  #[arg(short = 'p', long, value_name = "PROMPT")]
+  prompt: Option<String>,
+
+  /// Output format for -p. `json` is pipeable into jq: stdout carries only
+  /// the JSON object.
+  #[arg(long, value_name = "FORMAT", default_value = "text")]
+  output: OutputFormat,
+
+  /// Iteration ceiling for this run. Bounds the worst-case cost of an
+  /// unattended job.
+  #[arg(long, value_name = "N")]
+  max_iter: Option<usize>,
+
+  /// Refuse every mutating tool (write_file / edit_file / run_shell /
+  /// create_skill) for this run.
+  #[arg(long)]
+  read_only: bool,
+
+  /// Approve dangerous commands without asking. Only meaningful headless,
+  /// where the default is to deny them.
+  #[arg(long)]
+  yes: bool,
+
+  /// Working directory to run in.
+  #[arg(long, value_name = "DIR")]
+  cwd: Option<PathBuf>,
+
   /// Run a benchmark testsuite (JSON) headlessly instead of the REPL.
   #[arg(long, value_name = "TESTSUITE.json")]
   bench: Option<PathBuf>,
@@ -188,6 +224,24 @@ struct Cli {
   /// REPL. Intended for launchd/cron invocation, not interactive use.
   #[arg(long, value_name = "TASK_NAME")]
   run_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OutputFormat {
+  Text,
+  Json,
+}
+
+/// Exit codes, so a caller can branch without parsing output.
+///
+/// The distinction that matters is 2 vs 1: "the agent ran fine but did not
+/// finish within its iteration budget" is a different operational signal from
+/// "something broke", and a CI job usually wants to treat them differently.
+mod exit {
+  pub const OK: i32 = 0;
+  pub const RUNTIME_ERROR: i32 = 1;
+  pub const NOT_CONVERGED: i32 = 2;
+  pub const POLICY_REFUSED: i32 = 3;
 }
 
 /// Background task that flips `flag` to `true` on each Ctrl-C. Rustyline
@@ -207,15 +261,109 @@ fn spawn_interrupt_watcher(flag: Arc<AtomicBool>) {
   });
 }
 
+/// Assemble the effective prompt: the `-p` text, plus stdin when it is piped.
+///
+/// Only read stdin when it is NOT a terminal. Reading an interactive stdin
+/// would block forever waiting for EOF, which is the exact hang this stage
+/// exists to eliminate.
+fn read_piped_stdin() -> Result<Option<String>> {
+  use std::io::{IsTerminal, Read};
+  if io::stdin().is_terminal() {
+    return Ok(None);
+  }
+  let mut buf = String::new();
+  io::stdin()
+    .read_to_string(&mut buf)
+    .context("cannot read stdin")?;
+  let trimmed = buf.trim();
+  if trimmed.is_empty() {
+    Ok(None)
+  } else {
+    Ok(Some(trimmed.to_string()))
+  }
+}
+
+async fn run_prompt(app: &mut App, prompt: String, format: OutputFormat) -> Result<i32> {
+  let outcome = match app.run_headless(&prompt, None).await {
+    Ok(o) => o,
+    Err(e) => {
+      // Errors go to stderr so stdout stays machine-readable even on failure.
+      eprintln!("{} {:#}", "Error:".red(), e);
+      return Ok(exit::RUNTIME_ERROR);
+    }
+  };
+
+  match format {
+    OutputFormat::Text => ui::result(&outcome.text),
+    OutputFormat::Json => {
+      let payload = serde_json::json!({
+        "final": outcome.text,
+        "status": match outcome.status {
+          engine::LoopStatus::Completed => "completed",
+          engine::LoopStatus::MaxIterations => "max_iterations",
+          engine::LoopStatus::Interrupted => "interrupted",
+        },
+        "iterations": outcome.iterations,
+        "llm_calls": outcome.llm_calls,
+        "usage": {
+          "prompt_tokens": app.cost.prompt_tokens,
+          "completion_tokens": app.cost.completion_tokens,
+          "cache_hit_pct": app.cost.cache_hit_pct(),
+        },
+        "cost_cny": app.cost.estimated_cny(),
+      });
+      ui::result(&serde_json::to_string_pretty(&payload)?);
+    }
+  }
+
+  Ok(match outcome.status {
+    engine::LoopStatus::Completed => exit::OK,
+    engine::LoopStatus::MaxIterations => exit::NOT_CONVERGED,
+    engine::LoopStatus::Interrupted => exit::POLICY_REFUSED,
+  })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
   let cli = Cli::parse();
-  let mut app = App::new()?;
-  if let Some(path) = cli.bench {
-    app.run_benchmark(&path).await
-  } else if let Some(name) = cli.run_task {
-    tasks::run_task(&mut app, &name).await
-  } else {
-    app.run().await
+
+  if let Some(dir) = &cli.cwd {
+    std::env::set_current_dir(dir).with_context(|| format!("cannot enter {}", dir.display()))?;
   }
+
+  // Every non-REPL entry point is headless: no TTY to prompt, and stdout is
+  // reserved for the result.
+  let headless = cli.prompt.is_some() || cli.bench.is_some() || cli.run_task.is_some();
+  ui::set_headless(headless);
+  if headless {
+    tools::approval::set_interaction(if cli.yes {
+      tools::approval::Interaction::AutoApprove
+    } else {
+      tools::approval::Interaction::AutoDeny
+    });
+  }
+  if cli.read_only {
+    tools::set_exec_mode(tools::ExecMode::ReadOnly);
+  }
+
+  let mut app = App::new()?;
+  if let Some(n) = cli.max_iter {
+    app.max_iter = n.max(1);
+  }
+
+  if let Some(prompt) = cli.prompt {
+    let prompt = match read_piped_stdin()? {
+      Some(stdin) => format!("{}\n\n--- piped stdin ---\n{}", prompt, stdin),
+      None => prompt,
+    };
+    let code = run_prompt(&mut app, prompt, cli.output).await?;
+    std::process::exit(code);
+  }
+  if let Some(path) = cli.bench {
+    return app.run_benchmark(&path).await;
+  }
+  if let Some(name) = cli.run_task {
+    return tasks::run_task(&mut app, &name).await;
+  }
+  app.run().await
 }

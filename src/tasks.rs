@@ -65,10 +65,11 @@ pub async fn run_task(app: &mut App, name: &str) -> Result<()> {
   let result = app.run_headless(&prompt, skill.as_ref()).await;
   env::set_current_dir(&original_cwd)?;
 
-  let (final_text, calls) = result?;
-  println!("[Task:{name}] 完成，{calls} 次模型调用。");
+  let outcome = result?;
+  let (final_text, calls) = (outcome.text, outcome.llm_calls);
+  eprintln!("[Task:{name}] 完成，{calls} 次模型调用。");
   if !final_text.trim().is_empty() {
-    println!("{}", final_text.trim());
+    eprintln!("{}", final_text.trim());
   }
   Ok(())
 }

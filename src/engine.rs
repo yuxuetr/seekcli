@@ -6,11 +6,36 @@
 use anyhow::Result;
 use colored::Colorize;
 use futures_util::StreamExt;
-use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
 use crate::api::{self, Message, StreamItem};
-use crate::{App, Skill, ThinkingMode, agent, subagents, tools};
+use crate::{App, Skill, ThinkingMode, agent, subagents, tools, ui};
+
+/// How a loop run ended. Distinguished because a caller needs to act on the
+/// difference: an unattended `-p` run must exit non-zero when the agent ran
+/// out of iterations, which is not the same as failing and not the same as
+/// succeeding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoopStatus {
+  Completed,
+  MaxIterations,
+  Interrupted,
+}
+
+pub(crate) struct LoopResult {
+  pub text: String,
+  pub messages: Vec<Message>,
+  pub status: LoopStatus,
+  pub iterations: usize,
+}
+
+/// A headless run's outcome, shaped for `--output json` and exit codes.
+pub(crate) struct HeadlessOutcome {
+  pub text: String,
+  pub status: LoopStatus,
+  pub iterations: usize,
+  pub llm_calls: u64,
+}
 
 impl App {
   pub(crate) async fn chat(&mut self, content: &str) -> Result<()> {
@@ -30,11 +55,11 @@ impl App {
     let mut messages = std::mem::take(&mut self.current_session.messages);
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
     let run_span = self.tracer.start_run();
-    let (_final_content, updated_messages) = self
+    let run = self
       .run_agent_loop(messages, tools, 0, agent::MAX_ITER, run_span)
       .await?;
     self.tracer.end(run_span);
-    self.current_session.messages = updated_messages;
+    self.current_session.messages = run.messages;
 
     if self.current_session.title == "New Chat" {
       self.current_session.title = content.chars().take(30).collect::<String>();
@@ -45,13 +70,13 @@ impl App {
 
     // Print the session bill (token accounting + CNY estimate).
     if !self.cost.is_empty() {
-      println!("{}", self.cost.summary());
+      eprintln!("{}", self.cost.summary());
     }
     // Flush the decision-path trace (no-op unless SEEKCLI_TRACE is set).
     match self.tracer.flush() {
-      Ok(Some(path)) => println!("{} trace written to {}", "[Trace]".dimmed(), path.display()),
+      Ok(Some(path)) => eprintln!("{} trace written to {}", "[Trace]".dimmed(), path.display()),
       Ok(None) => {}
-      Err(e) => println!("{} trace write failed: {}", "[Trace]".yellow(), e),
+      Err(e) => eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e),
     }
     Ok(())
   }
@@ -67,7 +92,7 @@ impl App {
     &mut self,
     prompt: &str,
     skill: Option<&Skill>,
-  ) -> Result<(String, u64)> {
+  ) -> Result<HeadlessOutcome> {
     let calls_before = self.cost.api_calls;
     let mut messages = Vec::new();
     if let Some(skill) = skill {
@@ -84,10 +109,15 @@ impl App {
     messages.push(Message::new_user_text(prompt.to_string()));
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
     let tools = skill.and_then(|s| s.to_api_tools());
-    let (final_content, _) = self
-      .run_agent_loop(messages, tools, 0, agent::MAX_ITER, None)
+    let run = self
+      .run_agent_loop(messages, tools, 0, self.max_iter, None)
       .await?;
-    Ok((final_content, self.cost.api_calls - calls_before))
+    Ok(HeadlessOutcome {
+      text: run.text,
+      status: run.status,
+      iterations: run.iterations,
+      llm_calls: self.cost.api_calls - calls_before,
+    })
   }
 
   /// Parse `{"subagent_type": "...", "prompt": "..."}` from a tool-call
@@ -214,7 +244,7 @@ impl App {
   /// `messages` (plus a bridge message, see `append_plan_with_bridge`) so the
   /// subsequent action call sees it. Called for the main agent only.
   async fn planning_phase(&self, messages: &mut Vec<Message>) -> Result<()> {
-    println!("\n{}", "[Plan] deliberating (tools withheld)...".dimmed());
+    eprintln!("\n{}", "[Plan] deliberating (tools withheld)...".dimmed());
     let mut planning_request = messages.clone();
     planning_request.push(Self::planning_only_directive());
     let mut stream = self
@@ -236,28 +266,28 @@ impl App {
       match item? {
         StreamItem::Reasoning(r) => {
           if !is_reasoning {
-            print!("\n{}", "Thinking: ".italic().bright_black());
+            ui::content(&format!("\n{}", "Thinking: ".italic().bright_black()));
             is_reasoning = true;
           }
-          print!("{}", r.italic().bright_black());
+          ui::content(&format!("{}", r.italic().bright_black()));
         }
         StreamItem::Content(c) => {
           if is_reasoning {
-            println!();
+            eprintln!();
             is_reasoning = false;
           }
-          print!("{}", c.dimmed());
+          ui::content(&format!("{}", c.dimmed()));
           plan.push_str(&c);
         }
         _ => {}
       }
-      io::stdout().flush()?;
+      ui::flush_content()?;
     }
-    println!();
+    eprintln!();
 
     let sanitized = Self::strip_fake_tool_syntax(&plan);
     if sanitized.len() != plan.len() {
-      println!(
+      eprintln!(
         "{}",
         "[Plan] discarded suspected fake tool-call syntax from plan text".yellow()
       );
@@ -382,7 +412,7 @@ impl App {
     depth: usize,
     max_iter: usize,
     parent_span: Option<usize>,
-  ) -> Result<(String, Vec<Message>)> {
+  ) -> Result<LoopResult> {
     if depth > agent::MAX_SUBAGENT_DEPTH {
       anyhow::bail!(
         "Max sub-agent depth ({}) exceeded",
@@ -399,6 +429,8 @@ impl App {
 
     let mut final_content = String::new();
     let mut completed = false;
+    let mut interrupted = false;
+    let mut iterations = 0usize;
     // Doom-loop detector — main agent only. Persists across iterations of this
     // chat turn so it can spot repeated tool-call trajectories.
     let mut reminder_injector = agent::reminders::ReminderInjector::new();
@@ -407,11 +439,13 @@ impl App {
     let mut plan_next = false;
 
     for iter in 0..max_iter {
+      iterations = iter + 1;
       // Top-of-iteration interrupt check (Ctrl-C between turns).
       if depth == 0 && self.interrupt.swap(false, Ordering::SeqCst) {
-        println!("\n{}", "[Agent] interrupted by user".yellow());
+        eprintln!("\n{}", "[Agent] interrupted by user".yellow());
         final_content = "[Interrupted by user]".to_string();
         completed = true;
+        interrupted = true;
         break;
       }
 
@@ -428,7 +462,7 @@ impl App {
         if let Err(e) =
           agent::compressor::maybe_compress(self.brain.as_ref(), &self.model, &mut messages).await
         {
-          println!(
+          eprintln!(
             "{} compression failed: {} (continuing without)",
             "[Memory]".yellow(),
             e
@@ -447,7 +481,7 @@ impl App {
         if macro_trigger || plan_next {
           let pspan = self.tracer.begin("planning", "two-stage", turn_span);
           if let Err(e) = self.planning_phase(&mut messages).await {
-            println!(
+            eprintln!(
               "{} planning phase failed: {} (continuing)",
               "[Plan]".yellow(),
               e
@@ -477,24 +511,24 @@ impl App {
         // Mid-stream interrupt check. Don't reset the flag here — let the
         // outer loop see it and exit cleanly.
         if depth == 0 && self.interrupt.load(Ordering::SeqCst) {
-          println!("\n{}", "[Agent] interrupted by user (mid-stream)".yellow());
+          eprintln!("\n{}", "[Agent] interrupted by user (mid-stream)".yellow());
           break;
         }
         match item? {
           StreamItem::Reasoning(r) => {
             if !is_reasoning {
-              print!("\n{}", "Thinking: ".italic().bright_black());
+              ui::content(&format!("\n{}", "Thinking: ".italic().bright_black()));
               is_reasoning = true;
             }
-            print!("{}", r.italic().bright_black());
+            ui::content(&format!("{}", r.italic().bright_black()));
             assistant_reasoning.push_str(&r);
           }
           StreamItem::Content(c) => {
             if is_reasoning {
-              println!();
+              eprintln!();
               is_reasoning = false;
             }
-            print!("{}", c);
+            ui::content(&c);
             assistant_content.push_str(&c);
           }
           StreamItem::ToolCall(tc) => {
@@ -510,7 +544,7 @@ impl App {
                 args.clone()
               }
             };
-            println!(
+            eprintln!(
               "\n{} Called: {} {}",
               "Agent:".cyan(),
               tc.function.name.yellow(),
@@ -519,11 +553,11 @@ impl App {
             tool_calls.push(tc);
           }
           StreamItem::Finish(reason) => {
-            println!();
+            eprintln!();
             if let Some(r) = reason
               && r == "length"
             {
-              println!("\n{}", "[Note: Max output limit reached.]".yellow());
+              eprintln!("\n{}", "[Note: Max output limit reached.]".yellow());
             }
           }
           StreamItem::Usage(info) => {
@@ -532,7 +566,7 @@ impl App {
               .checked_mul(100)
               .and_then(|n| n.checked_div(info.prompt_tokens))
               .unwrap_or(0);
-            println!(
+            eprintln!(
               "{} prompt={} (cache hit {}%, {} miss), completion={}",
               "[Usage]".dimmed(),
               info.prompt_tokens,
@@ -544,7 +578,7 @@ impl App {
             self.cost.record(&info);
           }
         }
-        io::stdout().flush()?;
+        ui::flush_content()?;
       }
       self.tracer.annotate(
         gen_span,
@@ -581,7 +615,7 @@ impl App {
         &format!("{} tool(s)", tool_calls.len()),
         turn_span,
       );
-      println!("\n{} Executing tools...", "Agent:".cyan());
+      eprintln!("\n{} Executing tools...", "Agent:".cyan());
       // Snapshot this turn's trajectory for doom-loop detection before the
       // calls are consumed below.
       let turn_tool_calls = tool_calls.clone();
@@ -598,7 +632,7 @@ impl App {
           .all(|tc| tools::registry::is_parallel_readonly(&tc.function.name));
 
       if parallelizable {
-        println!(
+        eprintln!(
           "{} {} read-only tools — running concurrently",
           "Agent:".cyan(),
           tool_calls.len()
@@ -671,7 +705,7 @@ impl App {
                     },
                   ];
 
-                  println!(
+                  eprintln!(
                     "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
                     "Agent:".magenta(),
                     template.name.green(),
@@ -687,8 +721,11 @@ impl App {
                   ))
                   .await
                   {
-                    Ok((res, _)) => {
-                      format!("Sub-agent '{}' completed. Summary:\n{}", template.name, res)
+                    Ok(run) => {
+                      format!(
+                        "Sub-agent '{}' completed. Summary:\n{}",
+                        template.name, run.text
+                      )
                     }
                     Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
                   }
@@ -730,7 +767,7 @@ impl App {
                       });
                       let skill_name = skill.name.clone();
                       self.current_skill = Some(skill);
-                      println!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
+                      eprintln!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
                       format!(
                         "Skill '{}' loaded. Its system prompt is now active. \
                        Continue the user's task in this persona.",
@@ -782,7 +819,7 @@ impl App {
       if depth == 0
         && let Some(reminder) = reminder_injector.observe(&turn_tool_calls)
       {
-        println!(
+        eprintln!(
           "\n{}",
           "[System Reminder] doom loop detected — intervening".red()
         );
@@ -794,20 +831,32 @@ impl App {
       plan_next = depth == 0 && turn_had_failure;
 
       self.tracer.end(turn_span);
-      println!("{} Returning tool results to model...", "Agent:".cyan());
+      eprintln!("{} Returning tool results to model...", "Agent:".cyan());
     }
 
     if !completed {
-      println!(
+      eprintln!(
         "\n{}",
-        format!("[Agent: reached max iterations ({})]", agent::MAX_ITER).yellow()
+        format!("[Agent: reached max iterations ({})]", max_iter).yellow()
       );
       if final_content.is_empty() {
-        final_content = format!("[Stopped at max iterations ({})]", agent::MAX_ITER);
+        final_content = format!("[Stopped at max iterations ({})]", max_iter);
       }
     }
 
-    Ok((final_content, messages))
+    let status = if interrupted {
+      LoopStatus::Interrupted
+    } else if completed {
+      LoopStatus::Completed
+    } else {
+      LoopStatus::MaxIterations
+    };
+    Ok(LoopResult {
+      text: final_content,
+      messages,
+      status,
+      iterations,
+    })
   }
 }
 

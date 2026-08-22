@@ -103,7 +103,7 @@ pub async fn maybe_compress(
   if changed {
     let after = estimate_bytes(messages);
     let reduction = 100usize.saturating_sub(after * 100 / total.max(1));
-    println!(
+    eprintln!(
       "{} staged compression: {} → {} bytes ({}% reduction, {} bytes masked)",
       "[Memory]".magenta(),
       total,
@@ -119,7 +119,7 @@ pub async fn maybe_compress(
   // Stage 3 (escalation): masking + truncation weren't enough — summarize the
   // far-history middle and replace it with a single synthetic system message.
   let middle: Vec<Message> = messages[head_end..tail_start].to_vec();
-  println!(
+  eprintln!(
     "{} escalating: summarizing {} middle messages...",
     "[Memory]".magenta(),
     middle.len()

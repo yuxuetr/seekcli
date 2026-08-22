@@ -8,7 +8,7 @@
 
 use colored::Colorize;
 use std::io::{self, Write};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Three-state outcome of classifying a shell command (harness allow/ask/deny).
 #[derive(Debug, Clone, PartialEq)]
@@ -144,9 +144,65 @@ pub fn is_dangerous(cmd: &str) -> Option<&'static str> {
   None
 }
 
+/// What to do with an `Ask` verdict when nobody is at the keyboard.
+///
+/// The default is `Deny` rather than `Prompt`-and-block: a headless run that
+/// stops on a hidden `[y/N]` looks exactly like a hung process, and an
+/// unattended launchd job would sit there until killed. Denying keeps the run
+/// moving and hands the model a `[USER DENIED]` it already knows how to react
+/// to. `AutoApprove` (`--yes`) exists for CI that has accepted the risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interaction {
+  Prompt,
+  AutoDeny,
+  AutoApprove,
+}
+
+static INTERACTION: Mutex<Interaction> = Mutex::new(Interaction::Prompt);
+
+pub fn set_interaction(mode: Interaction) {
+  if let Ok(mut guard) = INTERACTION.lock() {
+    *guard = mode;
+  }
+}
+
+fn interaction() -> Interaction {
+  match INTERACTION.lock() {
+    Ok(g) => *g,
+    // A poisoned lock means another thread panicked mid-update. Falling back
+    // to Prompt keeps the safe behaviour rather than silently auto-approving.
+    Err(_) => Interaction::Prompt,
+  }
+}
+
 /// Synchronously prompt the user for `y/N` confirmation on stderr.
 /// Returns `true` if and only if the user typed `y` or `Y`.
 pub fn confirm(cmd: &str, reason: &str) -> bool {
+  match interaction() {
+    Interaction::AutoDeny => {
+      eprintln!(
+        "{} {} (non-interactive: denied) $ {}",
+        "[!]".red().bold(),
+        reason.yellow(),
+        cmd
+      );
+      return false;
+    }
+    Interaction::AutoApprove => {
+      eprintln!(
+        "{} {} (--yes: approved) $ {}",
+        "[!]".yellow().bold(),
+        reason.yellow(),
+        cmd
+      );
+      return true;
+    }
+    Interaction::Prompt => {}
+  }
+  confirm_interactive(cmd, reason)
+}
+
+fn confirm_interactive(cmd: &str, reason: &str) -> bool {
   eprintln!();
   eprintln!(
     "{} Dangerous command intercepted: {}",
@@ -287,5 +343,30 @@ mod tests {
     // The deny/allow override paths are exercised by matches_any above; here
     // we just confirm the built-in tiers hold when no policy is present.
     assert!(matches!(classify("echo hi"), Decision::Allow));
+  }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+  use super::*;
+
+  /// The whole point of the non-interactive modes is that they never touch
+  /// stdin. If they did, a launchd job would hang on an invisible prompt.
+  #[test]
+  fn non_interactive_modes_resolve_without_reading_stdin() {
+    set_interaction(Interaction::AutoDeny);
+    assert!(!confirm("rm -rf /", "test"));
+
+    set_interaction(Interaction::AutoApprove);
+    assert!(confirm("rm -rf /", "test"));
+
+    set_interaction(Interaction::Prompt);
+    assert_eq!(interaction(), Interaction::Prompt);
+  }
+
+  #[test]
+  fn default_is_prompt_so_the_repl_keeps_asking() {
+    set_interaction(Interaction::Prompt);
+    assert_eq!(interaction(), Interaction::Prompt);
   }
 }

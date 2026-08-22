@@ -304,7 +304,7 @@ mod tests {
     let _ = fs::write(root.join(".gitignore"), "/target\n");
     let _ = fs::write(
       root.join("src/main.rs"),
-      "fn main() {\n  println!(\"hi\");\n}\n",
+      "fn main() {\n  eprintln!(\"hi\");\n}\n",
     );
     let _ = fs::write(root.join("src/lib.rs"), "pub fn helper() {}\n");
     let _ = fs::write(root.join("README.md"), "# demo\nfn main is in src\n");
