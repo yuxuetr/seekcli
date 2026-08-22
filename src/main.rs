@@ -4,7 +4,6 @@ use colored::*;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,17 +90,7 @@ impl App {
     let config = loaded.config;
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
-    let deepseek_key = env::var("DEEPSEEK_API_KEY").context("Please set DEEPSEEK_API_KEY")?;
-    let brain: Box<dyn LlmProvider> = match config.brain.provider.as_str() {
-      "anthropic" => Box::new(api::AnthropicProvider::new(
-        deepseek_key,
-        api::AnthropicProvider::default_base_url(),
-      )),
-      _ => Box::new(api::OpenAiProvider::new(
-        deepseek_key,
-        api::OpenAiProvider::default_base_url(),
-      )),
-    };
+    let brain = api::build_provider(&config)?;
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();

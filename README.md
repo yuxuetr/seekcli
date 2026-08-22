@@ -61,10 +61,34 @@ cargo install --path .
 
 ### 环境变量
 ```bash
-export DEEPSEEK_API_KEY="your_key"        # 必选
+export DEEPSEEK_API_KEY="your_key"        # 必选（默认内置端点从这里取 key）
 export DEEPSEEK_API_BASE="..."            # 可选，覆盖 OpenAI 兼容 endpoint
 export DEEPSEEK_ANTHROPIC_BASE="..."      # 可选，覆盖 Anthropic 兼容 endpoint
 ```
+
+### 指向任意 OpenAI 兼容端点
+```toml
+[brain]
+provider = "local"
+
+[[provider]]
+name     = "local"
+wire     = "openai"                       # openai | anthropic
+base_url = "http://127.0.0.1:8000/v1"
+api_key  = "env:LOCAL_API_KEY"            # 只接受 env: / file:，字面量 key 会被拒绝
+```
+
+### 重试与超时
+```toml
+[resilience]
+max_attempts = 4                          # 429 / 408 / 5xx / 传输错误才重试
+base_delay_ms = 500                       # 指数退避，尊重 Retry-After
+max_delay_secs = 30
+request_timeout_secs = 120                # 仅到响应头，不限制生成时长
+stream_idle_timeout_secs = 60             # 两个 chunk 之间的静默上限
+```
+只重试「返回流之前」的那次调用；一旦开始出字节就永不重试，避免重放已产生副作用的
+工具调用——中途失败交给 L1 的 Error Recovery。
 
 ### 配置文件
 ```

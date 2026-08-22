@@ -116,22 +116,40 @@
 
 ---
 
-### 阶段二十二：L0 韧性与 provider 配置化
+### ✅ 阶段二十二：L0 韧性与 provider 配置化
 
 *目标：长任务不再被一个 429 打断；能指向任意 OpenAI 兼容端点。*
 *来源：L0-1 / L0-2 / L0-3。设计：[L0 §4.1-4.2](docs/architecture/L0-llm-substrate.md#4-目标设计)*
 
-- [ ] **22.1 provider 配置化**（L0-1）
-    - [ ] `config.toml` 改为 `[[provider]]` 数组 + `[brain] active`。
-    - [ ] `api_key` 支持 `env:VAR` / `file:PATH` 前缀（为 keychain 留位置，不引入新依赖）。
-    - [ ] `api::build_provider(&ProviderConfig)` 取代 `App::new` 里的硬编码分支。
-    - [ ] **仍不做运行时多模型路由**——见 [design-principles](docs/architecture/design-principles.md)。
-- [ ] **22.2 韧性装饰器**（L0-2 / L0-3）
-    - [ ] `api/resilience.rs::Resilient<P>` 包装任意 `LlmProvider`，与 CostTracker 同一手法。
-    - [ ] 指数退避 + jitter；429 优先尊重 `Retry-After`；4xx（非 429）立即失败。
-    - [ ] `request_timeout`（默认 120s）+ `stream_idle_timeout`（默认 60s）。
-    - [ ] **流中途断开且已产出 tool_calls 时不重试**——重试会重复副作用，交给 L1 Error Recovery。
-- [ ] **22.3 单测**：退避序列 / 各错误码的重试判据 / 超时触发。
+- [x] **22.1 provider 配置化**（L0-1）
+    - [x] `config.toml` 新增 `[[provider]]` 端点表；`[brain] provider` 指向其中一项。
+          **保持向后兼容**：写着 `provider = "openai"/"anthropic"` 的旧配置，
+          在没有同名 `[[provider]]` 时合成内置 DeepSeek 端点，行为不变。
+          （未采用设计稿里的 `[brain] active`——那会破坏 `/model flash|pro` 的既有语义。）
+    - [x] `api_key` 只接受 `env:VAR` / `file:PATH`；**字面量 key 直接拒绝启动**——
+          配置文件会被误提交，启动失败远比泄露凭证便宜。`file:` 支持 `~/` 展开，零新依赖。
+    - [x] `api::build_provider(&Config)` 取代 `App::new` 里的硬编码分支；
+          `DEEPSEEK_API_BASE` / `DEEPSEEK_ANTHROPIC_BASE` 环境变量覆盖能力保留。
+    - [x] 未知 wire 在解析期报错（而非首次请求时）；未知 provider 名报错时列出可用名字。
+    - [x] **仍不做运行时多模型路由**。
+- [x] **22.2 韧性装饰器**（L0-2 / L0-3）
+    - [x] `api/resilience.rs::Resilient` 包装 `Box<dyn LlmProvider>`，与 CostTracker 同一手法，
+          `run_agent_loop` 零改动。
+    - [x] 类型化 `LlmError{Status, Transport}` 取代原先的 `bail!("API Error {status}")` 字符串——
+          否则装饰器无法判断该不该重试。
+    - [x] 指数退避 + **确定性** jitter（随机 jitter 会让退避序列不可测试）；
+          429/408/5xx/传输错误重试，其余 4xx 立即失败，**未分类错误也不重试**。
+    - [x] `Retry-After` 只解析 delta-seconds 形式，且与退避共用 `max_delay` 上限——
+          服务端要求等一小时不能把 agent 挂住。
+    - [x] `request_timeout`（120s，仅到响应头）+ `stream_idle_timeout`（60s，两 chunk 之间）。
+    - [x] **只重试返回流之前的那次调用**，一旦出字节就永不重试——判断「已产出 tool_calls」
+          需缓冲整条流，收益不抵成本；中途失败交给 L1 Error Recovery。
+    - [x] 重试时打印一行可见提示（降级不静默）。
+- [x] **22.3 测试**（16 个）：重试判据分类 / 未分类错误不重试 / 退避指数增长与封顶 /
+      `Retry-After` 覆盖且受限 / 头部解析 / **真正驱动装饰器**的四个用例
+      （瞬时失败重试成功且计数=3、400 立即失败且计数=1、达上限停止、
+      静默流触发 idle 超时而非永久挂起）。
+    - [x] 真实 API 端到端验证：`--run-task reminders` 4 次调用跑通，cache hit 97%。
 
 **验收**：断网或打 429 时 agent 循环不中断，日志显示退避重试；
 `config.toml` 指向本地 vLLM 可正常对话；服务端不返回数据时按超时报错而非永久挂起。

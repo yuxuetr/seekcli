@@ -31,6 +31,14 @@ const LEGACY_CONFIG_FILE: &str = "config.toml";
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Config {
   pub brain: BrainConfig,
+  /// Named endpoints `brain.provider` can point at. Absent in older config
+  /// files, where `brain.provider` is the bare wire name and the built-in
+  /// DeepSeek endpoint is synthesized — see `resolve_provider`.
+  #[serde(default, rename = "provider")]
+  pub providers: Vec<ProviderConfig>,
+  /// Retry / timeout tuning. Absent means the built-in defaults.
+  #[serde(default)]
+  pub resilience: ResilienceConfig,
   /// Optional shell-command permission policy. Absent in older config files,
   /// so it defaults to empty (built-in rules only).
   #[serde(default)]
@@ -45,10 +53,154 @@ pub struct Config {
 pub struct BrainConfig {
   pub flash_model: String,
   pub pro_model: String,
-  /// LLM wire protocol: "openai" (DeepSeek /chat/completions) or "anthropic"
-  /// (DeepSeek /anthropic). Defaults to openai for older config files.
+  /// Which endpoint to talk to. Either the `name` of a `[[provider]]` entry,
+  /// or — for configs written before `[[provider]]` existed — the bare wire
+  /// name "openai" / "anthropic", which resolves to the built-in DeepSeek
+  /// endpoint for that wire.
   #[serde(default = "default_provider")]
   pub provider: String,
+}
+
+/// One named endpoint.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ProviderConfig {
+  pub name: String,
+  /// Wire protocol: "openai" (`/chat/completions`) or "anthropic" (`/v1/messages`).
+  pub wire: String,
+  pub base_url: String,
+  /// Where the key lives: `env:VAR` or `file:PATH`.
+  ///
+  /// A literal key is rejected on purpose. Config files get committed by
+  /// accident, and a rejected startup is a far cheaper failure than a leaked
+  /// credential. The prefix form also leaves room for `keychain:` later
+  /// without another schema change.
+  pub api_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ResilienceConfig {
+  #[serde(default = "default_max_attempts")]
+  pub max_attempts: u32,
+  #[serde(default = "default_base_delay_ms")]
+  pub base_delay_ms: u64,
+  #[serde(default = "default_max_delay_secs")]
+  pub max_delay_secs: u64,
+  #[serde(default = "default_request_timeout_secs")]
+  pub request_timeout_secs: u64,
+  #[serde(default = "default_stream_idle_timeout_secs")]
+  pub stream_idle_timeout_secs: u64,
+}
+
+fn default_max_attempts() -> u32 {
+  4
+}
+fn default_base_delay_ms() -> u64 {
+  500
+}
+fn default_max_delay_secs() -> u64 {
+  30
+}
+fn default_request_timeout_secs() -> u64 {
+  120
+}
+fn default_stream_idle_timeout_secs() -> u64 {
+  60
+}
+
+impl Default for ResilienceConfig {
+  fn default() -> Self {
+    Self {
+      max_attempts: default_max_attempts(),
+      base_delay_ms: default_base_delay_ms(),
+      max_delay_secs: default_max_delay_secs(),
+      request_timeout_secs: default_request_timeout_secs(),
+      stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
+    }
+  }
+}
+
+/// Built-in DeepSeek endpoints, kept so a config that predates `[[provider]]`
+/// (or one that never needed a custom endpoint) keeps working untouched.
+fn builtin_provider(wire: &str) -> Option<ProviderConfig> {
+  let base_url = match wire {
+    "openai" => std::env::var("DEEPSEEK_API_BASE")
+      .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string()),
+    "anthropic" => std::env::var("DEEPSEEK_ANTHROPIC_BASE")
+      .unwrap_or_else(|_| "https://api.deepseek.com/anthropic".to_string()),
+    _ => return None,
+  };
+  Some(ProviderConfig {
+    name: wire.to_string(),
+    wire: wire.to_string(),
+    base_url,
+    api_key: "env:DEEPSEEK_API_KEY".to_string(),
+  })
+}
+
+impl Config {
+  /// Resolve `brain.provider` to a concrete endpoint.
+  pub fn resolve_provider(&self) -> Result<ProviderConfig> {
+    if let Some(p) = self
+      .providers
+      .iter()
+      .find(|p| p.name == self.brain.provider)
+    {
+      if builtin_provider(&p.wire).is_none() {
+        anyhow::bail!(
+          "provider `{}` has unknown wire `{}`; expected \"openai\" or \"anthropic\"",
+          p.name,
+          p.wire
+        );
+      }
+      return Ok(p.clone());
+    }
+    builtin_provider(&self.brain.provider).ok_or_else(|| {
+      let known: Vec<&str> = self.providers.iter().map(|p| p.name.as_str()).collect();
+      anyhow::anyhow!(
+        "brain.provider = `{}` matches no [[provider]] entry {:?} and is not a \
+         built-in wire name (\"openai\" / \"anthropic\")",
+        self.brain.provider,
+        known
+      )
+    })
+  }
+}
+
+impl ProviderConfig {
+  /// Read the key from wherever `api_key` points.
+  pub fn resolve_key(&self) -> Result<String> {
+    if let Some(var) = self.api_key.strip_prefix("env:") {
+      return std::env::var(var)
+        .with_context(|| format!("provider `{}`: ${} is not set", self.name, var));
+    }
+    if let Some(path) = self.api_key.strip_prefix("file:") {
+      let expanded = shellexpand_home(path);
+      let raw = fs::read_to_string(&expanded).with_context(|| {
+        format!(
+          "provider `{}`: cannot read {}",
+          self.name,
+          expanded.display()
+        )
+      })?;
+      return Ok(raw.trim().to_string());
+    }
+    anyhow::bail!(
+      "provider `{}`: api_key must be `env:VAR` or `file:PATH`, not a literal key \
+       (a key in a config file gets committed by accident)",
+      self.name
+    )
+  }
+}
+
+/// Minimal `~` expansion so `file:~/.config/key` works without a new dependency.
+fn shellexpand_home(path: &str) -> PathBuf {
+  match path.strip_prefix("~/") {
+    Some(rest) => match std::env::var("HOME") {
+      Ok(home) => PathBuf::from(home).join(rest),
+      Err(_) => PathBuf::from(path),
+    },
+    None => PathBuf::from(path),
+  }
 }
 
 /// User-extensible allow/deny lists for the three-state command policy.
@@ -85,6 +237,8 @@ impl Default for Config {
         pro_model: "deepseek-v4-pro".to_string(),
         provider: default_provider(),
       },
+      providers: Vec::new(),
+      resilience: ResilienceConfig::default(),
       security: SecurityConfig::default(),
       tasks: TasksConfig::default(),
     }
@@ -267,11 +421,32 @@ fn write_default_config(path: &Path) -> Result<()> {
      # An override file only needs the keys it changes.\n\
      \n\
      [brain]\n\
-     # Wire protocol: \"openai\" (DeepSeek /chat/completions)\n\
-     #             or \"anthropic\" (DeepSeek /anthropic)\n\
+     # Either a [[provider]] name below, or the bare wire name\n\
+     # \"openai\" / \"anthropic\" for the built-in DeepSeek endpoints.\n\
      provider = \"{provider}\"\n\
      flash_model = \"{flash}\"\n\
      pro_model = \"{pro}\"\n\
+     \n\
+     # Named endpoints. Omit this entirely to use the built-in DeepSeek ones.\n\
+     # api_key must be `env:VAR` or `file:PATH` -- a literal key is refused,\n\
+     # because config files get committed by accident.\n\
+     #\n\
+     # [[provider]]\n\
+     # name     = \"local\"\n\
+     # wire     = \"openai\"            # openai | anthropic\n\
+     # base_url = \"http://127.0.0.1:8000/v1\"\n\
+     # api_key  = \"env:LOCAL_API_KEY\"\n\
+     \n\
+     # Retry / timeout. Shown with the built-in defaults.\n\
+     # Only the initial request is retried; once the stream is flowing a\n\
+     # failure goes to L1 error recovery instead, so a partially-applied\n\
+     # tool call is never replayed.\n\
+     [resilience]\n\
+     max_attempts = {attempts}\n\
+     base_delay_ms = {base_delay}\n\
+     max_delay_secs = {max_delay}\n\
+     request_timeout_secs = {req_timeout}\n\
+     stream_idle_timeout_secs = {idle_timeout}\n\
      \n\
      # Shell-command permission policy. Patterns are matched case-insensitively\n\
      # as substrings. Priority: deny > built-in deny > allow > built-in ask.\n\
@@ -288,6 +463,11 @@ fn write_default_config(path: &Path) -> Result<()> {
     provider = d.brain.provider,
     flash = d.brain.flash_model,
     pro = d.brain.pro_model,
+    attempts = d.resilience.max_attempts,
+    base_delay = d.resilience.base_delay_ms,
+    max_delay = d.resilience.max_delay_secs,
+    req_timeout = d.resilience.request_timeout_secs,
+    idle_timeout = d.resilience.stream_idle_timeout_secs,
   );
   fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }
@@ -461,5 +641,138 @@ mod tests {
       Err(e) => format!("{:#}", e),
     };
     assert!(err.contains("config.toml"), "unhelpful error: {}", err);
+  }
+}
+
+#[cfg(test)]
+mod provider_tests {
+  use super::*;
+
+  fn base() -> Config {
+    Config::default()
+  }
+
+  #[test]
+  fn legacy_bare_wire_name_still_resolves_to_the_builtin_endpoint() {
+    // Configs written before [[provider]] existed say provider = "openai".
+    let mut c = base();
+    c.brain.provider = "openai".into();
+    let p = match c.resolve_provider() {
+      Ok(p) => p,
+      Err(e) => panic!("legacy config must keep working: {}", e),
+    };
+    assert_eq!(p.wire, "openai");
+    assert!(p.base_url.contains("deepseek"), "got {}", p.base_url);
+    assert_eq!(p.api_key, "env:DEEPSEEK_API_KEY");
+
+    c.brain.provider = "anthropic".into();
+    match c.resolve_provider() {
+      Ok(p) => assert_eq!(p.wire, "anthropic"),
+      Err(e) => panic!("legacy anthropic must keep working: {}", e),
+    }
+  }
+
+  #[test]
+  fn named_entry_takes_precedence_and_can_point_anywhere() {
+    let mut c = base();
+    c.brain.provider = "local".into();
+    c.providers.push(ProviderConfig {
+      name: "local".into(),
+      wire: "openai".into(),
+      base_url: "http://127.0.0.1:8000/v1".into(),
+      api_key: "env:LOCAL_KEY".into(),
+    });
+    let p = match c.resolve_provider() {
+      Ok(p) => p,
+      Err(e) => panic!("resolve failed: {}", e),
+    };
+    assert_eq!(p.base_url, "http://127.0.0.1:8000/v1");
+  }
+
+  #[test]
+  fn unknown_provider_name_lists_what_was_available() {
+    let mut c = base();
+    c.brain.provider = "typo".into();
+    c.providers.push(ProviderConfig {
+      name: "local".into(),
+      wire: "openai".into(),
+      base_url: "http://x".into(),
+      api_key: "env:K".into(),
+    });
+    let err = match c.resolve_provider() {
+      Ok(_) => panic!("expected an error"),
+      Err(e) => format!("{:#}", e),
+    };
+    assert!(
+      err.contains("local"),
+      "error should name known providers: {}",
+      err
+    );
+  }
+
+  #[test]
+  fn unknown_wire_is_rejected_at_resolve_time_not_at_first_request() {
+    let mut c = base();
+    c.brain.provider = "weird".into();
+    c.providers.push(ProviderConfig {
+      name: "weird".into(),
+      wire: "grpc".into(),
+      base_url: "http://x".into(),
+      api_key: "env:K".into(),
+    });
+    assert!(c.resolve_provider().is_err());
+  }
+
+  #[test]
+  fn literal_api_key_is_refused() {
+    let p = ProviderConfig {
+      name: "oops".into(),
+      wire: "openai".into(),
+      base_url: "http://x".into(),
+      api_key: "sk-realkeyinconfigfile".into(),
+    };
+    let err = match p.resolve_key() {
+      Ok(_) => panic!("a literal key must not be accepted"),
+      Err(e) => format!("{:#}", e),
+    };
+    assert!(
+      err.contains("env:"),
+      "error should show the accepted forms: {}",
+      err
+    );
+  }
+
+  #[test]
+  fn file_backed_key_is_read_and_trimmed() {
+    let dir = std::env::temp_dir().join("seekcli-key-test");
+    let _ = fs::create_dir_all(&dir);
+    let key_path = dir.join("key");
+    let _ = fs::write(&key_path, "  sk-from-file\n");
+    let p = ProviderConfig {
+      name: "f".into(),
+      wire: "openai".into(),
+      base_url: "http://x".into(),
+      api_key: format!("file:{}", key_path.display()),
+    };
+    match p.resolve_key() {
+      Ok(k) => assert_eq!(k, "sk-from-file"),
+      Err(e) => panic!("resolve_key failed: {}", e),
+    }
+  }
+
+  #[test]
+  fn missing_env_var_names_the_provider_and_the_variable() {
+    let p = ProviderConfig {
+      name: "myprov".into(),
+      wire: "openai".into(),
+      base_url: "http://x".into(),
+      api_key: "env:SEEKCLI_DEFINITELY_UNSET_VAR".into(),
+    };
+    let err = match p.resolve_key() {
+      Ok(_) => panic!("expected an error"),
+      Err(e) => format!("{:#}", e),
+    };
+    assert!(err.contains("myprov"), "got: {}", err);
+    assert!(err.contains("SEEKCLI_DEFINITELY_UNSET_VAR"), "got: {}", err);
   }
 }

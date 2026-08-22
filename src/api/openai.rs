@@ -11,7 +11,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::Client;
 
 use super::{
-  FunctionCall, LlmProvider, Message, StreamItem, StreamResult, Tool, ToolCall, UsageInfo,
+  FunctionCall, LlmError, LlmProvider, Message, StreamItem, StreamResult, Tool, ToolCall, UsageInfo,
 };
 
 pub struct OpenAiProvider {
@@ -82,11 +82,6 @@ impl OpenAiProvider {
       base_url,
     }
   }
-
-  /// Default DeepSeek OpenAI-compatible endpoint, overridable via env.
-  pub fn default_base_url() -> String {
-    std::env::var("DEEPSEEK_API_BASE").unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string())
-  }
 }
 
 #[async_trait::async_trait]
@@ -126,12 +121,25 @@ impl LlmProvider for OpenAiProvider {
       .header("Authorization", format!("Bearer {}", self.api_key))
       .json(&body)
       .send()
-      .await?;
+      .await
+      .map_err(|e| LlmError::Transport {
+        provider: "openai",
+        source: e.to_string(),
+      })?;
 
     if !resp.status().is_success() {
-      let status = resp.status();
-      let err_body = resp.text().await?;
-      anyhow::bail!("API Error {}: {}", status, err_body);
+      let status = resp.status().as_u16();
+      let retry_after = super::parse_retry_after(resp.headers());
+      let body = resp.text().await.unwrap_or_default();
+      return Err(
+        LlmError::Status {
+          provider: "openai",
+          status,
+          retry_after,
+          body,
+        }
+        .into(),
+      );
     }
 
     let stream = resp.bytes_stream();

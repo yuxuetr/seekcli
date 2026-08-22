@@ -41,12 +41,6 @@ impl AnthropicProvider {
       base_url,
     }
   }
-
-  /// Default DeepSeek Anthropic-compatible endpoint, overridable via env.
-  pub fn default_base_url() -> String {
-    std::env::var("DEEPSEEK_ANTHROPIC_BASE")
-      .unwrap_or_else(|_| "https://api.deepseek.com/anthropic".to_string())
-  }
 }
 
 /// Translate the neutral schema into an Anthropic Messages request body.
@@ -185,12 +179,25 @@ impl LlmProvider for AnthropicProvider {
       .header("content-type", "application/json")
       .json(&body)
       .send()
-      .await?;
+      .await
+      .map_err(|e| super::LlmError::Transport {
+        provider: "anthropic",
+        source: e.to_string(),
+      })?;
 
     if !resp.status().is_success() {
-      let status = resp.status();
-      let err_body = resp.text().await?;
-      anyhow::bail!("Anthropic API Error {}: {}", status, err_body);
+      let status = resp.status().as_u16();
+      let retry_after = super::parse_retry_after(resp.headers());
+      let body = resp.text().await.unwrap_or_default();
+      return Err(
+        super::LlmError::Status {
+          provider: "anthropic",
+          status,
+          retry_after,
+          body,
+        }
+        .into(),
+      );
     }
 
     Ok(Box::pin(EventState {

@@ -10,6 +10,7 @@
 //! it directly; the Anthropic provider translates explicitly.
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::Stream;
@@ -17,9 +18,88 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod openai;
+pub mod resilience;
 
 pub use anthropic::AnthropicProvider;
 pub use openai::OpenAiProvider;
+pub use resilience::{Resilient, RetryPolicy};
+
+/// A provider failure the retry layer can reason about.
+///
+/// Providers used to `bail!("API Error {status}: {body}")`, which reads fine
+/// in a log but is opaque to a decorator: "should I retry?" depends on the
+/// status code, and recovering it from a formatted string is guesswork. The
+/// variants below carry exactly what `resilience::is_retryable` needs.
+#[derive(Debug)]
+pub enum LlmError {
+  /// The server answered, but not with 2xx.
+  Status {
+    provider: &'static str,
+    status: u16,
+    /// Parsed `Retry-After`, when the server told us how long to wait.
+    retry_after: Option<Duration>,
+    body: String,
+  },
+  /// Nothing came back: connect failure, TLS error, timeout.
+  Transport {
+    provider: &'static str,
+    source: String,
+  },
+}
+
+impl std::fmt::Display for LlmError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Status {
+        provider,
+        status,
+        body,
+        ..
+      } => write!(f, "{} API error {}: {}", provider, status, body),
+      Self::Transport { provider, source } => {
+        write!(f, "{} transport error: {}", provider, source)
+      }
+    }
+  }
+}
+
+impl std::error::Error for LlmError {}
+
+/// Build the configured endpoint, wrapped in the retry/timeout decorator.
+///
+/// Lives here rather than in `App::new` so the wire-format branch, the key
+/// lookup and the resilience wrapping stay in one place — adding a third wire
+/// should touch this function and nothing else.
+pub fn build_provider(config: &crate::config::Config) -> Result<Box<dyn LlmProvider>> {
+  let endpoint = config.resolve_provider()?;
+  let key = endpoint.resolve_key()?;
+  let inner: Box<dyn LlmProvider> = match endpoint.wire.as_str() {
+    "anthropic" => Box::new(AnthropicProvider::new(key, endpoint.base_url.clone())),
+    _ => Box::new(OpenAiProvider::new(key, endpoint.base_url.clone())),
+  };
+  let r = &config.resilience;
+  let policy = RetryPolicy {
+    max_attempts: r.max_attempts.max(1),
+    base_delay: Duration::from_millis(r.base_delay_ms),
+    max_delay: Duration::from_secs(r.max_delay_secs),
+    request_timeout: Duration::from_secs(r.request_timeout_secs),
+    stream_idle_timeout: Duration::from_secs(r.stream_idle_timeout_secs),
+  };
+  Ok(Box::new(Resilient::new(inner, policy)))
+}
+
+/// Read `Retry-After` (delta-seconds form only; the HTTP-date form is rare in
+/// practice and parsing it would pull in a date parser for little gain).
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+  headers
+    .get(reqwest::header::RETRY_AFTER)?
+    .to_str()
+    .ok()?
+    .trim()
+    .parse::<u64>()
+    .ok()
+    .map(Duration::from_secs)
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
