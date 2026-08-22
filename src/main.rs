@@ -20,6 +20,7 @@ mod history;
 mod observability;
 mod skills;
 mod subagents;
+mod tasks;
 mod tools;
 
 use completer::CmdCompleter;
@@ -128,6 +129,9 @@ impl App {
         .bold()
         .green()
     );
+    if let Some(notice) = tasks::pending_digest_notice(&self.config) {
+      println!("{}", notice.yellow());
+    }
 
     let completer = CmdCompleter {
       skills_dir: self.skill_manager.skills_dir().clone(),
@@ -185,6 +189,11 @@ struct Cli {
   /// Run a benchmark testsuite (JSON) headlessly instead of the REPL.
   #[arg(long, value_name = "TESTSUITE.json")]
   bench: Option<PathBuf>,
+
+  /// Run a named scheduled task (e.g. "reminders") headlessly instead of the
+  /// REPL. Intended for launchd/cron invocation, not interactive use.
+  #[arg(long, value_name = "TASK_NAME")]
+  run_task: Option<String>,
 }
 
 /// Background task that flips `flag` to `true` on each Ctrl-C. Rustyline
@@ -208,8 +217,11 @@ fn spawn_interrupt_watcher(flag: Arc<AtomicBool>) {
 async fn main() -> Result<()> {
   let cli = Cli::parse();
   let mut app = App::new()?;
-  match cli.bench {
-    Some(path) => app.run_benchmark(&path).await,
-    None => app.run().await,
+  if let Some(path) = cli.bench {
+    app.run_benchmark(&path).await
+  } else if let Some(name) = cli.run_task {
+    tasks::run_task(&mut app, &name).await
+  } else {
+    app.run().await
   }
 }

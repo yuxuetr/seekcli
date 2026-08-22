@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.seekcli.reminders</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/seekcli</string>
+    <string>--run-task</string>
+    <string>reminders</string>
+  </array>
+
+  <!-- 必须设置：Config::load() 是相对当前 cwd 读 ./config.toml 的，这里要指向
+       你放 config.toml（模型/安全策略配置）的目录，不是 ~/.seekcli/tasks。 -->
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME</string>
+
+  <!-- launchd 不继承你的 shell profile，DEEPSEEK_API_KEY 等必须在这里显式声明。 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DEEPSEEK_API_KEY</key>
+    <string>sk-REPLACE_ME</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+
+  <!-- 每 15 分钟运行一次 -->
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/seekcli-reminders.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/seekcli-reminders.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -11,6 +11,19 @@ pub struct Config {
   /// so it defaults to empty (built-in rules only).
   #[serde(default)]
   pub security: SecurityConfig,
+  /// L8 scheduled-task state directory (reminders.md/todos.md/digest/).
+  /// Absent in older config files, so it defaults to `~/.seekcli/tasks`.
+  #[serde(default)]
+  pub tasks: TasksConfig,
+}
+
+/// Where `tasks::run_task` looks for reminders.md/todos.md/digest/. Optional
+/// override so the user can point it at a synced location (e.g. iCloud
+/// Drive) instead of the default `~/.seekcli/tasks`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct TasksConfig {
+  #[serde(default)]
+  pub dir: Option<String>,
 }
 
 /// User-extensible allow/deny lists for the three-state command policy.
@@ -63,6 +76,7 @@ impl Config {
           vlm_model: "step-1.5v-mini".to_string(),
         },
         security: SecurityConfig::default(),
+        tasks: TasksConfig::default(),
       };
       let toml_str = toml::to_string_pretty(&default_config)?;
       fs::write(config_path, toml_str)?;

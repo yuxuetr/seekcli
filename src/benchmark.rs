@@ -55,11 +55,11 @@ impl App {
 
       // AgentRun: tools resolve against process cwd, so sandbox by chdir.
       env::set_current_dir(&testbed)?;
-      let run = self.run_headless(&task.prompt).await;
+      let run = self.run_headless(&task.prompt, None).await;
       env::set_current_dir(&original_cwd)?;
 
       let llm_calls = match run {
-        Ok(c) => c,
+        Ok((_final_text, calls)) => calls,
         Err(e) => {
           println!("{} agent error: {}", "[Bench]".red(), e);
           report.push(TaskResult {

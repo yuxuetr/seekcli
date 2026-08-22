@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
 use crate::api::{self, Message, StreamItem};
-use crate::{App, ThinkingMode, agent, subagents, tools};
+use crate::{App, Skill, ThinkingMode, agent, subagents, tools};
 
 impl App {
   pub(crate) async fn chat(&mut self, content: &str) -> Result<()> {
@@ -57,16 +57,37 @@ impl App {
   }
 
   /// Run the agent headlessly on a single prompt in the current working
-  /// directory, returning the LLM-call count consumed (proxy for turns). Used
-  /// by the benchmark runner; no session save, no REPL state.
-  pub(crate) async fn run_headless(&mut self, prompt: &str) -> Result<u64> {
+  /// directory, optionally with a Skill activated (its system prompt and
+  /// tools merged in exactly as `commands::activate_skill` does for the
+  /// interactive path), returning the final assistant text plus the LLM-call
+  /// count consumed (proxy for turns). Used by the benchmark runner (`skill:
+  /// None`, text discarded) and by `tasks::run_task` (L8); no session save,
+  /// no REPL state.
+  pub(crate) async fn run_headless(
+    &mut self,
+    prompt: &str,
+    skill: Option<&Skill>,
+  ) -> Result<(String, u64)> {
     let calls_before = self.cost.api_calls;
-    let mut messages = vec![Message::new_user_text(prompt.to_string())];
+    let mut messages = Vec::new();
+    if let Some(skill) = skill {
+      messages.push(Message::Simple {
+        role: "system".to_string(),
+        content: format!(
+          "# Activated Skill: {}\n\n{}",
+          skill.name, skill.system_prompt
+        ),
+        reasoning_content: None,
+        tool_calls: None,
+      });
+    }
+    messages.push(Message::new_user_text(prompt.to_string()));
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
-    self
-      .run_agent_loop(messages, None, 0, agent::MAX_ITER, None)
+    let tools = skill.and_then(|s| s.to_api_tools());
+    let (final_content, _) = self
+      .run_agent_loop(messages, tools, 0, agent::MAX_ITER, None)
       .await?;
-    Ok(self.cost.api_calls - calls_before)
+    Ok((final_content, self.cost.api_calls - calls_before))
   }
 
   /// Parse `{"subagent_type": "...", "prompt": "..."}` from a tool-call
@@ -109,17 +130,98 @@ impl App {
       || result.contains("' failed:")
   }
 
+  /// Append the Two-Stage plan as an assistant message, followed by a
+  /// synthetic user "go" message.
+  ///
+  /// Without the bridge, `messages` would end in role `assistant` right
+  /// before the next (tool-enabled) completion request — every other turn in
+  /// this loop ends in `tool` or `user`. That shape is out-of-distribution
+  /// for chat-tuned models: two consecutive assistant turns with no
+  /// intervening user/tool message reads as "continue your own utterance",
+  /// not "your turn to decide", and empirically DeepSeek sometimes responds
+  /// by narrating a fake tool call as plain text instead of emitting a real
+  /// structured `tool_calls` — silently dropped (dispatcher sees zero calls),
+  /// no error, model reports false success. Restoring the normal
+  /// assistant→user→assistant alternation (same idiom as the doom-loop
+  /// reminder in `agent::reminders`) fixes it.
+  fn append_plan_with_bridge(messages: &mut Vec<Message>, plan: String) {
+    if plan.trim().is_empty() {
+      return;
+    }
+    messages.push(Message::Simple {
+      role: "assistant".to_string(),
+      content: plan,
+      reasoning_content: None,
+      tool_calls: None,
+    });
+    messages.push(Message::new_user_text(
+      "[System] Proceed: call the tool(s) needed to execute the plan above now.".to_string(),
+    ));
+  }
+
+  /// System directive scoped to a single tools-withheld planning call —
+  /// pushed onto an ephemeral clone of `messages` for that one request only,
+  /// never into the shared history (that would bloat every future request
+  /// and defeat the prompt-cache-stable static kernel).
+  ///
+  /// Necessary because `agent_system_prompt` tells the model "don't narrate
+  /// 'I will now call X' — just call it", which is correct advice when tools
+  /// are available but actively counterproductive here, where they
+  /// deliberately are not. Without this override, the model sometimes "just
+  /// calls it" anyway by writing tool-call-shaped pseudo-syntax as plain
+  /// content — which then reads back on the *next* turn as an
+  /// already-completed action, so the model that actually has tools just
+  /// confirms success without ever calling anything for real.
+  fn planning_only_directive() -> Message {
+    Message::Simple {
+      role: "system".to_string(),
+      content: "[Two-Stage ReAct planning pass] Tools are deliberately withheld for \
+                this one completion only — you cannot actually invoke anything right \
+                now, so do not write tool-call syntax, function invocations, or any \
+                tool-call-shaped text; doing so will be mistaken for a completed \
+                action on the next turn. Just think in plain prose: what's the \
+                situation, what should happen next, and why. The very next turn has \
+                tools available again and will act on this plan."
+        .to_string(),
+      reasoning_content: None,
+      tool_calls: None,
+    }
+  }
+
+  /// Truncate suspected fake tool-call syntax out of a tools-withheld
+  /// planning pass's output.
+  ///
+  /// `planning_only_directive` asks the model not to do this, but that's a
+  /// probabilistic mitigation — DeepSeek sometimes ignores it and emits its
+  /// internal function-calling grammar as literal text anyway (observed as
+  /// `<｜｜...｜｜tool_calls>`-shaped pseudo-tags built from the full-width
+  /// vertical line U+FF5C, which is not otherwise going to appear in normal
+  /// prose). Left in the appended plan message, that text reads on the next
+  /// turn as an already-completed action, so the model that actually has
+  /// tools just confirms success without calling anything for real. This is
+  /// a deterministic backstop: if the marker shows up, cut the plan off right
+  /// before it rather than trust the instruction alone.
+  fn strip_fake_tool_syntax(plan: &str) -> String {
+    const MARKER: &str = "\u{FF5C}\u{FF5C}"; // "｜｜"
+    match plan.find(MARKER) {
+      Some(idx) => plan[..idx].trim_end().to_string(),
+      None => plan.to_string(),
+    }
+  }
+
   /// Two-Stage ReAct planning pass: a tools-free completion that forces the
   /// model to deliberate before acting. The plan text is appended to
-  /// `messages` as an assistant message so the subsequent action call sees it.
-  /// Called for the main agent only.
+  /// `messages` (plus a bridge message, see `append_plan_with_bridge`) so the
+  /// subsequent action call sees it. Called for the main agent only.
   async fn planning_phase(&self, messages: &mut Vec<Message>) -> Result<()> {
     println!("\n{}", "[Plan] deliberating (tools withheld)...".dimmed());
+    let mut planning_request = messages.clone();
+    planning_request.push(Self::planning_only_directive());
     let mut stream = self
       .brain
       .call_api_with_params(
         &self.model,
-        messages.clone(),
+        planning_request,
         self.thinking_mode.as_str(),
         None,
       )
@@ -153,14 +255,14 @@ impl App {
     }
     println!();
 
-    if !plan.trim().is_empty() {
-      messages.push(Message::Simple {
-        role: "assistant".to_string(),
-        content: plan,
-        reasoning_content: None,
-        tool_calls: None,
-      });
+    let sanitized = Self::strip_fake_tool_syntax(&plan);
+    if sanitized.len() != plan.len() {
+      println!(
+        "{}",
+        "[Plan] discarded suspected fake tool-call syntax from plan text".yellow()
+      );
     }
+    Self::append_plan_with_bridge(messages, sanitized);
     Ok(())
   }
 
@@ -706,5 +808,80 @@ impl App {
     }
 
     Ok((final_content, messages))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn strip_fake_tool_syntax_truncates_at_marker() {
+    let plan = "两个文件都不存在，现在按需创建它们。\n\n\u{FF5C}\u{FF5C}tool_calls>\n\u{FF5C}\u{FF5C}invoke name=\"write_file\">...";
+    let out = App::strip_fake_tool_syntax(plan);
+    assert_eq!(out, "两个文件都不存在，现在按需创建它们。");
+  }
+
+  #[test]
+  fn strip_fake_tool_syntax_leaves_clean_prose_untouched() {
+    let plan = "The file doesn't exist yet; I should create it with write_file next.";
+    assert_eq!(App::strip_fake_tool_syntax(plan), plan);
+  }
+
+  #[test]
+  fn planning_only_directive_is_system_and_forbids_tool_syntax() {
+    let msg = App::planning_only_directive();
+    match msg {
+      Message::Simple {
+        role,
+        content,
+        tool_calls,
+        ..
+      } => {
+        assert_eq!(role, "system");
+        assert!(tool_calls.is_none());
+        assert!(content.contains("do not write tool-call syntax"));
+      }
+      _ => panic!("expected Simple system message"),
+    }
+  }
+
+  #[test]
+  fn plan_bridge_appends_assistant_then_user() {
+    let mut messages = vec![Message::ToolResponse {
+      role: "tool".to_string(),
+      content: "some result".to_string(),
+      tool_call_id: "t1".to_string(),
+    }];
+    App::append_plan_with_bridge(&mut messages, "I should read the file next.".to_string());
+
+    assert_eq!(messages.len(), 3);
+    match &messages[1] {
+      Message::Simple {
+        role,
+        content,
+        tool_calls,
+        ..
+      } => {
+        assert_eq!(role, "assistant");
+        assert_eq!(content, "I should read the file next.");
+        assert!(tool_calls.is_none());
+      }
+      _ => panic!("expected Simple assistant message"),
+    }
+    match &messages[2] {
+      Message::Simple { role, content, .. } => {
+        assert_eq!(role, "user");
+        assert!(content.contains("Proceed"));
+      }
+      _ => panic!("expected Simple user bridge message"),
+    }
+  }
+
+  #[test]
+  fn plan_bridge_skips_empty_plan() {
+    let mut messages = vec![Message::new_user_text("hi".to_string())];
+    App::append_plan_with_bridge(&mut messages, "   ".to_string());
+    assert_eq!(messages.len(), 1, "blank plan must not append anything");
   }
 }
