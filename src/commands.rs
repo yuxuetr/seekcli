@@ -66,6 +66,7 @@ impl App {
       "/help" => self.print_help(),
       "/clear" => {
         self.current_session = self.history.create_session(self.model.clone());
+        crate::tools::offload::set_blob_dir(self.history.blobs_dir(self.current_session.id()));
         self.current_skill = None;
         self.cost = observability::cost::CostTracker::new();
         println!("{}", "Conversation reset.".yellow());
@@ -262,6 +263,7 @@ impl App {
               session.meta.title,
               session.meta.event_count
             );
+            crate::tools::offload::set_blob_dir(self.history.blobs_dir(session.id()));
             self.current_session = session;
           }
           Err(e) => println!("{} {}", "Error:".red(), e),
@@ -289,6 +291,7 @@ impl App {
               child.events.len()
             );
             self.cost = observability::cost::CostTracker::new();
+            crate::tools::offload::set_blob_dir(self.history.blobs_dir(child.id()));
             self.current_session = child;
           }
           Err(e) => println!("{} {}", "Error:".red(), e),

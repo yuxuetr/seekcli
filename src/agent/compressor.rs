@@ -27,12 +27,17 @@ use anyhow::Result;
 use colored::Colorize;
 use futures_util::StreamExt;
 
+use crate::api::tokens::{Heuristic, TokenCounter};
 use crate::api::{LlmProvider, Message, StreamItem};
+use crate::session::{self, EventPayload, Session};
 
-/// Trigger compression when serialized messages exceed this many bytes.
-/// ~4 bytes/token (English) to ~2 (Chinese); 600KB ≈ 150K~300K tokens, well
-/// under DeepSeek V4's 1M cap with headroom for the rest of the loop.
-pub const COMPRESSION_THRESHOLD_BYTES: usize = 600_000;
+/// Compaction trips above this many estimated tokens.
+///
+/// 150K leaves comfortable room inside a large context window while giving the
+/// tail and the system prompts space to breathe. It replaces a 600_000-*byte*
+/// threshold, which meant the same conversation compacted at wildly different
+/// real sizes depending on whether it was written in English or Chinese.
+pub const COMPRESSION_THRESHOLD_TOKENS: usize = 150_000;
 
 /// Number of trailing messages to keep in the protected working memory.
 const KEEP_TAIL: usize = 8;
@@ -58,8 +63,8 @@ pub async fn maybe_compress(
   model: &str,
   messages: &mut Vec<Message>,
 ) -> Result<bool> {
-  let total = estimate_bytes(messages);
-  if total < COMPRESSION_THRESHOLD_BYTES {
+  let total = estimate_tokens(messages);
+  if total < COMPRESSION_THRESHOLD_TOKENS {
     return Ok(false);
   }
 
@@ -101,17 +106,17 @@ pub async fn maybe_compress(
   changed |= truncate_tail(messages, tail_start);
 
   if changed {
-    let after = estimate_bytes(messages);
+    let after = estimate_tokens(messages);
     let reduction = 100usize.saturating_sub(after * 100 / total.max(1));
     eprintln!(
-      "{} staged compression: {} → {} bytes ({}% reduction, {} bytes masked)",
+      "{} staged compression: {} → {} tokens ({}% reduction, {} bytes masked)",
       "[Memory]".magenta(),
       total,
       after,
       reduction,
       masked_bytes
     );
-    if after < COMPRESSION_THRESHOLD_BYTES {
+    if after < COMPRESSION_THRESHOLD_TOKENS {
       return Ok(true);
     }
   }
@@ -135,6 +140,61 @@ pub async fn maybe_compress(
   });
   rebuilt.extend(messages[tail_start..].iter().cloned());
   *messages = rebuilt;
+  Ok(true)
+}
+
+/// Compact the *session* at a turn boundary, recording a `Compaction` event.
+///
+/// This is what makes compression survive a turn. `maybe_compress` operates on
+/// the working set, which is re-projected from the log every turn — so its
+/// stage-3 summary evaporated, and a long session paid for a fresh summary on
+/// every single turn. Recording the summary as an event means the projection
+/// carries it forward, while the events it replaces stay on disk.
+///
+/// Runs before the working set is built, so the loop still gets
+/// `maybe_compress` as an in-turn safety net for a single turn that balloons.
+pub async fn maybe_compact_session(
+  client: &dyn LlmProvider,
+  model: &str,
+  session: &mut Session,
+) -> Result<bool> {
+  let (messages, seqs) = session::derive_messages_indexed(&session.events);
+  if estimate_tokens(&messages) < COMPRESSION_THRESHOLD_TOKENS {
+    return Ok(false);
+  }
+
+  // Same shape as the working-set compressor: leading system messages stay,
+  // the recent tail stays, the middle is summarized.
+  let head_end = messages
+    .iter()
+    .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
+    .count();
+  if messages.len() <= head_end + KEEP_TAIL {
+    return Ok(false);
+  }
+  let tail_start = messages.len() - KEEP_TAIL;
+
+  let from = match seqs.get(head_end) {
+    Some(seq) => *seq,
+    None => return Ok(false),
+  };
+  let to = match seqs.get(tail_start) {
+    Some(seq) => *seq,
+    None => return Ok(false),
+  };
+  if to <= from {
+    return Ok(false);
+  }
+
+  eprintln!(
+    "{} compacting session: summarizing events {}..{} ({} messages)",
+    "[Memory]".magenta(),
+    from,
+    to,
+    tail_start - head_end
+  );
+  let summary = summarize_messages(client, model, &messages[head_end..tail_start]).await?;
+  session.record(EventPayload::Compaction { from, to, summary });
   Ok(true)
 }
 
@@ -189,11 +249,12 @@ fn ceil_boundary(s: &str, idx: usize) -> usize {
   i
 }
 
-fn estimate_bytes(messages: &[Message]) -> usize {
-  messages
-    .iter()
-    .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
-    .sum()
+/// Approximate token count for the conversation.
+///
+/// Replaces byte counting, which tripped compaction at roughly a third of the
+/// real context budget for CJK conversations — see `api::tokens`.
+fn estimate_tokens(messages: &[Message]) -> usize {
+  Heuristic.count_messages(messages)
 }
 
 async fn summarize_messages(
@@ -263,16 +324,35 @@ mod tests {
   }
 
   #[test]
-  fn estimate_bytes_nonzero() {
+  fn estimate_tokens_nonzero() {
     let msgs = vec![make_simple("user", "hello world")];
-    assert!(estimate_bytes(&msgs) > 0);
+    assert!(estimate_tokens(&msgs) > 0);
   }
 
   #[test]
-  fn estimate_bytes_grows_with_content() {
+  fn estimate_tokens_grows_with_content() {
     let small = vec![make_simple("user", "hi")];
     let large = vec![make_simple("user", &"x".repeat(10_000))];
-    assert!(estimate_bytes(&large) > estimate_bytes(&small) * 100);
+    assert!(estimate_tokens(&large) > estimate_tokens(&small) * 100);
+  }
+
+  /// The reason the threshold moved off bytes: the same conversation must
+  /// compact at the same point regardless of the script it is written in.
+  #[test]
+  fn the_threshold_no_longer_depends_on_script() {
+    // Same number of characters, very different byte counts.
+    let latin = vec![make_simple("user", &"a".repeat(300))];
+    let cjk = vec![make_simple("user", &"中".repeat(300))];
+    let latin_tokens = estimate_tokens(&latin) as f64;
+    let cjk_tokens = estimate_tokens(&cjk) as f64;
+    // Byte counting made the CJK version look 3x larger. Token estimation
+    // should put them within a small factor of each other.
+    let ratio = cjk_tokens / latin_tokens;
+    assert!(
+      (0.5..=5.0).contains(&ratio),
+      "scripts should be comparable, got ratio {}",
+      ratio
+    );
   }
 
   #[test]

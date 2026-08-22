@@ -246,6 +246,60 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
   out
 }
 
+/// Like `derive_messages`, but also returns which event produced each
+/// message.
+///
+/// Needed to express compaction as an event: the compressor decides in
+/// *message* space ("summarize everything before the last 8 messages"), while
+/// a `Compaction` event names a *sequence* range. Without this mapping the
+/// only expressible compaction would be "replace everything", which would
+/// discard the recent tail the compressor is careful to keep.
+pub fn derive_messages_indexed(events: &[SessionEvent]) -> (Vec<Message>, Vec<u64>) {
+  let messages = derive_messages(events);
+  let mut seqs = Vec::with_capacity(messages.len());
+  let mut skips: Vec<(u64, u64)> = Vec::new();
+  for e in events {
+    if let EventPayload::Compaction { from, to, .. } = &e.payload {
+      skips.push((*from, *to));
+    }
+  }
+  let mut index = 0usize;
+  while index < events.len() {
+    let event = &events[index];
+    if let Some((_, to)) = skips
+      .iter()
+      .find(|(from, to)| event.seq >= *from && event.seq < *to)
+    {
+      // The spliced summary is attributed to the start of the replaced range.
+      seqs.push(event.seq);
+      while index < events.len() && events[index].seq < *to {
+        index += 1;
+      }
+      continue;
+    }
+    if produces_message(&event.payload) {
+      seqs.push(event.seq);
+    }
+    index += 1;
+  }
+  debug_assert_eq!(
+    messages.len(),
+    seqs.len(),
+    "projection and index map diverged"
+  );
+  (messages, seqs)
+}
+
+fn produces_message(payload: &EventPayload) -> bool {
+  matches!(
+    payload,
+    EventPayload::UserMessage { .. }
+      | EventPayload::AssistantMessage { .. }
+      | EventPayload::ToolResult { .. }
+      | EventPayload::SystemPrompt { .. }
+  )
+}
+
 /// Turn a working-set message back into the event that would produce it.
 ///
 /// Used where the loop still hands back messages rather than events (the
@@ -430,6 +484,29 @@ mod tests {
   fn fork_past_the_end_is_clamped_rather_than_panicking() {
     let f = session().fork("child".into(), 999);
     assert_eq!(f.events.len(), 5);
+  }
+
+  #[test]
+  fn the_index_map_lines_up_with_the_projection() {
+    let s = session();
+    let (msgs, seqs) = derive_messages_indexed(&s.events);
+    assert_eq!(msgs.len(), seqs.len());
+    // Every message is attributed to the event that produced it, in order.
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+  }
+
+  #[test]
+  fn the_index_map_survives_a_compacted_range() {
+    let mut s = session();
+    s.record(EventPayload::Compaction {
+      from: 1,
+      to: 4,
+      summary: "summary".into(),
+    });
+    let (msgs, seqs) = derive_messages_indexed(&s.events);
+    assert_eq!(msgs.len(), seqs.len());
+    // kernel(0), summary attributed to the range start(1), final assistant(4).
+    assert_eq!(seqs, vec![0, 1, 4]);
   }
 
   #[test]

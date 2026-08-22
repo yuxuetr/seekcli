@@ -75,14 +75,75 @@ pub async fn offload(content: String, source_hint: Option<&str>) -> String {
   }
 }
 
-/// Write `content` to `~/.seekcli/tmp/<hash>.txt`, returning the path.
+/// Where offloaded output goes.
+///
+/// A process global, matching `approval::init_policy` and `policy::MODE`:
+/// offloading happens deep inside tool execution, and threading a session id
+/// through every tool signature would buy nothing over setting it once when
+/// the session changes.
+static BLOB_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Point offloading at the active session's `blobs/` directory.
+///
+/// Blobs belong to the conversation that produced them: a preview references
+/// a path the model may read several turns later, so the file has to outlive
+/// the turn — but not the session, or `~/.seekcli/tmp` grows without bound
+/// (it previously never got cleaned at all).
+pub fn set_blob_dir(dir: PathBuf) {
+  if let Ok(mut guard) = BLOB_DIR.lock() {
+    *guard = Some(dir);
+  }
+}
+
+fn blob_dir() -> anyhow::Result<PathBuf> {
+  use anyhow::Context;
+  if let Ok(guard) = BLOB_DIR.lock()
+    && let Some(dir) = guard.as_ref()
+  {
+    return Ok(dir.clone());
+  }
+  // Headless runs and tests never set a session; a shared scratch directory
+  // keeps them working rather than failing the tool call.
+  let home = std::env::var("HOME").context("Could not find HOME directory")?;
+  Ok(PathBuf::from(home).join(".seekcli").join("tmp"))
+}
+
+/// Delete blobs untouched for longer than `max_age`.
+///
+/// Content-addressed names mean identical output is written once, so the only
+/// growth is genuinely new output; age is the right axis to trim on.
+pub fn sweep(root: &std::path::Path, max_age: std::time::Duration) -> usize {
+  let mut removed = 0usize;
+  let Ok(entries) = std::fs::read_dir(root) else {
+    return 0;
+  };
+  let now = std::time::SystemTime::now();
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if path.is_dir() {
+      removed += sweep(&path, max_age);
+      continue;
+    }
+    let stale = entry
+      .metadata()
+      .and_then(|m| m.modified())
+      .ok()
+      .and_then(|t| now.duration_since(t).ok())
+      .is_some_and(|age| age > max_age);
+    if stale && std::fs::remove_file(&path).is_ok() {
+      removed += 1;
+    }
+  }
+  removed
+}
+
+/// Write `content` to `<blob dir>/<hash>.txt`, returning the path.
 async fn write_temp(content: &str) -> anyhow::Result<PathBuf> {
   use anyhow::Context;
-  let home = std::env::var("HOME").context("Could not find HOME directory")?;
-  let dir = PathBuf::from(home).join(".seekcli").join("tmp");
+  let dir = blob_dir()?;
   tokio::fs::create_dir_all(&dir)
     .await
-    .context("create tmp dir")?;
+    .context("create blob dir")?;
 
   let mut hasher = DefaultHasher::new();
   content.hash(&mut hasher);
@@ -107,6 +168,45 @@ fn ceil_boundary(s: &str, idx: usize) -> usize {
     i += 1;
   }
   i
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+  use super::*;
+  use std::time::Duration;
+
+  #[test]
+  fn sweep_removes_stale_blobs_and_keeps_fresh_ones() {
+    let root = std::env::temp_dir().join("seekcli-blob-sweep");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(root.join("nested"));
+    let fresh = root.join("fresh.txt");
+    let nested = root.join("nested/also-fresh.txt");
+    let _ = std::fs::write(&fresh, "x");
+    let _ = std::fs::write(&nested, "y");
+
+    // Nothing is older than a year, so nothing should go.
+    assert_eq!(sweep(&root, Duration::from_secs(365 * 24 * 3600)), 0);
+    assert!(fresh.exists());
+    assert!(nested.exists());
+
+    // With a zero-age cutoff everything qualifies, including nested files --
+    // that is what proves the walk recurses into per-session directories.
+    assert_eq!(sweep(&root, Duration::from_secs(0)), 2);
+    assert!(!fresh.exists());
+    assert!(!nested.exists());
+  }
+
+  #[test]
+  fn sweeping_a_missing_directory_is_not_an_error() {
+    assert_eq!(
+      sweep(
+        &std::env::temp_dir().join("seekcli-does-not-exist"),
+        Duration::from_secs(0)
+      ),
+      0
+    );
+  }
 }
 
 #[cfg(test)]

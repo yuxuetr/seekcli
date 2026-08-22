@@ -42,7 +42,24 @@ impl HistoryManager {
       base_dir: sessions_dir,
     };
     manager.migrate_legacy();
+    manager.sweep_blobs();
     Ok(manager)
+  }
+
+  /// Drop offloaded output nobody has touched in a month, including the
+  /// pre-0.2 shared `~/.seekcli/tmp` directory, which was never cleaned at all.
+  fn sweep_blobs(&self) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+    let mut removed = crate::tools::offload::sweep(&self.base_dir, MAX_AGE);
+    if let Some(root) = self.base_dir.parent() {
+      removed += crate::tools::offload::sweep(&root.join("tmp"), MAX_AGE);
+    }
+    if removed > 0 {
+      eprintln!(
+        "[Session] removed {} offloaded file(s) older than 30 days",
+        removed
+      );
+    }
   }
 
   pub fn session_dir(&self, id: &str) -> PathBuf {

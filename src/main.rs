@@ -139,6 +139,9 @@ impl App {
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
 
+    // Offloaded tool output belongs to the session that produced it.
+    tools::offload::set_blob_dir(history.blobs_dir(current_session.id()));
+
     let interrupt = Arc::new(AtomicBool::new(false));
     spawn_interrupt_watcher(interrupt.clone());
 

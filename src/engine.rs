@@ -83,6 +83,23 @@ impl App {
 
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
+    // Compact at the turn boundary, before the working set is built, so the
+    // summary lands in the log and carries forward. `maybe_compress` inside
+    // the loop stays as the in-turn safety net for a single ballooning turn.
+    if let Err(e) = agent::compressor::maybe_compact_session(
+      self.brain.as_ref(),
+      &self.model,
+      &mut self.current_session,
+    )
+    .await
+    {
+      eprintln!(
+        "{} session compaction failed: {} (continuing uncompacted)",
+        "[Memory]".yellow(),
+        e
+      );
+    }
+
     // The working set is *projected* from the log, never held alongside it.
     // One source of truth is what keeps "model-visible means logged" true
     // instead of aspirational.

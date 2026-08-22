@@ -20,6 +20,7 @@ pub mod anthropic;
 pub mod openai;
 pub mod record;
 pub mod resilience;
+pub mod tokens;
 
 pub use anthropic::AnthropicProvider;
 pub use openai::OpenAiProvider;
