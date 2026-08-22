@@ -10,7 +10,7 @@
 
 ## 2. 当前实现
 
-8 个工具（`tools/registry.rs::system_tools`）：
+10 个工具（`tools/registry.rs::system_tools`）：
 
 | 工具 | 实现 | 只读并发 |
 | --- | --- | --- |
@@ -18,6 +18,8 @@
 | `write_file` | `tools/fs.rs` + `path_security` | ❌ |
 | `edit_file` | `tools/edit.rs`（L1-L4 模糊匹配链） | ❌ |
 | `list_dir` | `tools/fs.rs` | ✅ |
+| `glob` | `tools/search.rs` | ✅ |
+| `grep` | `tools/search.rs` | ✅ |
 | `run_shell` | `tools/shell.rs` + `approval` | ❌（保守排除） |
 | `invoke_agent` | 引擎拦截，非 dispatcher | ❌ |
 | `create_skill` | `tools/meta.rs` | ❌ |
@@ -30,7 +32,7 @@
 | # | 缺口 | 性质 | 影响 |
 | --- | --- | --- | --- |
 | L2-1 | **无 MCP** | 架构级 | 第三方无法扩展，只能改 Rust 源码 |
-| L2-2 | **无原生 `glob` / `grep`** | 功能级 | 检索全靠 `run_shell`，过审批、依赖宿主、格式不可控 |
+| ~~L2-2~~ | ~~无原生 `glob` / `grep`~~ | — | **已于阶段二十一落地** |
 | L2-3 | 派发无中间件 | 结构 | 无 pre/post 钩子、无 per-tool 超时 |
 | L2-4 | 无结构化 `ToolResult` | 结构 | 阶段八 8.3 主动推迟项，调用方靠 `contains` 猜语义 |
 | L2-5 | 无后台执行 / job 控制 | 功能级 | 长命令阻塞整个对话 |
@@ -40,9 +42,9 @@
 
 ## 4. 目标设计
 
-### 4.1 原生检索工具（L2-2，最高性价比）
+### 4.1 原生检索工具（L2-2）✅ 阶段二十一已落地
 
-新增 `tools/search.rs`，依赖 `ignore`（复用 ripgrep 的 gitignore 引擎）+ `grep-searcher`：
+`tools/search.rs`，依赖 `ignore`（复用 ripgrep 的 gitignore 引擎）+ `grep-searcher` / `grep-regex`：
 
 ```
 glob(pattern, path?)         -> 匹配文件路径列表，按修改时间倒序，上限 200 条
@@ -52,8 +54,15 @@ grep(pattern, path?, glob?)  -> 匹配行，格式 `path:line: content`，上限
 设计要点：
 
 - **默认尊重 `.gitignore`**，避免把 `target/` `node_modules/` 灌进上下文。
+  用 `require_git(false)`：ripgrep 只在 git 仓库内应用 .gitignore，
+  而这里的目的是防止构建产物挤占上下文窗口，在没有 `.git` 的普通目录同样成立。
+- `hidden(false)` 让 `.github` / `.cargo` 这类正常源码可见，但必须显式
+  `filter_entry` 掉 `.git`，否则一次 `glob("*")` 会返回上千个 object 文件。
 - 超上限时截断并显式告知「还有 N 条未显示，请缩小范围」——**不静默截断**。
-- 两者都是**只读**，进 `is_parallel_readonly` 白名单，可与 `read_file` 并发。
+- 两者都是**只读**，进 `is_parallel_readonly` 白名单，可与 `read_file` 并发；
+  实际遍历是同步 IO，走 `spawn_blocking`，不阻塞并发批次依赖的运行时。
+- 单行输出上限 300 字符：一行压缩后的 bundle 可能有兆字节，
+  按行截断能防止一条宽匹配挤掉另外 199 条结果。
 - 落地后同步改 `read_file` 的 description，删掉「用 run_shell 配 sed/grep」的引导。
 
 ### 4.2 执行管线中间件化（L2-3 / L2-4）

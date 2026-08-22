@@ -85,23 +85,31 @@
 
 ---
 
-### 阶段二十一：L2 原生检索工具
+### ✅ 阶段二十一：L2 原生检索工具
 
 *目标：把检索从「教模型用 run_shell 配 sed/grep」变成一等工具。*
 *来源：L2-2 —— 评估认定为**单项性价比最高**的改动。*
 *设计：[L2 §4.1](docs/architecture/L2-tools.md#41-原生检索工具l2-2最高性价比)*
 
-- [ ] **21.1 `tools/search.rs`**
-    - [ ] 依赖 `ignore`（复用 ripgrep 的 gitignore 引擎）+ `grep-searcher`。
-    - [ ] `glob(pattern, path?)` → 文件路径列表，按修改时间倒序，上限 200。
-    - [ ] `grep(pattern, path?, glob?)` → `path:line: content`，上限 200。
-    - [ ] **默认尊重 `.gitignore`**，避免把 `target/` 灌进上下文。
-    - [ ] 超上限显式告知「还有 N 条未显示，请缩小范围」——不静默截断。
-- [ ] **21.2 接入**
-    - [ ] 注册进 `system_tools()`；加入 `is_parallel_readonly` 白名单。
-    - [ ] 加进 `explore` SubAgent 模板的 `allowed_tools`。
-    - [ ] 改 `read_file` description，删掉「用 run_shell 配 sed/grep/head/tail」的引导。
-- [ ] **21.3 单测**：gitignore 生效 / 上限截断提示 / 空结果 / 无效正则报错。
+- [x] **21.1 `tools/search.rs`**
+    - [x] 依赖 `ignore` + `grep-searcher` / `grep-regex` / `grep-matcher`。
+    - [x] `glob(pattern, path?)` → 文件路径列表，按修改时间倒序，上限 200。
+    - [x] `grep(pattern, path?, glob?)` → `path:line: content`，上限 200。
+    - [x] **默认尊重 `.gitignore`**，且用 `require_git(false)` 让非 git 目录同样生效；
+          显式 `filter_entry` 掉 `.git`（否则 `hidden(false)` 会走进 object 文件）。
+    - [x] 超上限显式告知「还有 N 条未显示」——不静默截断。
+    - [x] 同步 IO 走 `spawn_blocking`，不阻塞并发批次依赖的运行时。
+    - [x] 单行上限 300 字符，防止一行压缩 bundle 挤掉其余结果。
+    - [x] 无效正则返回 `[BAD PATTERN]` 并提示「这是正则不是 glob」，而非「无匹配」——
+          后者会让模型误判代码不存在。
+- [x] **21.2 接入**
+    - [x] 注册进 `system_tools()`；加入 `is_parallel_readonly` 白名单。
+    - [x] 加进 `explore` 与 `general` SubAgent 模板的 `allowed_tools` 与提示。
+    - [x] 改 `read_file` / `list_dir` description，删掉「用 run_shell 配 sed/grep/find」的引导。
+    - [x] 系统提示新增 glob/grep 段落与「如何选择」条目。
+- [x] **21.3 单测**（11 个）：gitignore 生效 / 目录限定 / 空结果措辞 / glob 过滤 /
+      无效正则 / 路径不存在带恢复提示 / 截断计数 / UTF-8 边界 /
+      **对真实仓库的冒烟测试**（构建产物与 .git 不得泄漏）。
 
 **验收**：`grep("fn main", ".")` 直接返回结果，全程不触发审批提示；
 在有 `target/` 的仓库里 `glob("**/*.rs")` 不返回构建产物。

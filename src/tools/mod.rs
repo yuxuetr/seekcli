@@ -8,6 +8,7 @@ pub mod meta;
 pub mod offload;
 pub mod path_security;
 pub mod registry;
+pub mod search;
 pub mod shell;
 
 pub struct ToolDispatcher;
@@ -36,6 +37,8 @@ impl ToolDispatcher {
       "write_file" => fs::write_file(&args).await,
       "edit_file" => fs::edit_file(&args).await,
       "list_dir" => fs::list_dir(&args).await,
+      "glob" => search::glob(&args).await,
+      "grep" => search::grep(&args).await,
       "run_shell" => shell::run_shell(&args).await,
       "create_skill" => meta::create_skill(&args).await,
       _ => anyhow::bail!("Unknown tool: {}", name),

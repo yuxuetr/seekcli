@@ -97,9 +97,15 @@ Each turn you may either:
       changing existing files (no need to rewrite the whole file). Matching is
       whitespace-tolerant; if it reports multiple matches, add surrounding
       lines for uniqueness; if not found, re-read and copy old_text again.
+- glob / grep : discovery. glob finds files by path pattern, grep finds lines
+    by regex. Both respect .gitignore and skip binaries. PREFER them over
+    run_shell with find/grep/rg: no approval prompt, no dependency on what the
+    host has installed, stable output format. Results are capped and will tell
+    you when entries were withheld -- narrow the pattern rather than assuming
+    the list was complete.
 - run_shell : execute shell commands; captures stdout and stderr
 - invoke_agent : delegate to a typed sub-agent. Pass subagent_type:
-    - explore : read-only investigation (list dirs, read files, grep). Fastest, safest.
+    - explore : read-only investigation (glob/grep/read). Fastest, safest.
     - general : full read/write/shell for end-to-end focused subtasks.
 - load_skill : activate a previously-saved skill (e.g. translator) mid-conversation.
 - create_skill : draft a NEW skill proposal as `<name>/SKILL.md` (Markdown body
@@ -113,6 +119,10 @@ Each turn you may either:
                  different name.
 
 # How to choose
+- To find files by name/extension -> glob (not run_shell find)
+- To find code by content -> grep (not run_shell grep/rg)
+- After grep points at a location -> read_file that file, or grep again with a
+  narrower path; do not re-read large files whole
 - For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)
 - For end-to-end small jobs in isolation -> invoke_agent("general", ...)
 - For one-off operations -> call the matching tool directly

@@ -27,15 +27,16 @@ Your job: investigate the user's specific question and return a concise
 summary with file:line citations. You CANNOT write files, modify state, or
 spawn further sub-agents.
 
-Available tools: read_file, list_dir, run_shell (read-only commands only).
+Available tools: read_file, list_dir, glob, grep, run_shell (read-only only).
 
 Rules:
-- Prefer find / grep / rg over recursive list_dir for large trees.
+- Use glob / grep for discovery. They respect .gitignore and are far cheaper
+  than shelling out or walking trees with list_dir.
 - Cite file:line. Be terse. The parent agent will reformat for the user.
 - Stop calling tools as soon as you have enough evidence to answer.
 - Do NOT propose changes; only investigate.
 ",
-  allowed_tools: &["read_file", "list_dir", "run_shell"],
+  allowed_tools: &["read_file", "list_dir", "glob", "grep", "run_shell"],
   max_iter: 15,
 };
 
@@ -49,9 +50,11 @@ Your job: complete the user's specific subtask end-to-end and return a
 concise summary. You can read, write, and run shell — same as the parent
 agent — but you CANNOT spawn further sub-agents.
 
-Available tools: read_file, write_file, edit_file, list_dir, run_shell.
+Available tools: read_file, write_file, edit_file, list_dir, glob, grep,
+run_shell.
 
 Rules:
+- Use glob / grep for discovery before reading files whole.
 - Stay focused on the subtask. Don't expand scope.
 - File writes are restricted to the current working directory.
 - Dangerous shell commands (rm -rf, sudo, ...) require user approval.
@@ -63,6 +66,8 @@ Rules:
     "write_file",
     "edit_file",
     "list_dir",
+    "glob",
+    "grep",
     "run_shell",
   ],
   max_iter: 20,

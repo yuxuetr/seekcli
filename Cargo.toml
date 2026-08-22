@@ -12,6 +12,10 @@ chrono = {version = "0.4", features = ["serde"]}
 clap = {version = "4.4", features = ["derive"]}
 colored = "2.0"
 futures-util = "0.3"
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.33"
 indicatif = "0.17"
 reqwest = {version = "0.12", features = ["json", "stream"]}
 rustyline = "12.0"

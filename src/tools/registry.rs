@@ -6,8 +6,8 @@ pub fn system_tools() -> Vec<Tool> {
     make_tool(
       "read_file",
       "Read the content of a UTF-8 text file. Large files are offloaded to a \
-       temp file and returned as a head+tail preview; read specific ranges of \
-       the original path with run_shell (sed/grep/head/tail) when you need more.",
+       temp file and returned as a head+tail preview; use grep to locate the \
+       part you need inside the original path instead of re-reading it whole.",
       json!({
         "type": "object",
         "properties": {
@@ -54,7 +54,7 @@ pub fn system_tools() -> Vec<Tool> {
     make_tool(
       "list_dir",
       "List entries in a directory (single level, no recursion). \
-       Use run_shell with find/tree for deeper exploration.",
+       Use glob for recursive discovery by pattern.",
       json!({
         "type": "object",
         "properties": {
@@ -63,6 +63,57 @@ pub fn system_tools() -> Vec<Tool> {
             "description": "Directory path; defaults to current working directory"
           }
         }
+      }),
+    ),
+    make_tool(
+      "glob",
+      "Find files by path pattern. PREFER this over run_shell with find/ls. \
+       Gitignored paths (target/, node_modules/, ...) are excluded by default. \
+       Results are sorted newest-first and capped, so narrow the pattern if \
+       told entries were withheld.\n\
+       Pattern is a gitignore-style glob: `*.rs` matches at any depth, \
+       `src/*.rs` only that directory, `**/*.test.ts` any depth explicitly.",
+      json!({
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern, e.g. \"*.rs\" or \"src/**/*.toml\""
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to search under; defaults to current working directory"
+          }
+        },
+        "required": ["pattern"]
+      }),
+    ),
+    make_tool(
+      "grep",
+      "Search file contents by regex. PREFER this over run_shell with grep/rg. \
+       Returns `path:line: content` rows; gitignored and binary files are \
+       skipped. Results are capped, so narrow the pattern or path if told \
+       matches were withheld.\n\
+       The pattern is a REGEX, not a shell glob — escape . * + ? ( ) [ ] to \
+       match them literally. Use the separate `glob` argument to restrict \
+       which files are searched.",
+      json!({
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex to search for, e.g. \"fn main\" or \"impl \\\\w+ for\""
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to search under; defaults to current working directory"
+          },
+          "glob": {
+            "type": "string",
+            "description": "Optional file filter, e.g. \"*.rs\" to search only Rust sources"
+          }
+        },
+        "required": ["pattern"]
       }),
     ),
     make_tool(
@@ -155,7 +206,7 @@ pub fn system_tools() -> Vec<Tool> {
 /// mutate engine state. Per the harness "read-concurrent, write-serial" rule,
 /// a turn is parallelized only when EVERY call is read-only.
 pub fn is_parallel_readonly(tool_name: &str) -> bool {
-  matches!(tool_name, "read_file" | "list_dir")
+  matches!(tool_name, "read_file" | "list_dir" | "glob" | "grep")
 }
 
 /// Filter `tools` down to those listed in `allowed`. Used to apply a
@@ -203,6 +254,9 @@ mod tests {
   fn readonly_classification() {
     assert!(is_parallel_readonly("read_file"));
     assert!(is_parallel_readonly("list_dir"));
+    // Discovery tools are pure reads and are the most common thing to fan out.
+    assert!(is_parallel_readonly("glob"));
+    assert!(is_parallel_readonly("grep"));
     // Writes / shell / delegation must never be parallelized.
     assert!(!is_parallel_readonly("write_file"));
     assert!(!is_parallel_readonly("run_shell"));
