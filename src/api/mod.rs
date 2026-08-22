@@ -115,6 +115,18 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duratio
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Message {
+  /// MUST stay first. `untagged` tries variants in declaration order, and
+  /// `Simple` matches any `{role, content, ...}` object because serde ignores
+  /// unknown fields — so with `Simple` first, a tool message deserialised into
+  /// `Simple` and its `tool_call_id` was silently dropped. Reloading such a
+  /// session produced a `tool` message with no call id, which the provider
+  /// then rejects or mispairs. `ToolResponse` requires `tool_call_id`, so
+  /// trying it first is unambiguous.
+  ToolResponse {
+    role: String,
+    content: String,
+    tool_call_id: String,
+  },
   Simple {
     role: String,
     content: String,
@@ -122,11 +134,6 @@ pub enum Message {
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ToolCall>>,
-  },
-  ToolResponse {
-    role: String,
-    content: String,
-    tool_call_id: String,
   },
 }
 
@@ -234,6 +241,42 @@ pub trait LlmProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Regression guard for a latent bug that survived until the stage 26
+  /// migration surfaced it: with `Simple` declared first, `untagged`
+  /// deserialisation matched it for tool messages and dropped `tool_call_id`,
+  /// so every reloaded session lost the link between a tool call and its
+  /// result.
+  #[test]
+  fn a_tool_message_round_trips_with_its_call_id() {
+    let original = Message::ToolResponse {
+      role: "tool".into(),
+      content: "result".into(),
+      tool_call_id: "call_123".into(),
+    };
+    let text = match serde_json::to_string(&original) {
+      Ok(t) => t,
+      Err(e) => panic!("serialise failed: {}", e),
+    };
+    let back: Message = match serde_json::from_str(&text) {
+      Ok(m) => m,
+      Err(e) => panic!("deserialise failed: {}", e),
+    };
+    match back {
+      Message::ToolResponse { tool_call_id, .. } => assert_eq!(tool_call_id, "call_123"),
+      Message::Simple { .. } => panic!("tool message decoded as Simple; call id lost"),
+    }
+  }
+
+  #[test]
+  fn an_assistant_message_still_decodes_as_simple() {
+    let text = r#"{"role":"assistant","content":"hi"}"#;
+    let m: Message = match serde_json::from_str(text) {
+      Ok(m) => m,
+      Err(e) => panic!("deserialise failed: {}", e),
+    };
+    assert!(matches!(m, Message::Simple { .. }));
+  }
 
   #[test]
   fn strip_reasoning_drops_reasoning_keeps_rest() {

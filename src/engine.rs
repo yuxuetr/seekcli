@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use std::sync::atomic::Ordering;
 
 use crate::api::{self, Message, StreamItem};
+use crate::session::EventPayload;
 use crate::{App, Skill, ThinkingMode, agent, subagents, tools, ui};
 
 /// How a loop run ended. Distinguished because a caller needs to act on the
@@ -24,9 +25,42 @@ pub(crate) enum LoopStatus {
 
 pub(crate) struct LoopResult {
   pub text: String,
-  pub messages: Vec<Message>,
+  /// The working set is deliberately NOT returned. Once the log is the single
+  /// source of truth, handing the caller a second copy of the conversation is
+  /// an invitation to persist that instead — which is exactly how the old
+  /// snapshot format lost its compacted history.
+  ///
+  /// Durable record of what this run added to the conversation. Returned
+  /// rather than written through `&mut self` so a sub-agent's trace can be
+  /// discarded (or later given its own session) without the borrow checker
+  /// forcing the log and the loop to share one mutable path.
+  pub events: Vec<EventPayload>,
   pub status: LoopStatus,
   pub iterations: usize,
+}
+
+/// Append a message to the working set **and** the durable log in one step.
+///
+/// The two must never be written separately: the moment a site appends to one
+/// and forgets the other, "model-visible means logged" quietly stops being
+/// true, and nothing would fail loudly to say so.
+fn log_push(messages: &mut Vec<Message>, events: &mut Vec<EventPayload>, msg: Message) {
+  if let Some(payload) = crate::session::event_for(&msg) {
+    events.push(payload);
+  }
+  messages.push(msg);
+}
+
+/// First line of the prompt, trimmed — good enough as a title until the model
+/// is asked for a better one.
+fn title_from(prompt: &str) -> String {
+  let line = prompt.lines().next().unwrap_or(prompt).trim();
+  let title: String = line.chars().take(48).collect();
+  if title.is_empty() {
+    crate::session::UNTITLED.to_string()
+  } else {
+    title
+  }
 }
 
 /// A headless run's outcome, shaped for `--output json` and exit codes.
@@ -43,29 +77,29 @@ impl App {
     // pressed at the readline prompt also fires the global watcher).
     self.interrupt.store(false, Ordering::SeqCst);
 
-    self.current_session.messages.push(Message::Simple {
-      role: "user".to_string(),
+    self.current_session.record(EventPayload::UserMessage {
       content: content.to_string(),
-      reasoning_content: None,
-      tool_calls: None,
     });
 
     let tools = self.current_skill.as_ref().and_then(|s| s.to_api_tools());
 
-    let mut messages = std::mem::take(&mut self.current_session.messages);
+    // The working set is *projected* from the log, never held alongside it.
+    // One source of truth is what keeps "model-visible means logged" true
+    // instead of aspirational.
+    let mut messages = self.current_session.messages();
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
     let run_span = self.tracer.start_run();
     let run = self
       .run_agent_loop(messages, tools, 0, agent::MAX_ITER, run_span)
       .await?;
     self.tracer.end(run_span);
-    self.current_session.messages = run.messages;
+    self.current_session.extend(run.events);
 
-    if self.current_session.title == "New Chat" {
-      self.current_session.title = content.chars().take(30).collect::<String>();
+    if self.current_session.meta.title == crate::session::UNTITLED {
+      self.current_session.meta.title = title_from(content);
     }
     // Persist the session's running cost so it can be audited / restored later.
-    self.current_session.cost = self.cost.clone();
+    self.current_session.meta.cost = self.cost.clone();
     self.history.save_session(&self.current_session)?;
 
     // Print the session bill (token accounting + CNY estimate).
@@ -112,6 +146,10 @@ impl App {
     let run = self
       .run_agent_loop(messages, tools, 0, self.max_iter, None)
       .await?;
+    #[cfg(test)]
+    {
+      self.last_events = run.events.clone();
+    }
     Ok(HeadlessOutcome {
       text: run.text,
       status: run.status,
@@ -434,6 +472,7 @@ impl App {
       tools.unwrap_or_default()
     };
 
+    let mut events: Vec<EventPayload> = Vec::new();
     let mut final_content = String::new();
     let mut completed = false;
     let mut interrupted = false;
@@ -453,6 +492,7 @@ impl App {
         final_content = "[Interrupted by user]".to_string();
         completed = true;
         interrupted = true;
+        events.push(EventPayload::Interrupted);
         break;
       }
 
@@ -595,20 +635,24 @@ impl App {
 
       self.last_code_blocks = Self::extract_code_blocks(&assistant_content);
 
-      messages.push(Message::Simple {
-        role: "assistant".to_string(),
-        content: assistant_content.clone(),
-        reasoning_content: if assistant_reasoning.is_empty() {
-          None
-        } else {
-          Some(assistant_reasoning)
+      log_push(
+        &mut messages,
+        &mut events,
+        Message::Simple {
+          role: "assistant".to_string(),
+          content: assistant_content.clone(),
+          reasoning_content: if assistant_reasoning.is_empty() {
+            None
+          } else {
+            Some(assistant_reasoning)
+          },
+          tool_calls: if tool_calls.is_empty() {
+            None
+          } else {
+            Some(tool_calls.clone())
+          },
         },
-        tool_calls: if tool_calls.is_empty() {
-          None
-        } else {
-          Some(tool_calls.clone())
-        },
-      });
+      );
 
       if tool_calls.is_empty() {
         final_content = assistant_content;
@@ -660,11 +704,15 @@ impl App {
         let results = futures_util::future::join_all(futs).await;
         for (id, content) in results {
           turn_had_failure |= Self::result_is_failure(&content);
-          messages.push(Message::ToolResponse {
-            role: "tool".to_string(),
-            content,
-            tool_call_id: id,
-          });
+          log_push(
+            &mut messages,
+            &mut events,
+            Message::ToolResponse {
+              role: "tool".to_string(),
+              content,
+              tool_call_id: id,
+            },
+          );
         }
       } else {
         // Side-effect system messages (e.g. from load_skill) must be appended
@@ -804,15 +852,21 @@ impl App {
           };
 
           turn_had_failure |= Self::result_is_failure(&result_str);
-          messages.push(Message::ToolResponse {
-            role: "tool".to_string(),
-            content: result_str,
-            tool_call_id: tc.id,
-          });
+          log_push(
+            &mut messages,
+            &mut events,
+            Message::ToolResponse {
+              role: "tool".to_string(),
+              content: result_str,
+              tool_call_id: tc.id,
+            },
+          );
         }
         // Now safe to append deferred system messages (skill activations etc).
         // Order is: assistant{tool_calls} → tool{responses} → system{side-effects}.
-        messages.extend(deferred_system_msgs);
+        for msg in deferred_system_msgs {
+          log_push(&mut messages, &mut events, msg);
+        }
       }
       self.tracer.annotate(
         exec_span,
@@ -830,7 +884,7 @@ impl App {
           "\n{}",
           "[System Reminder] doom loop detected — intervening".red()
         );
-        messages.push(Message::new_user_text(reminder));
+        log_push(&mut messages, &mut events, Message::new_user_text(reminder));
       }
 
       // Two-Stage ReAct micro trigger: a failed turn forces a tools-free
@@ -860,7 +914,7 @@ impl App {
     };
     Ok(LoopResult {
       text: final_content,
-      messages,
+      events,
       status,
       iterations,
     })

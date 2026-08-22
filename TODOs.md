@@ -289,33 +289,60 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段二十六：L4 会话事件日志重构（**架构级**）
+### 🟡 阶段二十六：L4 会话事件日志重构（**架构级**）— 26.2 待续
 
 *目标：把会话从「压缩后的状态快照」改为 append-only 事件流。*
 *来源：L4-1 ~ L4-6 —— 评估中**唯一建议推倒重来**的地方。*
 *设计：[L4 §4](docs/architecture/L4-memory.md#4-目标设计)*
 
-- [ ] **26.1 事件模型**
-    - [ ] `SessionEvent { seq, ts, payload }`；`EventPayload` 覆盖 UserMessage / AssistantMessage /
+- [x] **26.1 事件模型**
+    - [x] `SessionEvent { seq, ts, payload }`；`EventPayload` 覆盖 UserMessage / AssistantMessage /
           ToolResult / SystemPrompt / Compaction / SkillActivated / ModeChanged / Interrupted / Usage。
-    - [ ] 会话目录化：`~/.seekcli/sessions/<id>/{meta.json, events.jsonl, blobs/}`。
-    - [ ] `derive_messages(&[SessionEvent]) -> Vec<Message>` 成为**唯一**上下文来源。
+    - [x] 会话目录化：`~/.seekcli/sessions/<id>/{meta.json, events.jsonl, blobs/}`。
+    - [x] `derive_messages(&[SessionEvent]) -> Vec<Message>` 成为**唯一**上下文来源。
+    - [x] `engine::log_push` 让「追加消息」与「追加事件」成为同一个动作——
+          否则某处只写其一时，「模型可见即已记录」会悄悄失效且无人报错。
+    - [x] `LoopResult` **不再返回工作集**：多给调用方一份对话副本，正是旧快照格式
+          丢失压缩历史的原因。
 - [ ] **26.2 压缩改造**
     - [ ] 压缩产出 `Compaction { replaced, summary }` **事件**，不再原地改写 messages。
     - [ ] **原始事件保留在文件里**——同时解决信息丢失与不可回放（兑现阶段十 10.3 推迟项）。
     - [ ] 阈值从字节改 token，接入 `TokenCounter`（L0-4）。
     - [ ] 删除现有幂等 marker 逻辑——事件流天然幂等。
-- [ ] **26.3 派生能力**
-    - [ ] `/resume <id>`、`/fork <id> [seq]`（L4-2）。
-    - [ ] `/search <kw>`：直接 grep events.jsonl，**不引入 SQLite**（L4-3）。
-    - [ ] `/history` 只读 `meta.json`，O(1) per session（L4-5）。
-    - [ ] 标题生成：首条 UserMessage 后一次廉价补全写入 `meta.json`（L4-4）。
-    - [ ] 中断写入 `Interrupted` 事件，配合 `/resume` 实现可续跑（L1-4）。
+- [x] **26.3 派生能力**
+    - [x] `/resume <id>`（`/load` 保留为别名）、`/fork <id> [n]`（L4-2）。
+          歧义前缀直接报错而不是静默挑一个。
+    - [x] `/search <kw>`：扫描 events.jsonl，**不引入 SQLite**（L4-3）。摘要显示消息正文而非 JSON 记录。
+    - [x] `/history` 只读 `meta.json`，O(1) per session（L4-5）。
+    - [x] 标题取首条提示词首行（L4-4）。改用 LLM 生成需要一次额外调用，先看首行够不够用。
+    - [x] 中断写入 `Interrupted` 事件，配合 `/resume` 实现可续跑（L1-4）。
 - [ ] **26.4 offload 归属**：blob 移到 `sessions/<id>/blobs/<sha256>.txt`，
       启动清理 30 天未访问，内容寻址天然去重（L4-6）。
-- [ ] **26.5 迁移**：旧 `sessions/*.json` 一次性转目录格式，原文件 `.json.bak`；
+- [x] **26.5 迁移**：旧 `sessions/*.json` 一次性转目录格式，原文件 `.json.bak`；
       **可逆、失败回滚、不静默覆盖**（同阶段十二 `/skill migrate` 手法）。
-- [ ] **26.6 测试**：投影正确性 / 压缩事件回放 / fork 边界 / 迁移幂等 + 阶段二十五的回放测试全过。
+- [x] **26.6 测试**（18 个新增）：投影顺序 / 记账事件不可见 / 压缩投影替换但磁盘保留 /
+      fork 截断与谱系 / fork 越界钳制 / jsonl 往返 / 单行损坏不丢会话 /
+      存取往返 / 列表只读 meta 且倒序 / 歧义前缀拒绝 / 迁移可逆 / 迁移幂等 /
+      搜索大小写不敏感 / 搜索摘要不泄漏 JSON / 消息转换覆盖所有角色 /
+      **日志不变量**（模型看到的一切都能从日志重建）/ tool 消息带 call_id 往返。
+
+> ⏳ **26.2 压缩事件化留给下一个提交**。当前压缩仍作用于每轮投影出的工作集：
+> 数据绝不丢失（日志始终完整），但 stage-3 摘要不跨轮持久化，超阈值的长会话
+> 每轮会多一次摘要调用。这是有意的分阶段，不是遗漏。
+
+**顺带修掉一个潜伏已久的真实 bug**：`Message` 的 `#[serde(untagged)]` 把 `Simple`
+声明在前，而 serde 默认忽略未知字段，于是 `{role:"tool", content, tool_call_id}`
+会匹配到 `Simple` 并**静默丢掉 `tool_call_id`**——任何含工具结果的会话 `/load`
+回来都是残缺历史。迁移把它暴露了（6 条消息只迁出 4 条）。调换变体顺序并加了
+往返回归单测。
+
+**顺带调整**：`App::new` 把会话存储初始化提到 provider 之前——存储不依赖凭证，
+先迁移意味着用户之后补上 key 时不会发现历史还卡在旧格式。
+
+**真实端到端验证**：69 个历史会话全部迁移且保真（6 事件 ↔ 6 消息，原文件留 `.json.bak`）；
+`/history` `/search` `/fork` 正常；**新进程里 `/resume` 后模型正确答出上一会话才知道的数字**。
+
+**覆盖率** 65.6% → 67.9%（`session.rs` 96.7%，`history.rs` 87.0%）。
 
 **验收**：长会话压缩后 `events.jsonl` 仍能读到原始内容；`/resume` 正确续接；
 `/fork <id> 12` 的上下文等于前 12 个事件的投影；1000 会话时 `/history` < 100ms。

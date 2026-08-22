@@ -8,7 +8,8 @@ use anyhow::Result;
 use colored::Colorize;
 use std::io::Write;
 
-use crate::{App, Message, Skill, ThinkingMode, observability};
+use crate::session::{EventPayload, PromptKind};
+use crate::{App, Skill, ThinkingMode, observability};
 
 impl App {
   fn print_help(&self) {
@@ -26,31 +27,29 @@ impl App {
     println!("  /copy [index]           Copy code block from last response");
     println!("  /clear                  Reset conversation");
     println!("  /history                List previous sessions");
-    println!("  /load <id>              Load a previous session by id prefix");
+    println!("  /resume <id>            Resume a previous session (alias: /load)");
+    println!("  /fork <id> [n]          Fork a session at event n into a new one");
+    println!("  /search <text>          Find sessions mentioning text");
     println!("  /help                   Show this help");
     println!("  /quit                   Exit\n");
   }
 
   fn activate_skill(&mut self, skill: Skill) {
-    // Drop any previously-activated skill's system message so we don't
-    // accumulate conflicting personas when switching mid-session.
-    self.current_session.messages.retain(|m| {
-      !matches!(
-        m,
-        Message::Simple { role, content, .. }
-          if role == "system" && content.starts_with("# Activated Skill: ")
-      )
+    // Switching skills used to delete the previous skill's system message from
+    // the transcript. An append-only log cannot retract an event, and should
+    // not: the earlier skill genuinely was active for those turns, and erasing
+    // that would make the log disagree with what the model actually saw.
+    // Instead the superseding activation is appended, and the projection lets
+    // the later prompt win by being closer to the end of the conversation.
+    self.current_session.record(EventPayload::SkillActivated {
+      name: skill.name.clone(),
     });
-
-    let prompt_text = format!(
-      "# Activated Skill: {}\n\n{}",
-      skill.name, skill.system_prompt
-    );
-    self.current_session.messages.push(Message::Simple {
-      role: "system".to_string(),
-      content: prompt_text,
-      reasoning_content: None,
-      tool_calls: None,
+    self.current_session.record(EventPayload::SystemPrompt {
+      kind: PromptKind::Skill,
+      content: format!(
+        "# Activated Skill: {}\n\n{}",
+        skill.name, skill.system_prompt
+      ),
     });
     self.current_skill = Some(skill);
   }
@@ -240,30 +239,83 @@ impl App {
             format!(" · ≈¥{:.4}", s.cost.estimated_cny())
           };
           println!(
-            "- {} ({}){}",
-            s.title,
-            s.id.chars().take(8).collect::<String>(),
+            "- {} {} · {} events{}",
+            crate::session::short_id(&s.id).yellow(),
+            s.title.bold(),
+            s.event_count,
             cost_note.dimmed()
           );
         }
       }
-      "/load" => {
-        if parts.len() > 1 {
-          let prefix = parts[1];
-          let sessions = self.history.list_sessions()?;
-          if let Some(s) = sessions.iter().find(|s| s.id.starts_with(prefix)) {
-            self.current_session = self.history.load_session(&s.id)?;
+      // `/resume` is the name the docs and `-p --resume` use; `/load` stays
+      // as an alias so muscle memory keeps working.
+      "/load" | "/resume" => match parts.get(1) {
+        None => println!("{} Usage: {} <id>", "Info:".blue(), cmd),
+        Some(prefix) => match self.history.load_session(prefix) {
+          Ok(session) => {
             // Restore the loaded session's cost so the bill continues from
             // where it left off rather than mixing with the prior session.
-            self.cost = self.current_session.cost.clone();
-            println!("{} Loaded session: {}", "✦".cyan(), s.title);
-          } else {
-            println!("{} No session matching: {}", "Error:".red(), prefix);
+            self.cost = session.meta.cost.clone();
+            println!(
+              "{} Resumed: {} ({} events)",
+              "✦".cyan(),
+              session.meta.title,
+              session.meta.event_count
+            );
+            self.current_session = session;
           }
-        } else {
-          println!("{} Usage: /load <id>", "Info:".blue());
+          Err(e) => println!("{} {}", "Error:".red(), e),
+        },
+      },
+      "/fork" => match parts.get(1) {
+        None => println!(
+          "{} Usage: /fork <id> [event-count]   (omit the count to copy all)",
+          "Info:".blue()
+        ),
+        Some(prefix) => match self.history.load_session(prefix) {
+          Ok(source) => {
+            let count = parts
+              .get(2)
+              .and_then(|n| n.parse::<usize>().ok())
+              .unwrap_or(source.events.len());
+            let child = source.fork(uuid::Uuid::new_v4().to_string(), count);
+            self.history.save_session(&child)?;
+            println!(
+              "{} Forked {} at event {} -> {} ({} events)",
+              "✦".cyan(),
+              crate::session::short_id(&source.meta.id),
+              count,
+              crate::session::short_id(&child.meta.id),
+              child.events.len()
+            );
+            self.cost = observability::cost::CostTracker::new();
+            self.current_session = child;
+          }
+          Err(e) => println!("{} {}", "Error:".red(), e),
+        },
+      },
+      "/search" => match parts.get(1) {
+        None => println!("{} Usage: /search <text>", "Info:".blue()),
+        Some(_) => {
+          let needle = line
+            .split_once(char::is_whitespace)
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or("");
+          let hits = self.history.search(needle, 10)?;
+          if hits.is_empty() {
+            println!("{} No session mentions '{}'.", "Info:".blue(), needle);
+          } else {
+            for (meta, excerpt) in hits {
+              println!(
+                "  {} {} — {}",
+                crate::session::short_id(&meta.id).yellow(),
+                meta.title.bold(),
+                excerpt.dimmed()
+              );
+            }
+          }
         }
-      }
+      },
       "/copy" => self.handle_copy(&parts)?,
       _ => println!("Unknown command. Try /help"),
     }

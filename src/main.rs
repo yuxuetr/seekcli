@@ -18,6 +18,7 @@ mod config;
 mod engine;
 mod history;
 mod observability;
+mod session;
 mod skills;
 mod subagents;
 mod tasks;
@@ -56,7 +57,8 @@ mod test;
 
 pub use api::{LlmProvider, Message, StreamItem, ToolCall};
 pub use config::Config;
-pub use history::{HistoryManager, Session};
+pub use history::HistoryManager;
+pub use session::Session;
 pub use skills::{Skill, SkillManager};
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -105,6 +107,12 @@ struct App {
   /// run can lower it with `--max-iter` so an unattended job has a bounded
   /// worst-case cost.
   max_iter: usize,
+  /// Events produced by the most recent headless run. Test-only: the
+  /// invariant test needs to assert on the log a run produced, and threading
+  /// that through the public return type would put test scaffolding in the
+  /// product API.
+  #[cfg(test)]
+  last_events: Vec<session::EventPayload>,
   /// Set to true by the Ctrl-C watcher task. Polled at the top of each
   /// agent loop iteration and during stream consumption to allow graceful
   /// mid-task interruption back to the REPL.
@@ -121,9 +129,13 @@ impl App {
     let config = loaded.config;
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
-    let brain = api::build_provider(&config)?;
+    // Session storage first: it does not depend on credentials, and running
+    // the legacy migration before a possible "API key not set" exit means a
+    // user fixing their key later does not find their history still stuck in
+    // the old format.
     let history = HistoryManager::new()?;
     let skill_manager = SkillManager::new()?;
+    let brain = api::build_provider(&config)?;
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
 
@@ -144,6 +156,8 @@ impl App {
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::from_env(),
+      #[cfg(test)]
+      last_events: Vec::new(),
       interrupt,
     })
   }
@@ -173,8 +187,14 @@ impl App {
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::new(false),
+      last_events: Vec::new(),
       interrupt: Arc::new(AtomicBool::new(false)),
     })
+  }
+
+  #[cfg(test)]
+  pub(crate) fn last_run_events(&self) -> Vec<session::EventPayload> {
+    self.last_events.clone()
   }
 
   async fn run(&mut self) -> Result<()> {

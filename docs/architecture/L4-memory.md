@@ -1,6 +1,6 @@
 # L4 记忆层：会话事件日志 · 压缩 · 状态外部化
 
-> 完成度 **45%** ｜ **本层含唯一一处建议推倒重来的架构级欠账**
+> 完成度 **80%**（阶段二十六后）｜ 事件日志已落地，压缩事件化待 26.2
 > 缺口来源：[评估 §3 L4](../evaluation/2026-08-harness-gap-analysis.md#l4-记忆层--45架构级欠账)
 
 ## 1. 职责边界
@@ -14,7 +14,8 @@
 | --- | --- | --- |
 | 阶梯降级压缩 | `agent/compressor.rs` | Stage1 掩码远期 ToolResult（**保留 ToolCall 意图链**）→ Stage2 尾部 Head-Tail 截断 → Stage3 LLM 摘要 |
 | 工具大输出卸载 | `tools/offload.rs` | >8K 写 `~/.seekcli/tmp/<hash>.txt`，返回头尾预览 + 路径 |
-| 会话持久化 | `history.rs` | `Session { id, title, messages, model, timestamp, cost }` → 单个 JSON |
+| 会话事件日志 | `session.rs` | append-only `SessionEvent`；`derive_messages` 是工作集的**唯一**来源 |
+| 会话存储 | `history.rs` | `sessions/<id>/{meta.json, events.jsonl, blobs/}`；`/history` 只读 meta |
 | 状态外部化 | `agent/prompt.rs::plan_mode_rules` | 引导模型把长程状态写进工作区 PLAN.md / TODO.md |
 
 压缩策略的方向是对的（保留意图链、摘要作为最后一级），**保持**。
@@ -23,12 +24,12 @@
 
 | # | 缺口 | 证据 | 性质 |
 | --- | --- | --- | --- |
-| L4-1 | **没有 append-only 事件日志** | `Session.messages` 直接序列化，是状态快照 | **架构级** |
-| L4-2 | 无 checkpoint / fork / resume-at-point | 只有整段 `/load` | 架构级（依赖 L4-1） |
-| L4-3 | 无会话检索 | 无 | 功能级 |
-| L4-4 | 无标题生成 | `title: "New Chat"` 硬编码 | 功能级 |
-| L4-5 | `list_sessions` 全量读盘 | `history.rs::list_sessions` 反序列化每个 session | 性能 |
-| L4-6 | offload 无生命周期管理 | 只写不清理 | 功能级 |
+| ~~L4-1~~ | ~~没有 append-only 事件日志~~ | **阶段二十六已落地** | — |
+| ~~L4-2~~ | ~~无 checkpoint / fork / resume-at-point~~ | **阶段二十六已落地**（`/resume` `/fork`） | — |
+| ~~L4-3~~ | ~~无会话检索~~ | **阶段二十六已落地**（`/search`，扫描而非索引） | — |
+| ~~L4-4~~ | ~~无标题生成~~ | **阶段二十六已落地**（首条提示词首行；LLM 生成待评估是否值得一次额外调用） | — |
+| ~~L4-5~~ | ~~`list_sessions` 全量读盘~~ | **阶段二十六已落地**（只读 `meta.json`） | — |
+| L4-6 | offload 无生命周期管理 | 只写不清理 | 功能级，随 26.2 落地 |
 
 ### 为什么 L4-1 是架构级
 
@@ -46,7 +47,7 @@ SeekCLI 现在存的是「压缩之后的当前 messages」。这意味着：
 
 ## 4. 目标设计
 
-### 4.1 事件日志（L4-1）
+### 4.1 事件日志（L4-1）✅ 阶段二十六已落地
 
 会话从「一个 JSON 文件」变成「一个目录」：
 
@@ -85,8 +86,14 @@ pub enum EventPayload {
 
   引擎不再直接持有 `Vec<Message>` 作为真相，而是持有事件流 + 投影结果。
 - 写入用 append + `flush`，**不做 fsync**（单用户本地 CLI，崩溃丢最后一条可接受）。
+  读取时单行损坏只跳过该行并告警，不让一条半写的记录毁掉整个会话。
+- 追加消息与追加事件必须**同一个动作**（`engine::log_push`）：一旦某处只写其一，
+  「模型可见即已记录」就悄悄不成立了，而不会有任何东西报错。
+- 技能切换**不再删除**旧技能的 system 消息：append-only 日志无法也不应撤回事件——
+  那个技能在那几轮里确实生效过，抹掉它会让日志与模型真正看到的东西不一致。
+  改为追加新的激活事件，靠投影中「更靠后」让新提示词胜出。
 
-### 4.2 派生能力（L4-2 / L4-3 / L4-4 / L4-5）
+### 4.2 派生能力（L4-2 ~ L4-5）✅ 阶段二十六已落地
 
 事件流立住后，以下都是小改动：
 
@@ -98,12 +105,12 @@ pub enum EventPayload {
 | 标题生成 | 首个 `UserMessage` 之后触发一次廉价补全，写 `meta.json`（解决 L4-4） |
 | 会话检索 | 首版 `/search <kw>` 直接 grep events.jsonl；**不引入 SQLite**（解决 L4-3） |
 
-### 4.3 迁移
+### 4.3 迁移 ✅ 阶段二十六已落地
 
 - 启动时检测 `~/.seekcli/sessions/*.json`（旧格式）→ 一次性转成目录格式，原文件改名 `.json.bak`。
 - 与阶段十二 `/skill migrate` 同一手法：**可逆、失败回滚、不静默覆盖**。
 
-### 4.4 压缩改造
+### 4.4 压缩改造 ⏳ 待 26.2
 
 - 阈值从字节改为 token（依赖 [L0 §4.3](L0-llm-substrate.md#43-token-计数-seaml0-4) 的 `TokenCounter`）。
 - 压缩产出 `Compaction` 事件而非原地改写 `messages`。

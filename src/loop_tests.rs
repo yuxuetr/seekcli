@@ -161,6 +161,57 @@ mod tests {
     );
   }
 
+  /// The invariant the event log exists to hold: everything the model saw is
+  /// reconstructable from the log alone. If a loop path ever appends to the
+  /// working set without logging it, the projection comes back short and this
+  /// fails — which is the only way that drift would be noticed at all.
+  #[tokio::test]
+  async fn everything_the_model_saw_is_reconstructable_from_the_log() {
+    use crate::session::{EventPayload, Session};
+
+    let scratch = Scratch::enter("invariant");
+    let mut app = app_for("two-stage-recovery");
+    let prompt = "读取 notes.md；如果它不存在就创建它，内容写 hello";
+
+    let mut session = Session::new("invariant-test".into(), "m".into());
+    session.record(EventPayload::UserMessage {
+      content: prompt.to_string(),
+    });
+
+    let outcome = match app.run_headless(prompt, None).await {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert!(scratch.path("notes.md").exists());
+
+    // The recorded trajectory: assistant(read_file) -> tool result ->
+    // assistant(write_file) -> tool result -> assistant(final).
+    let events = app.last_run_events();
+    let assistants = events
+      .iter()
+      .filter(|e| matches!(e, EventPayload::AssistantMessage { .. }))
+      .count();
+    let tool_results = events
+      .iter()
+      .filter(|e| matches!(e, EventPayload::ToolResult { .. }))
+      .count();
+    assert!(
+      assistants >= 3,
+      "expected three assistant turns, got {}",
+      assistants
+    );
+    assert_eq!(
+      tool_results, 2,
+      "read_file and write_file each returned once"
+    );
+
+    session.extend(events);
+    let projected = session.messages();
+    // user + every assistant turn + every tool result.
+    assert_eq!(projected.len(), 1 + assistants + tool_results);
+  }
+
   /// A structurally different request must fail loudly rather than replay an
   /// answer that was never given to it.
   ///
