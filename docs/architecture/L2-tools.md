@@ -1,6 +1,6 @@
 # L2 边界层：工具注册与执行管线
 
-> 完成度 **45%** ｜ 缺口来源：[评估 §3 L2](../evaluation/2026-08-harness-gap-analysis.md#l2-边界层--45)
+> 完成度 **70%**（阶段二十一、二十七后）｜ 缺口来源：[评估 §3 L2](../evaluation/2026-08-harness-gap-analysis.md#l2-边界层--45)
 
 ## 1. 职责边界
 
@@ -10,7 +10,7 @@
 
 ## 2. 当前实现
 
-10 个工具（`tools/registry.rs::system_tools`）：
+11 个工具（`tools/registry.rs::system_tools`）：
 
 | 工具 | 实现 | 只读并发 |
 | --- | --- | --- |
@@ -23,6 +23,7 @@
 | `run_shell` | `tools/shell.rs` + `approval` | ❌（保守排除） |
 | `invoke_agent` | 引擎拦截，非 dispatcher | ❌ |
 | `create_skill` | `tools/meta.rs` | ❌ |
+| `ask_user_question` | `tools/ask.rs` | ❌ |
 | `load_skill` | 引擎拦截，非 dispatcher | ❌ |
 
 派发：`tools/mod.rs::ToolDispatcher::execute` 硬编码 `match`，返回 `Result<String>`。
@@ -33,11 +34,11 @@
 | --- | --- | --- | --- |
 | L2-1 | **无 MCP** | 架构级 | 第三方无法扩展，只能改 Rust 源码 |
 | ~~L2-2~~ | ~~无原生 `glob` / `grep`~~ | — | **已于阶段二十一落地** |
-| L2-3 | 派发无中间件 | 结构 | 无 pre/post 钩子、无 per-tool 超时 |
-| L2-4 | 无结构化 `ToolResult` | 结构 | 阶段八 8.3 主动推迟项，调用方靠 `contains` 猜语义 |
+| ~~L2-3~~ | ~~派发无中间件~~ | — | **阶段二十七已落地**（统一管线 + per-tool 超时） |
+| ~~L2-4~~ | ~~无结构化 `ToolResult`~~ | — | **阶段二十七已落地**（`ToolKind`，兑现阶段八 8.3） |
 | L2-5 | 无后台执行 / job 控制 | 功能级 | 长命令阻塞整个对话 |
 | L2-6 | 无持久 PTY | 取舍级 | 明确不做，见 §5 |
-| L2-7 | 无 `ask_user_question` | 功能级 | 模型无法主动提问，只能猜 |
+| ~~L2-7~~ | ~~无 `ask_user_question`~~ | — | **阶段二十七已落地** |
 | L2-8 | 无 `todo_write` | 取舍级 | 已用 PLAN.md / TODO.md 文件约定替代 |
 
 ## 4. 目标设计
@@ -65,7 +66,7 @@ grep(pattern, path?, glob?)  -> 匹配行，格式 `path:line: content`，上限
   按行截断能防止一条宽匹配挤掉另外 199 条结果。
 - 落地后同步改 `read_file` 的 description，删掉「用 run_shell 配 sed/grep」的引导。
 
-### 4.2 执行管线中间件化（L2-3 / L2-4）
+### 4.2 执行管线中间件化（L2-3 / L2-4）✅ 阶段二十七已落地
 
 `ToolDispatcher` 从 `match` 升级为注册表 + 中间件链：
 
@@ -82,11 +83,19 @@ pub struct ToolResult { pub kind: ToolKind, pub content: String, pub meta: Value
 pub enum ToolKind { Ok, Denied, Failed, Offloaded, BadArgs }
 ```
 
-中间件链（顺序固定，不做动态编排）：
+实际落地的管线（顺序固定，不做动态编排）：
 
 ```
-approval(L3) → path policy(L3) → mode gate(L3) → timeout → execute → offload(L4) → recovery(L1)
+parse args → policy gate(L3：模式/路径/命令) → deadline → execute → audit
 ```
+
+保持为一个有序函数而非可组合的中间件栈是刻意的：8 个工具、5 个阶段，插件式栈
+只会增加间接层而永远不会被重新配置。真正重要的是**只有一条路径**，任何工具都
+绕不开任何一个阶段。
+
+`ToolKind::Denied` **不算失败**：拒绝是一个*决定*，不是故障。把它当失败会让模型
+重新规划、绕开策略——而那正是策略存在的意义。Error Recovery 也因此不对拒绝给
+恢复建议。
 
 - `ToolKind` 正式兑现阶段八 8.3 的推迟项，取代 `[USER DENIED]` 等字符串前缀约定；
   字符串前缀作为**给模型看的呈现层**保留，但**程序内部不再靠 `contains` 判断**。
@@ -110,7 +119,7 @@ job_kill(job_id)
 设计见 [L5-composition.md §4.1](L5-composition.md#41-mcp-客户端l5-1)——
 MCP 的**接入点**在 L2（工具注册表），但它的**意义**是组合层的生态打开，故放在 L5 描述。
 
-### 4.5 ask_user_question（L2-7）
+### 4.5 ask_user_question（L2-7）✅ 阶段二十七已落地
 
 ```
 ask_user_question(question, options?: [{label, description}], multi?: bool)

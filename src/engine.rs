@@ -711,16 +711,21 @@ impl App {
           let args = tc.function.arguments.clone();
           let id = tc.id.clone();
           async move {
-            let raw = match disp.execute(&name, &args).await {
-              Ok(res) => res,
-              Err(e) => format!("Error executing tool {}: {}", name, e),
+            let outcome = disp.execute(&name, &args).await;
+            let failed = outcome.kind.is_failure();
+            let text = if failed {
+              agent::recovery::augment(&name, outcome.render())
+            } else {
+              outcome.render()
             };
-            (id, agent::recovery::augment(&name, raw))
+            (id, text, failed)
           }
         });
         let results = futures_util::future::join_all(futs).await;
-        for (id, content) in results {
-          turn_had_failure |= Self::result_is_failure(&content);
+        for (id, content, failed) in results {
+          // Classified by the pipeline, not re-derived from the text. A
+          // refusal is deliberately not a failure -- see ToolKind::is_failure.
+          turn_had_failure |= failed;
           log_push(
             &mut messages,
             &mut events,
@@ -738,6 +743,7 @@ impl App {
         // matching tool messages, with no system message interleaved.
         let mut deferred_system_msgs: Vec<Message> = Vec::new();
         for tc in tool_calls {
+          let mut dispatched_failure = false;
           let result_str = if tc.function.name == "invoke_agent" {
             let (subagent_type, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
             let next_depth = depth + 1;
@@ -855,20 +861,25 @@ impl App {
               }
             }
           } else {
-            let raw = match tool_dispatcher
+            let outcome = tool_dispatcher
               .execute(&tc.function.name, &tc.function.arguments)
-              .await
-            {
-              Ok(res) => res,
-              Err(e) => format!("Error executing tool {}: {}", tc.function.name, e),
-            };
-            // Context-aware Error Recovery: append an actionable hint when the
-            // result looks like a failure, so the model follows a debug SOP
-            // instead of blindly retrying.
-            agent::recovery::augment(&tc.function.name, raw)
+              .await;
+            dispatched_failure = outcome.kind.is_failure();
+            // Context-aware Error Recovery: append an actionable hint on a
+            // real failure, so the model follows a debug SOP instead of
+            // blindly retrying. A denial gets no hint -- there is nothing to
+            // recover from, and suggesting one invites working around policy.
+            if dispatched_failure {
+              agent::recovery::augment(&tc.function.name, outcome.render())
+            } else {
+              outcome.render()
+            }
           };
 
-          turn_had_failure |= Self::result_is_failure(&result_str);
+          // Delegation paths (sub-agent, load_skill) still classify by text:
+          // they are engine-level, never reach the dispatcher, and their
+          // failure markers are produced right here.
+          turn_had_failure |= dispatched_failure || Self::result_is_failure(&result_str);
           log_push(
             &mut messages,
             &mut events,

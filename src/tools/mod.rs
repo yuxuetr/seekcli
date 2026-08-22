@@ -1,7 +1,12 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use serde_json::Value;
 
+use result::{ToolKind, ToolResult};
+
 pub mod approval;
+pub mod ask;
 pub mod audit;
 pub mod edit;
 pub mod fs;
@@ -10,8 +15,26 @@ pub mod offload;
 pub mod path_security;
 pub mod policy;
 pub mod registry;
+pub mod result;
 pub mod search;
 pub mod shell;
+
+/// Default ceiling for a single tool call.
+///
+/// A tool that hangs used to hang the whole agent: no output, no error, and
+/// for an unattended `--run-task` no way to tell it apart from slow work.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `run_shell` gets longer: builds and test suites legitimately take minutes,
+/// and killing a real build at two minutes would be worse than waiting.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn timeout_for(tool: &str) -> Duration {
+  match tool {
+    "run_shell" => SHELL_TIMEOUT,
+    _ => DEFAULT_TIMEOUT,
+  }
+}
 
 pub struct ToolDispatcher;
 
@@ -20,17 +43,24 @@ impl ToolDispatcher {
     Self
   }
 
-  pub async fn execute(&self, name: &str, arguments: &str) -> Result<String> {
+  /// The guarded pipeline every tool call passes through:
+  ///
+  /// ```text
+  /// parse args -> policy gate -> deadline -> execute -> audit
+  /// ```
+  ///
+  /// Keeping it as one ordered function rather than a composable chain is
+  /// deliberate: with eight tools and five stages, a plugin-style middleware
+  /// stack would add indirection without ever being reconfigured. What matters
+  /// is that there is exactly *one* path, so no tool can bypass a stage.
+  pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
     // A malformed arguments payload used to be silently coerced to `Null`,
     // which then surfaced as a confusing "missing argument" error. Surface it
     // explicitly so Error Recovery can hand the model an actionable hint.
     let args: Value = match serde_json::from_str(arguments) {
       Ok(v) => v,
       Err(e) => {
-        return Ok(format!(
-          "[BAD ARGS] arguments for `{}` is not valid JSON: {}",
-          name, e
-        ));
+        return ToolResult::bad_args(format!("arguments for `{}` is not valid JSON: {}", name, e));
       }
     };
 
@@ -40,24 +70,46 @@ impl ToolDispatcher {
     match policy::check(name, &args) {
       policy::Verdict::Allow => {}
       policy::Verdict::Deny(reason) => {
-        let outcome = audit::Outcome::Denied;
-        audit::record(name, &args, outcome, &reason);
-        return Ok(format!("[MODE DENIED] {reason}"));
+        audit::record(name, &args, audit::Outcome::Denied, &reason);
+        return ToolResult::denied(format!("[MODE DENIED] {reason}"));
       }
       // Ask is resolved where the interaction lives (shell.rs), so the
       // prompt can show the actual command.
       policy::Verdict::Ask(_) => {}
     }
 
+    let limit = timeout_for(name);
+    let result = match tokio::time::timeout(limit, Self::run(name, &args)).await {
+      Ok(outcome) => ToolResult::from_legacy(outcome),
+      Err(_) => ToolResult::timed_out(format!(
+        "`{}` exceeded {:?}. If this is legitimately long-running, run it in \
+         the background instead of waiting for it inline.",
+        name, limit
+      )),
+    };
+
+    if result.kind != ToolKind::Ok {
+      audit::record(
+        name,
+        &args,
+        audit::Outcome::Denied,
+        result.kind.prefix().trim(),
+      );
+    }
+    result
+  }
+
+  async fn run(name: &str, args: &Value) -> Result<String> {
     match name {
-      "read_file" => fs::read_file(&args).await,
-      "write_file" => fs::write_file(&args).await,
-      "edit_file" => fs::edit_file(&args).await,
-      "list_dir" => fs::list_dir(&args).await,
-      "glob" => search::glob(&args).await,
-      "grep" => search::grep(&args).await,
-      "run_shell" => shell::run_shell(&args).await,
-      "create_skill" => meta::create_skill(&args).await,
+      "read_file" => fs::read_file(args).await,
+      "write_file" => fs::write_file(args).await,
+      "edit_file" => fs::edit_file(args).await,
+      "list_dir" => fs::list_dir(args).await,
+      "glob" => search::glob(args).await,
+      "grep" => search::grep(args).await,
+      "run_shell" => shell::run_shell(args).await,
+      "create_skill" => meta::create_skill(args).await,
+      "ask_user_question" => ask::ask_user_question(args).await,
       _ => anyhow::bail!("Unknown tool: {}", name),
     }
   }
@@ -81,13 +133,12 @@ mod tests {
       .await;
     policy::set_mode(policy::Mode::Normal);
 
-    // A hard Err would abort the turn; the model should instead see the
-    // refusal and adapt, the same way it does for [USER DENIED].
-    let text = match out {
-      Ok(t) => t,
-      Err(e) => panic!("denial must be a tool result, not an error: {}", e),
-    };
-    assert!(text.starts_with("[MODE DENIED]"), "got: {}", text);
+    // The refusal reaches the model as a classified result, not as an error
+    // that would abort the turn -- and `Denied` is not `is_failure`, so it
+    // does not drag the loop into Two-Stage replanning around the policy.
+    assert_eq!(out.kind, ToolKind::Denied);
+    assert!(!out.kind.is_failure());
+    assert!(out.render().starts_with("[MODE DENIED]"), "got: {}", out);
   }
 
   #[allow(clippy::await_holding_lock)]
@@ -96,10 +147,58 @@ mod tests {
     let _guard = crate::testsync::lock();
     policy::set_mode(policy::Mode::Normal);
     let d = ToolDispatcher::new();
-    let out = match d.execute("read_file", "not json at all").await {
-      Ok(t) => t,
-      Err(e) => panic!("bad args must be a tool result: {}", e),
-    };
-    assert!(out.starts_with("[BAD ARGS]"), "got: {}", out);
+    let out = d.execute("read_file", "not json at all").await;
+    assert_eq!(out.kind, ToolKind::BadArgs);
+    assert!(
+      out.kind.is_failure(),
+      "the model must be told to fix its JSON"
+    );
+    assert!(out.render().starts_with("[BAD ARGS]"), "got: {}", out);
+  }
+
+  #[allow(clippy::await_holding_lock)]
+  #[tokio::test]
+  async fn an_unknown_tool_is_a_failure_not_a_panic() {
+    let _guard = crate::testsync::lock();
+    policy::set_mode(policy::Mode::Normal);
+    let out = ToolDispatcher::new().execute("no_such_tool", "{}").await;
+    assert_eq!(out.kind, ToolKind::Failed);
+  }
+
+  /// The deadline must actually fire. A tool that hangs used to hang the whole
+  /// agent: no output, no error, and for an unattended run no way to tell it
+  /// apart from slow work.
+  #[allow(clippy::await_holding_lock)]
+  #[tokio::test(start_paused = true)]
+  async fn a_hanging_tool_hits_its_deadline_instead_of_hanging_the_agent() {
+    let _guard = crate::testsync::lock();
+    policy::set_mode(policy::Mode::Normal);
+    approval::set_interaction(approval::Interaction::AutoApprove);
+
+    // `sleep` well past the shell ceiling. With a paused clock tokio advances
+    // time itself, so this costs no wall-clock seconds.
+    let out = ToolDispatcher::new()
+      .execute("run_shell", r#"{"command":"sleep 3600"}"#)
+      .await;
+
+    approval::set_interaction(approval::Interaction::Prompt);
+    assert_eq!(out.kind, ToolKind::TimedOut);
+    assert!(
+      out.kind.is_failure(),
+      "a deadline miss should trigger recovery"
+    );
+    assert!(
+      out.render().contains("background"),
+      "the model needs to be told what to do instead: {}",
+      out
+    );
+  }
+
+  #[test]
+  fn shell_gets_a_longer_deadline_than_the_rest() {
+    // Builds and test suites legitimately take minutes; killing a real build
+    // at the default two minutes would be worse than waiting for it.
+    assert!(timeout_for("run_shell") > timeout_for("read_file"));
+    assert_eq!(timeout_for("read_file"), DEFAULT_TIMEOUT);
   }
 }

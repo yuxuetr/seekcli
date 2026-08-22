@@ -26,5 +26,11 @@ tokio = {version = "1", features = ["full"]}
 toml = "0.8"
 uuid = {version = "1.0", features = ["v4"]}
 
+[dev-dependencies]
+# `start_paused` lets a deadline test advance the clock instead of sleeping,
+# so verifying a 600s timeout costs no wall-clock time. Dev-only: it must not
+# reach the shipped binary.
+tokio = {version = "1", features = ["test-util"]}
+
 [profile.dev.package."*"]
 debug = 1

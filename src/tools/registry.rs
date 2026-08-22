@@ -156,6 +156,34 @@ pub fn system_tools() -> Vec<Tool> {
       }),
     ),
     make_tool(
+      "ask_user_question",
+      "Ask the user for a decision or a missing detail instead of guessing. \
+       Use it when the answer materially changes what you build and you cannot \
+       infer it. Do NOT use it for things you can determine yourself by \
+       reading files or running a command. In a non-interactive run this \
+       returns a refusal telling you to pick a sensible default and say so — \
+       do not ask twice.",
+      json!({
+        "type": "object",
+        "properties": {
+          "question": { "type": "string", "description": "The specific question to ask" },
+          "options": {
+            "type": "array",
+            "description": "Optional choices. Put your recommendation first.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label":       { "type": "string", "description": "Short option label" },
+                "description": { "type": "string", "description": "One sentence on the tradeoff" }
+              },
+              "required": ["label"]
+            }
+          }
+        },
+        "required": ["question"]
+      }),
+    ),
+    make_tool(
       "create_skill",
       "Draft a reusable skill proposal. The proposal is saved to the user's review \
        queue, NOT directly activated. Use this only when the user explicitly asks \
@@ -263,5 +291,7 @@ mod tests {
     assert!(!is_parallel_readonly("create_skill"));
     assert!(!is_parallel_readonly("invoke_agent"));
     assert!(!is_parallel_readonly("load_skill"));
+    // Asking blocks on a human; running several at once would interleave prompts.
+    assert!(!is_parallel_readonly("ask_user_question"));
   }
 }

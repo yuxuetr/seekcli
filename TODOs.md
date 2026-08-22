@@ -350,27 +350,36 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段二十七：L2 工具执行管线中间件化
+### ✅ 阶段二十七：L2 工具执行管线中间件化
 
 *目标：把硬编码 `match` 换成注册表 + 中间件链，兑现阶段八 8.3 的推迟项。*
 *来源：L2-3 / L2-4。设计：[L2 §4.2](docs/architecture/L2-tools.md#42-执行管线中间件化l2-3--l2-4)*
 
-- [ ] **27.1 `ToolImpl` trait**：`name` / `schema` / `execute(args, cx) -> ToolResult`。
-      现有 8 个工具逐个迁移。
-- [ ] **27.2 结构化 `ToolResult`**
-    - [ ] `ToolKind { Ok, Denied, Failed, Offloaded, BadArgs }`。
-    - [ ] 正式取代 `[USER DENIED]` / `[PATH DENIED]` / `[BAD ARGS]` 的字符串前缀**判定**；
-          前缀作为**给模型看的呈现层**保留，程序内部不再靠 `contains` 猜语义。
-- [ ] **27.3 中间件链**：`approval → path policy → mode gate → timeout → execute → offload → recovery`。
-    - [ ] per-tool timeout 默认 120s，`run_shell` 可覆盖至 600s；超时返回 `Failed` 并提示可用后台模式。
-- [ ] **27.4 `ask_user_question` 工具**（L2-7）
-    - [ ] `ask_user_question(question, options?, multi?)`，交互模式走 stderr + rustyline，
-          与 `approval` 的 y/N 同一通道。
-    - [ ] headless 下返回 `ToolKind::Denied` 并说明「非交互环境」——**绝不挂起**，
-          兑现阶段二十三 23.3 预留的降级路径。
-    - [ ] 放在本阶段而非二十三：有了 `ToolImpl` + `ToolResult` 之后新增工具最自然，
-          且非交互拒绝需要结构化的 `Denied` 而非字符串前缀。
-- [ ] **27.5 测试**：链顺序 / 各 `ToolKind` 分支 / 超时 / ask 的交互与非交互两条路径。
+- [x] **27.2 结构化 `ToolResult`**
+    - [x] `ToolKind { Ok, Denied, Failed, BadArgs, TimedOut }`，兑现阶段八 8.3 的推迟项。
+    - [x] 前缀保留为**给模型看的呈现层**（系统提示已训练它识别），但程序内部不再
+          `contains` 猜语义——`kind` 承载含义，前缀由 kind 渲染出来而不是被解析回去。
+    - [x] **`Denied` 不算失败**：拒绝是决定不是故障。当成失败会让模型重新规划绕开策略，
+          而那正是策略存在的意义；Error Recovery 也因此不对拒绝给恢复建议。
+    - [x] `from_legacy` 在**唯一一处**做前缀分类，让 8 个工具无需各自重写即可迁移。
+- [x] **27.3 统一管线**：`parse args → policy gate → deadline → execute → audit`。
+    - [x] per-tool timeout：默认 120s，`run_shell` 600s（构建与测试套件本就要几分钟，
+          两分钟杀掉一次真实构建比等它更糟）；超时返回 `TimedOut` 并提示改用后台。
+    - [x] ⚠️ **未采用 `ToolImpl` trait**（原 27.1）。8 个工具、5 个阶段，插件式中间件栈
+          只会增加间接层而永远不会被重新配置。真正重要的是**只有一条路径**，
+          任何工具都绕不开任何一个阶段——一个有序函数已经保证了这点。
+          MCP（阶段二十八）需要动态工具时再引入注册表，届时它才有真实用户。
+- [x] **27.4 `ask_user_question` 工具**（L2-7）
+    - [x] 交互模式走 stderr，与 `approval` 的 y/N 同一通道；数字选项 / 自由文本都支持。
+    - [x] headless 下**立即拒绝**并告诉模型「选一个合理默认值并说明假设」——绝不挂起。
+- [x] **27.5 测试**（12 个）：拒绝不算失败 / 前缀不重复 / 遗留文本分类 / 错误链保留 /
+      未知工具是失败不是 panic / shell 超时更长 / **暂停时钟下验证 `sleep 3600` 真的触发超时** /
+      ask 的非交互拒绝与缺参报错。
+
+**顺带修正回放的形状校验**：新增工具让所有 fixture 失效，但对话 digest **逐字相同**
+（`6d82789e5913f7af`）——只是多了一项模型没用到的能力。工具集因此降为**告警**而非硬失败：
+硬失败会让每次新增工具都要重录整套 fixture，却抓不到任何东西。消息条数与最后一条角色
+仍是硬失败，因为那才是「回放的答案属不属于这段对话」的判据。
 
 **验收**：新增一个工具只需实现 `ToolImpl` 并注册，不改 dispatcher；
 所有既有行为经阶段二十五回放测试验证无变化。

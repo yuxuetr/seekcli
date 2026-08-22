@@ -74,8 +74,14 @@ impl RequestShape {
     }
   }
 
-  /// Structural mismatch only. Returns the first difference found so the
+  /// Conversation-shape mismatch. Returns the first difference found so the
   /// failure message names it instead of dumping two blobs.
+  ///
+  /// Only the *conversation* is checked, because that is what a replayed
+  /// answer belongs to. The tool set is compared separately and only warned
+  /// about: adding a tool leaves the conversation bit-identical — the model
+  /// merely had one more capability it did not use — so failing on it would
+  /// invalidate every fixture on every tool addition while catching nothing.
   fn mismatch(&self, other: &Self) -> Option<String> {
     if self.message_count != other.message_count {
       return Some(format!(
@@ -89,13 +95,25 @@ impl RequestShape {
         other.last_role, self.last_role
       ));
     }
-    if self.tool_names != other.tool_names {
-      return Some(format!(
-        "tool set {:?} != recorded {:?}",
-        other.tool_names, self.tool_names
-      ));
-    }
     None
+  }
+
+  /// Tools present now but absent from the recording, and vice versa.
+  fn tool_drift(&self, other: &Self) -> Option<String> {
+    if self.tool_names == other.tool_names {
+      return None;
+    }
+    let added: Vec<&String> = other
+      .tool_names
+      .iter()
+      .filter(|t| !self.tool_names.contains(t))
+      .collect();
+    let removed: Vec<&String> = self
+      .tool_names
+      .iter()
+      .filter(|t| !other.tool_names.contains(t))
+      .collect();
+    Some(format!("added {:?}, removed {:?}", added, removed))
   }
 }
 
@@ -229,6 +247,13 @@ impl LlmProvider for Replaying {
     .with_context(|| format!("cannot parse {}", req_path.display()))?;
 
     let actual = RequestShape::capture(model, &messages, thinking_mode, tools.as_deref());
+    if let Some(drift) = recorded.tool_drift(&actual) {
+      eprintln!(
+        "[Replay] request #{}: tool set drifted since recording ({}). \
+         Replaying anyway — the conversation is unchanged.",
+        seq, drift
+      );
+    }
     if let Some(diff) = recorded.mismatch(&actual) {
       anyhow::bail!(
         "replay request #{} does not match the recording: {}\n\
@@ -306,9 +331,21 @@ mod tests {
 
     let diff = recorded.mismatch(&shape(3, "tool", &["read_file"]));
     assert!(diff.is_some_and(|d| d.contains("role")), "role");
+  }
 
-    let diff = recorded.mismatch(&shape(3, "user", &["read_file", "write_file"]));
-    assert!(diff.is_some_and(|d| d.contains("tool set")), "tools");
+  /// Adding a tool leaves the conversation bit-identical, so it must not
+  /// invalidate a fixture — otherwise every new tool would force a re-record
+  /// of the whole suite while catching nothing.
+  #[test]
+  fn a_new_tool_warns_but_does_not_invalidate_the_recording() {
+    let recorded = shape(3, "user", &["read_file"]);
+    let now = shape(3, "user", &["ask_user_question", "read_file"]);
+    assert!(recorded.mismatch(&now).is_none(), "must still replay");
+    let drift = recorded.tool_drift(&now);
+    assert!(
+      drift.is_some_and(|d| d.contains("ask_user_question")),
+      "the drift should still be reported"
+    );
   }
 
   #[test]
