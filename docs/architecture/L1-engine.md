@@ -1,0 +1,114 @@
+# L1 引擎层：ReAct 主循环与运行时纠偏
+
+> 完成度 **80%（最强的一层）** ｜ 缺口来源：[评估 §3 L1](../evaluation/2026-08-harness-gap-analysis.md#l1-引擎层--80最强的一层)
+
+## 1. 职责边界
+
+驱动 think → act → observe 闭环，并在模型跑偏时**运行时纠偏**。
+
+「Harness 区别于裸 ReAct」的分界线就在本层：裸 ReAct 只有循环，
+Harness 还有 Two-Stage、Reminders、Recovery、并发编排、迭代上限。
+
+## 2. 当前实现
+
+| 机制 | 位置 | 说明 |
+| --- | --- | --- |
+| ReAct 主循环 | `engine.rs::run_agent_loop` | `for iter in 0..max_iter` |
+| Two-Stage ReAct | `engine.rs::planning_phase` | 宏触发（首轮 + thinking 开）/ 微触发（上轮工具失败） |
+| 规划轮护栏 | `append_plan_with_bridge` / `planning_only_directive` / `strip_fake_tool_syntax` | 阶段十九根因修复 |
+| System Reminders | `agent/reminders.rs` | 连续 3 次相同轨迹注入 user 消息打断 |
+| Error Recovery | `agent/recovery.rs` | 按工具 + 错误类型追加 `[Recovery]` 建议 |
+| Fork-Join 并发 | `engine.rs` + `registry::is_parallel_readonly` | 批次全只读才并发 |
+| 迭代 / 深度上限 | `agent/mod.rs::MAX_ITER` / `MAX_SUBAGENT_DEPTH` | 25 / 3 |
+| 中断 | `main.rs::spawn_interrupt_watcher` + 循环内轮询 | Ctrl-C 优雅回 REPL |
+
+> 阶段十九对「假工具调用」的根因分析值得保留为范本：
+> 问题不在 Rust 解析，而在**消息序列形状分布外**（规划轮后以 assistant 结尾）
+> 与**系统提示自相矛盾**（无工具时仍要求「别叙述、直接调用」）。
+> 修复 = 恢复 assistant→user→assistant 交替 + 临时指令 + 确定性兜底截断。
+
+## 3. 缺口
+
+| # | 缺口 | 证据 | 性质 |
+| --- | --- | --- | --- |
+| L1-1 | 循环封闭，无扩展点 | `run_agent_loop` 单函数 440 行 | 结构 |
+| L1-2 | 无 turn / step 概念 | 只有 `iter` | 结构 |
+| L1-3 | 无运行中上下文注入 | 无 `inject()` 对位 | 功能 |
+| L1-4 | 中断即终止，无法续跑 | Ctrl-C 后直接结束 | 功能 |
+| L1-5 | 取消不向下传播 | `run_shell` 子进程不接收取消 | 正确性 |
+
+## 4. 目标设计
+
+### 4.1 拆解主循环（L1-1 / L1-2）
+
+把 440 行拆成四个阶段函数，主循环只做编排：
+
+```rust
+struct StepCtx<'a> {
+  messages: &'a mut Vec<Message>,
+  depth: usize,
+  iter: usize,
+  cancel: &'a CancelToken,
+}
+
+enum StepOutcome {
+  Continue,            // 有工具结果，进入下一 step
+  Done(String),        // 模型给出最终答复
+  Interrupted,
+  LimitReached,
+}
+```
+
+- `prepare_step` —— 压缩 + 规划轮 + reminder 注入
+- `request` —— 调 provider，消费流，落 usage
+- `dispatch_tools` —— Fork-Join 分发 + recovery 包装
+- `observe` —— 更新 reminder tracker，决定 `StepOutcome`
+
+**这是纯重构，行为零变化**，靠现有 87 单测 + eval 套件（L7）守住。
+
+### 4.2 LoopHook 扩展点（L1-1）
+
+```rust
+#[async_trait]
+pub trait LoopHook: Send + Sync {
+  async fn pre_step(&self, _cx: &mut StepCtx<'_>) -> Result<Control> { Ok(Control::Proceed) }
+  async fn post_step(&self, _cx: &mut StepCtx<'_>, _out: &StepOutcome) -> Result<()> { Ok(()) }
+}
+
+pub enum Control { Proceed, SkipStep, StopTurn(String) }
+```
+
+把 compressor / reminders / tracer 逐个改造成 hook，`App` 持有 `Vec<Box<dyn LoopHook>>`。
+
+**明确不做**：事件总线 / waterfall / 动态注册。dsh 需要那套是因为它要支持第三方插件；
+SeekCLI 只需要「内部机制可组合、可单测」，一个静态 Vec 足够。
+过度对齐 dsh 在这里是负收益——见 [design-principles](design-principles.md)。
+
+### 4.3 取消传播（L1-5）
+
+`Arc<AtomicBool>` 升级为携带 `tokio::sync::Notify` 的 `CancelToken`，
+经 `StepCtx` 传到 `tools::shell::run_shell`，用 `tokio::select!` 在
+子进程 `wait()` 与取消之间竞争，取消时 `child.start_kill()`。
+
+### 4.4 可续跑（L1-4）
+
+依赖 L4 事件日志：中断时把 `Interrupted` 写入事件流，
+`/resume <id>` 从最后一个 step 边界重建 messages 继续。**排在 L4 重构之后。**
+
+### 4.5 上下文注入（L1-3）
+
+```rust
+impl App { pub fn inject(&mut self, note: String) }  // 挂到下一次 prepare_step
+```
+
+用途：后台 job 完成通知（L2）、L8 digest 提醒、文件变更。
+
+## 5. 验收标准
+
+- 重构后 87 单测 + eval 套件全过，`SEEKCLI_TRACE` 决策树结构不变。
+- Ctrl-C 时正在跑的 `sleep 60` 子进程在 1s 内消失（`ps` 可验证）。
+- 新增一条循环策略只需实现 `LoopHook`，不改 `run_agent_loop`。
+
+## 6. 对应路线
+
+阶段三十一（循环拆解与扩展点，P2）、阶段二十六（可续跑随事件日志落地）。

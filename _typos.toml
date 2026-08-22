@@ -1,6 +1,8 @@
 [default.extend-words]
 PNGf = "PNGf"
 PN = "PN"
+# Rust TUI crate name, not a misspelling of "ratatouille"
+ratatui = "ratatui"
 
 [files]
 extend-exclude = ["CHANGELOG.md", "notebooks/*"]

@@ -4,8 +4,8 @@
 它把 DeepSeek 的推理能力 + 本地工具调用 + ReAct 闭环包进一个极简的终端 REPL，
 让你在 shell 里直接驱动一个真正会"思考 → 用工具 → 观察 → 再思考"的 Agent。
 
-> **架构纲领**: 见 [`AGENT_ARCHITECTURE.md`](./AGENT_ARCHITECTURE.md)
-> **演进路线**: 见 [`TODOs.md`](./TODOs.md)
+> **架构设计**: 见 [`docs/architecture/`](./docs/architecture/README.md)
+> **演进路线**: 见 [`TODOs.md`](./TODOs.md) ｜ **能力评估**: 见 [`docs/evaluation/`](./docs/evaluation/README.md)
 
 ---
 
@@ -125,6 +125,36 @@ seekcli --bench examples/benchmarks/basic.json  # Fail-to-Pass 跑分报表
 ```
 每轮对话结束打印 `[Cost]` 账单（token + cache 命中率 + ¥ 估算），并随 session 持久化。
 
+### ⏰ 定时任务（L8 Loop 层，MVP）
+
+`seekcli` 本身是纯反应式的单会话 Harness——它不做后台常驻进程。定时能力交给
+系统级调度器（macOS `launchd` / cron），周期性地以 headless 模式调用一次：
+
+```bash
+seekcli --run-task reminders
+```
+
+这一次调用会：chdir 进 `~/.seekcli/tasks/`（可用 `config.toml [tasks] dir` 覆盖）
+→ 让模型自己 `list_dir`/`read_file`/`edit_file`/`write_file` 维护
+`reminders.md`/`todos.md`，到期项通过 `run_shell` 触发 `osascript` 弹出 macOS
+通知，并把当日摘要写到 `digest/<今天>.md` → chdir 回来。**全程零新增 Rust
+工具**——决策"该不该通知/写什么摘要"完全由模型在这一次 headless agent turn
+里完成。
+
+- 安装示例 launchd plist：见 [`examples/launchd/`](./examples/launchd/)，
+  复制到 `~/Library/LaunchAgents/` 改好占位符后
+  `launchctl load ~/Library/LaunchAgents/com.seekcli.reminders.plist`。
+- 交互式打开 REPL 时，如果今天的 digest 是新的，会打印一行提醒
+  （`[Digest] 今天的摘要已生成：...`），一天只提醒一次，具体内容仍需你自己
+  `read_file` 或直接打开文件查看。
+- 防重复通知：模型在 `reminders.md` 对应行追加 `[notified:<到期值>]`，下次
+  运行比对该值是否仍等于本次到期值，相等则跳过——每条提醒只弹一次系统通知，
+  过期未完成靠每日 digest 持续兑现，不做反复骚扰式弹窗。
+
+后续 stocks / learning / coding 等场景计划复用完全相同的模式（`tasks.rs`
+里新增一个 `match` 分支 + 一个 prompt 模板），本阶段（MVP）只做
+reminders+todos。
+
 ---
 
 ## 📁 目录结构
@@ -223,9 +253,17 @@ cp -r examples/skills/vision examples/skills/doc_parser ~/.seekcli/skills/
 | 阶段十五 | Plan Mode + 状态外部化                | ✅ 完成   |
 | 阶段十六 | 三态 allow/ask/deny 权限              | ✅ 完成   |
 | 阶段十七 | L7 可观测（Cost + Tracing + Benchmark）| ✅ 完成   |
+| 阶段十八 | L8 Loop 层（reminders+todos MVP）      | ✅ 完成   |
+| 阶段十九 | Two-Stage ReAct 假工具调用根因修复    | ✅ 完成   |
 
-对照 Harness 全景图（图3）的 12 项组件已全部落地，详见
-[`AGENT_ARCHITECTURE.md §4.1`](./AGENT_ARCHITECTURE.md)；任务拆解见 [`TODOs.md`](./TODOs.md)。
+对照 harness-engineering 全景图（图3）的 12 项组件已全部落地。
+
+2026-08 换用 [`deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness) 作为更全的
+组件验收清单重新评估后，整体完成度约 40%（引擎内核 65% / 产品形态 25%），
+识别出 MCP 缺失、会话数据模型、工具面广度三处架构级欠账——
+完整评估见 [`docs/evaluation/`](./docs/evaluation/README.md)，
+逐层补全设计见 [`docs/architecture/`](./docs/architecture/README.md)，
+任务拆解见 [`TODOs.md`](./TODOs.md)（阶段二十起）。
 
 ---
 
@@ -234,6 +272,7 @@ cp -r examples/skills/vision examples/skills/doc_parser ~/.seekcli/skills/
 SeekCLI 遵循"分层 Harness Agent 架构"：
 
 ```
+L8  循环层      系统级调度 · Headless Task · Digest（决定何时再跑一次）
 L7  可观测层    Cost Tracker · Tracing · Benchmark
 L6  界面层      REPL · CLI 子命令
 L5  组合层      SubAgent 模板 · Skill 策展
@@ -249,13 +288,13 @@ L0  基底层      LlmProvider trait（OpenAI/Anthropic 双适配）· Streaming
 2. **没有独立的 Planner Agent** —— 规划是主 Agent 思考阶段的步骤，不是另起一个 agent
 3. **SubAgent = 运行时上下文压缩** —— 隔离子任务，只把摘要带回主轴
 
-详细论述见 [`AGENT_ARCHITECTURE.md`](./AGENT_ARCHITECTURE.md)。
+详细论述见 [`docs/architecture/README.md`](./docs/architecture/README.md)。
 
 ---
 
 ## 🤝 贡献与反馈
 
-欢迎提交 Issue 或 PR。新增工具/skill/sub-agent 模板前请先阅读 `AGENT_ARCHITECTURE.md §7 设计原则约束`。
+欢迎提交 Issue 或 PR。新增工具 / skill / sub-agent 模板前请先阅读 [`docs/architecture/design-principles.md`](./docs/architecture/design-principles.md)。
 
 ## 📄 开源协议
 
