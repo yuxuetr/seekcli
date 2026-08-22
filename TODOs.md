@@ -55,11 +55,15 @@
     - [x] `docs/evaluation/` —— 评分口径 + dsh 对照评估。
     - [x] `docs/archive/` —— 阶段一 ~ 十九路线图归档。
     - [x] 根 `AGENT_ARCHITECTURE.md` 降级为指针，`README.md` 更新链接。
-- [ ] **20.2 配置定位修复**（L6-5，**缺陷级**）
-    - [ ] 主配置移到 `~/.seekcli/config.toml`；首次运行生成**带注释**的默认配置。
-    - [ ] 支持 `./.seekcli.toml` 项目级覆盖（仅覆盖出现的字段）与 `SEEKCLI_CONFIG` 显式指定。
-    - [ ] 检测到 CWD 遗留 `config.toml` 且用户级不存在 → 打印迁移提示，**不自动搬**。
-    - [ ] 单测：三级配置合并优先级。
+- [x] **20.2 配置定位修复**（L6-5，**缺陷级**）
+    - [x] 主配置移到 `~/.seekcli/config.toml`；首次运行生成**带注释**的默认配置。
+    - [x] 支持 `./.seekcli.toml` 项目级覆盖（仅覆盖出现的字段）与 `SEEKCLI_CONFIG` 显式指定。
+          合并在 `toml::Value` 层做深合并，新增配置字段无需改动加载逻辑。
+    - [x] 检测到 CWD 遗留 `config.toml` 且用户级不存在 → 打印迁移提示（含 cp 命令），**不自动搬**。
+    - [x] 启动提示走 stderr，为阶段二十三的 `--output json` 预留干净的 stdout。
+    - [x] 顺带删除阶段七遗留的死配置 `[sensor] vlm_model`，以及仓库里已无人读取的 `config.toml`。
+    - [x] 8 个新单测：首次生成 / 逐键覆盖 / env 层最高 / 缺失 explicit 报错 /
+          部分层保留默认 / 迁移提示触发与消失 / 坏 TOML 指名文件。
 - [x] **20.3 补 LICENSE**
     - [x] 根目录补 MIT LICENSE 文件（`Cargo.toml` 已声明 MIT，此前声明与事实不符，README 链接亦断开）。
 - [ ] **20.4 补仓库自身的 AGENTS.md**

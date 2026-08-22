@@ -83,7 +83,12 @@ struct App {
 
 impl App {
   fn new() -> Result<Self> {
-    let config = Config::load()?;
+    let loaded = Config::load()?;
+    // Notices go to stderr so a future `-p --output json` keeps stdout clean.
+    for notice in &loaded.notices {
+      eprintln!("{}", notice.yellow());
+    }
+    let config = loaded.config;
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
     let deepseek_key = env::var("DEEPSEEK_API_KEY").context("Please set DEEPSEEK_API_KEY")?;

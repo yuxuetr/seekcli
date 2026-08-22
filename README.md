@@ -66,8 +66,17 @@ export DEEPSEEK_API_BASE="..."            # 可选，覆盖 OpenAI 兼容 endpoi
 export DEEPSEEK_ANTHROPIC_BASE="..."      # 可选，覆盖 Anthropic 兼容 endpoint
 ```
 
+### 配置文件
+```
+~/.seekcli/config.toml   用户级主配置，首次运行自动生成（带注释）
+./.seekcli.toml          项目级覆盖，可选；只需写要改的键
+$SEEKCLI_CONFIG          显式指定，优先级最高
+```
+三层按上述顺序合并，后者逐键覆盖前者。**SeekCLI 不会往当前目录写任何配置文件。**
+（0.1.0 曾读写 `./config.toml`，检测到遗留文件会提示迁移命令，不自动搬。）
+
 ### LLM Provider（wire 协议）
-`config.toml` 的 `[brain] provider` 选择对接协议（同一个 DeepSeek key 通用）：
+`[brain] provider` 选择对接协议（同一个 DeepSeek key 通用）：
 ```toml
 [brain]
 provider = "openai"     # DeepSeek /chat/completions（默认）

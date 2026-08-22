@@ -1,3 +1,6 @@
 /target
 .DS_Store
 .claude/
+
+# Generated at runtime; SeekCLI reads ~/.seekcli/config.toml instead.
+/config.toml
