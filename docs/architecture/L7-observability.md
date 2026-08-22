@@ -1,6 +1,6 @@
 # L7 可观测层：Cost · Tracing · Benchmark
 
-> 完成度 **55%** ｜ 缺口来源：[评估 §3 L7](../evaluation/2026-08-harness-gap-analysis.md#l7-可观测层--55)
+> 完成度 **75%**（阶段二十五后）｜ 缺口来源：[评估 §3 L7](../evaluation/2026-08-harness-gap-analysis.md#l7-可观测层--55)
 
 ## 1. 职责边界
 
@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | Cost Tracker | `observability/cost.rs` | 装饰器式累加 prompt/completion/cache token + 调用数；`estimated_cny` + `cache_hit_pct`；随 session 持久化 |
 | Tracing | `observability/trace.rs` | Run → Turn → Generate/Execute/Planning/Compaction span 树 → `~/.seekcli/traces/<run_id>.json`；`SEEKCLI_TRACE` 开关，关闭时零成本 no-op |
+| 录制 / 回放 | `api/record.rs` | `SEEKCLI_RECORD` / `SEEKCLI_REPLAY`，fixture 在 `tests/fixtures/` |
 | Benchmark | `observability/bench.rs` | Testsuite JSON → seed 靶机 → chdir 沙箱 AgentRun → eval 命令 → 报表（成功率 / CNY / 耗时 / 调用数） |
 
 **装饰器 / 旁路埋点**的做法是对的，`run_agent_loop` 里没有混入计费代码，**保持**。
@@ -23,7 +24,7 @@
 | # | 缺口 | 证据 | 影响 |
 | --- | --- | --- | --- |
 | L7-1 | **eval 数据集只有 1 个文件 3 个任务** | `examples/benchmarks/basic.json` | 有跑道没有车，回归检测力接近零 |
-| L7-2 | **agent 循环本身零自动化测试** | 87 单测全是纯逻辑；`engine.rs` 行覆盖率 **13.8%**，`tools/shell.rs` / `tools/fs.rs` / `api/openai.rs` / `commands.rs` 均为 **0%**（2026-08-22 实测） | 主控流任何重构只能靠手测 |
+| ~~L7-2~~ | ~~agent 循环本身零自动化测试~~ | **阶段二十五已落地**：`engine.rs` 行覆盖率 13.8% → **65.0%**，总体 46.3% → **65.6%** | — |
 | L7-3 | 无快照回归 | 无 | 提示词 / 流程变更无差异可看 |
 | L7-4 | 覆盖率门禁形同虚设 | `build.yml` 装了 `cargo-llvm-cov` 却从未调用 | CI 里那一步是死代码 |
 | L7-5 | 无 OTel 导出 | 取舍级 | |
@@ -33,7 +34,7 @@
 
 ## 4. 目标设计
 
-### 4.1 LLM 录制 / 回放（L7-2，**优先级最高**）
+### 4.1 LLM 录制 / 回放（L7-2）✅ 阶段二十五已落地
 
 ```
 SEEKCLI_RECORD=fixtures/xxx    每次 API 响应流按顺序落盘
@@ -50,9 +51,17 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
 - 录制格式：`<seq>.jsonl`，一行一个 `StreamItem`，另存一份 `request.json` 便于人读。
 - 回放时**校验请求形状**（消息条数、最后一条角色、工具集哈希）；
   不匹配就报错而不是静默错位——这才是它作为回归测试的价值所在。
-- 有了它，`run_agent_loop` 可以进 `#[tokio::test]`：
-  录一次真实的「读不存在的文件 → 失败 → Two-Stage → 创建」轨迹，
-  之后每次重构都跑一遍，**阶段十九那个 bug 将永远不会静默回归**。
+- 有了它，`run_agent_loop` 进了 `#[tokio::test]`：录了真实的
+  「读不存在的文件 → 失败 → Two-Stage → 创建」轨迹，
+  已验证故意破坏 `append_plan_with_bridge` 会让该测试失败——
+  **阶段十九那个 bug 不会再静默回归**。
+- 形状校验刻意只查**结构**（消息条数 / 最后一条角色 / 工具集），不查逐字内容：
+  改措辞不该让整套 fixture 失效，但换一段对话必须失败。
+- 副作用断言优先于文本断言：阶段十九 bug 的特征正是模型**声称**做完了，
+  所以测的是「文件是否真的存在」而不是「回答里有没有说成功」。
+- 测试踩到了三处进程级全局状态（cwd、`policy::MODE`、`approval::INTERACTION`）
+  与 `cargo test` 并行执行的冲突，用 `crate::testsync` 单锁串行化——
+  否则一个测试翻转策略模式会让无关测试失败，看起来像被测代码的 bug。
 
 ### 4.2 eval 套件扩容（L7-1）
 

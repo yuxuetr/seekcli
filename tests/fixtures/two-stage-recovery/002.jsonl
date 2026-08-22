@@ -1,0 +1,20 @@
+{"Reasoning":"The"}
+{"Reasoning":" file"}
+{"Reasoning":" doesn"}
+{"Reasoning":"'t"}
+{"Reasoning":" exist"}
+{"Reasoning":","}
+{"Reasoning":" so"}
+{"Reasoning":" I"}
+{"Reasoning":" should"}
+{"Reasoning":" create"}
+{"Reasoning":" it"}
+{"Reasoning":" with"}
+{"Reasoning":" the"}
+{"Reasoning":" content"}
+{"Reasoning":" \""}
+{"Reasoning":"hello"}
+{"Reasoning":"\"."}
+{"Usage":{"prompt_tokens":2980,"completion_tokens":79,"prompt_cache_hit_tokens":2816,"prompt_cache_miss_tokens":164}}
+{"ToolCall":{"id":"call_00_ZgP8T8Es5UyNFxkzGfHQ9976","type":"function","function":{"name":"write_file","arguments":"{\"path\": \"notes.md\", \"content\": \"hello\\n\"}"}}}
+{"Finish":"tool_calls"}

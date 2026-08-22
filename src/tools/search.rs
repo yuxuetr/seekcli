@@ -407,7 +407,8 @@ mod tests {
   /// shows up at real-repo scale.
   #[tokio::test]
   async fn smoke_against_this_repository() {
-    let out = match glob(&json!({ "pattern": "src/**/*.rs" })).await {
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = match glob(&json!({ "pattern": "src/**/*.rs", "path": repo })).await {
       Ok(v) => v,
       Err(e) => panic!("glob failed: {}", e),
     };
@@ -415,10 +416,11 @@ mod tests {
     assert!(!out.contains("/target/"), "target/ leaked: {}", out);
     assert!(!out.contains(".git/"), ".git leaked: {}", out);
 
-    let out = match grep(&json!({ "pattern": "fn run_agent_loop", "glob": "*.rs" })).await {
-      Ok(v) => v,
-      Err(e) => panic!("grep failed: {}", e),
-    };
+    let out =
+      match grep(&json!({ "pattern": "fn run_agent_loop", "glob": "*.rs", "path": repo })).await {
+        Ok(v) => v,
+        Err(e) => panic!("grep failed: {}", e),
+      };
     assert!(out.contains("src/engine.rs:"), "got: {}", out);
   }
 

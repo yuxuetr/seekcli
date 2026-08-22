@@ -1,4 +1,9 @@
 fail_fast: false
+# Recorded LLM traffic is data, not source. Spell-checking model output is
+# meaningless, and trailing-whitespace / end-of-file fixers would silently
+# rewrite a recording whose content legitimately ends in whitespace -- which
+# would then replay differently from what the model actually sent.
+exclude: '^tests/fixtures/'
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.3.0

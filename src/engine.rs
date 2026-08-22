@@ -243,7 +243,13 @@ impl App {
   /// model to deliberate before acting. The plan text is appended to
   /// `messages` (plus a bridge message, see `append_plan_with_bridge`) so the
   /// subsequent action call sees it. Called for the main agent only.
-  async fn planning_phase(&self, messages: &mut Vec<Message>) -> Result<()> {
+  /// Takes `&mut self` solely to bill the planning request. It used to take
+  /// `&self`, which made the `Usage` item unrecordable, so every Two-Stage
+  /// pass spent real tokens that never appeared in the cost summary — and a
+  /// failing turn triggers one of these, so the under-count grew exactly when
+  /// a run was going badly. Found by the stage 25 replay tests: the recorded
+  /// trajectory made four requests but only three were billed.
+  async fn planning_phase(&mut self, messages: &mut Vec<Message>) -> Result<()> {
     eprintln!("\n{}", "[Plan] deliberating (tools withheld)...".dimmed());
     let mut planning_request = messages.clone();
     planning_request.push(Self::planning_only_directive());
@@ -279,6 +285,7 @@ impl App {
           ui::content(&format!("{}", c.dimmed()));
           plan.push_str(&c);
         }
+        StreamItem::Usage(u) => self.cost.record(&u),
         _ => {}
       }
       ui::flush_content()?;

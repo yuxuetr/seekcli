@@ -1,0 +1,46 @@
+{"Reasoning":"The"}
+{"Reasoning":" user"}
+{"Reasoning":" wants"}
+{"Reasoning":" me"}
+{"Reasoning":" to"}
+{"Reasoning":" use"}
+{"Reasoning":" glob"}
+{"Reasoning":" to"}
+{"Reasoning":" find"}
+{"Reasoning":" all"}
+{"Reasoning":" ."}
+{"Reasoning":"rs"}
+{"Reasoning":" files"}
+{"Reasoning":","}
+{"Reasoning":" and"}
+{"Reasoning":" grep"}
+{"Reasoning":" to"}
+{"Reasoning":" search"}
+{"Reasoning":" for"}
+{"Reasoning":" \""}
+{"Reasoning":"fn"}
+{"Reasoning":"\","}
+{"Reasoning":" and"}
+{"Reasoning":" tell"}
+{"Reasoning":" them"}
+{"Reasoning":" both"}
+{"Reasoning":" results"}
+{"Reasoning":" together"}
+{"Reasoning":"."}
+{"Reasoning":" These"}
+{"Reasoning":" are"}
+{"Reasoning":" independent"}
+{"Reasoning":" calls"}
+{"Reasoning":","}
+{"Reasoning":" so"}
+{"Reasoning":" I"}
+{"Reasoning":" can"}
+{"Reasoning":" make"}
+{"Reasoning":" them"}
+{"Reasoning":" in"}
+{"Reasoning":" parallel"}
+{"Reasoning":"."}
+{"Usage":{"prompt_tokens":2840,"completion_tokens":118,"prompt_cache_hit_tokens":2816,"prompt_cache_miss_tokens":24}}
+{"ToolCall":{"id":"call_00_hmyfFrRl7LRLC0Lp4Vm52784","type":"function","function":{"name":"glob","arguments":"{\"pattern\": \"**/*.rs\"}"}}}
+{"ToolCall":{"id":"call_01_b08COMCDbxVbSTu39UoC8999","type":"function","function":{"name":"grep","arguments":"{\"pattern\": \"fn\"}"}}}
+{"Finish":"tool_calls"}

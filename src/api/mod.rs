@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod openai;
+pub mod record;
 pub mod resilience;
 
 pub use anthropic::AnthropicProvider;
@@ -71,6 +72,14 @@ impl std::error::Error for LlmError {}
 /// lookup and the resilience wrapping stay in one place — adding a third wire
 /// should touch this function and nothing else.
 pub fn build_provider(config: &crate::config::Config) -> Result<Box<dyn LlmProvider>> {
+  // Checked before credentials: a replayed run must work with no API key at
+  // all, or the tests it enables cannot run in CI. Retry/timeout are skipped
+  // too — there is no network to be resilient about, and a wrapped replay
+  // would only add latency to the test suite.
+  if let Some(replay) = record::replay_from_env() {
+    return Ok(replay);
+  }
+
   let endpoint = config.resolve_provider()?;
   let key = endpoint.resolve_key()?;
   let inner: Box<dyn LlmProvider> = match endpoint.wire.as_str() {
@@ -85,7 +94,9 @@ pub fn build_provider(config: &crate::config::Config) -> Result<Box<dyn LlmProvi
     request_timeout: Duration::from_secs(r.request_timeout_secs),
     stream_idle_timeout: Duration::from_secs(r.stream_idle_timeout_secs),
   };
-  Ok(Box::new(Resilient::new(inner, policy)))
+  // Recording sits inside the retry layer: what gets written is the stream
+  // that actually reached the loop, not the attempts that failed on the way.
+  Ok(Box::new(Resilient::new(record::wrap(inner), policy)))
 }
 
 /// Read `Retry-After` (delta-seconds form only; the HTTP-date form is rare in
@@ -147,7 +158,7 @@ pub struct FunctionDefinition {
   pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamItem {
   Reasoning(String),
   Content(String),
@@ -157,7 +168,7 @@ pub enum StreamItem {
 }
 
 /// Token-level accounting reported at the end of a streamed response.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageInfo {
   pub prompt_tokens: u64,
   pub completion_tokens: u64,

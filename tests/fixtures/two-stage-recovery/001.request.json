@@ -1,0 +1,8 @@
+{
+  "model": "deepseek-v4-flash",
+  "message_count": 5,
+  "last_role": "system",
+  "thinking_mode": "none",
+  "tool_names": [],
+  "digest": "1bcb4aaf5cc85017"
+}

@@ -26,6 +26,31 @@ mod ui;
 
 use completer::CmdCompleter;
 
+/// Serialises tests that touch process-global state.
+///
+/// Three things in this binary are process-wide by design — the working
+/// directory, `tools::policy`'s mode, and `tools::approval`'s interaction mode
+/// — and `cargo test` runs tests in parallel. Without a shared lock, one test
+/// flipping the policy to read-only makes an unrelated test's assertion fail,
+/// which reads as a bug in the code under test rather than in the harness.
+#[cfg(test)]
+pub(crate) mod testsync {
+  use std::sync::{Mutex, MutexGuard};
+
+  static GLOBAL: Mutex<()> = Mutex::new(());
+
+  /// A panicking test poisons the lock. Recover instead of cascading: the
+  /// invariant each test establishes for itself still holds for the next one.
+  pub fn lock() -> MutexGuard<'static, ()> {
+    match GLOBAL.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    }
+  }
+}
+
+#[cfg(test)]
+mod loop_tests;
 #[cfg(test)]
 mod test;
 
@@ -120,6 +145,35 @@ impl App {
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::from_env(),
       interrupt,
+    })
+  }
+
+  /// Construct an App around a supplied provider, bypassing config and
+  /// credentials. Exists so replay tests can drive the real
+  /// `run_agent_loop` — the whole point of stage 25 is that the loop stops
+  /// being the untested part of the system.
+  #[cfg(test)]
+  pub(crate) fn for_test(brain: Box<dyn LlmProvider>) -> Result<Self> {
+    let config = Config::default();
+    let history = HistoryManager::new()?;
+    let skill_manager = SkillManager::new()?;
+    let model = config.brain.flash_model.clone();
+    let current_session = history.create_session(model.clone());
+    Ok(Self {
+      brain,
+      config,
+      history,
+      skill_manager,
+      current_session,
+      model,
+      thinking_mode: ThinkingMode::None,
+      max_iter: agent::MAX_ITER,
+      plan_mode: false,
+      current_skill: None,
+      last_code_blocks: Vec::new(),
+      cost: observability::cost::CostTracker::new(),
+      tracer: observability::trace::Trace::new(false),
+      interrupt: Arc::new(AtomicBool::new(false)),
     })
   }
 

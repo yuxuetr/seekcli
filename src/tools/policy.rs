@@ -471,6 +471,7 @@ mod tests {
 
   #[test]
   fn read_only_mode_denies_mutating_tools_and_allows_reads() {
+    let _guard = crate::testsync::lock();
     set_mode(Mode::ReadOnly);
     for tool in ["write_file", "edit_file", "create_skill"] {
       assert!(
@@ -501,6 +502,7 @@ mod tests {
 
   #[test]
   fn normal_mode_still_gates_paths_and_commands() {
+    let _guard = crate::testsync::lock();
     set_mode(Mode::Normal);
     assert!(matches!(
       check("write_file", &json!({"path": "/etc/hosts"})),
@@ -524,6 +526,7 @@ mod tests {
 
   #[test]
   fn plan_mode_is_not_a_write_restriction() {
+    let _guard = crate::testsync::lock();
     // Regression guard. Plan Mode means "externalize state to PLAN.md /
     // TODO.md" and its prompt tells the model to write them; wiring it to the
     // restricted mode would break the feature it is named after.

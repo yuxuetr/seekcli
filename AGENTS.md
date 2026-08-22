@@ -50,6 +50,8 @@ SeekCLI —— DeepSeek + Tools + Harness Agent 核心，单人维护的本地 C
 - 改 `messages` 序列形状前，先想清楚它是否破坏 assistant→user/tool→assistant 交替。
 - 往系统提示加规则前，检查它在「无工具的规划轮」是否仍然成立。
 - 用 `SEEKCLI_TRACE=1` 跑一遍，看决策树里该轮 `tool_calls` 是不是真的非零。
+- 改动主循环后跑 `src/loop_tests.rs` 的回放测试；它们断言**副作用**（文件是否真的
+  被创建）而非模型说了什么。新增轨迹：`SEEKCLI_RECORD=tests/fixtures/<name> seekcli -p "..."`。
 - 概率性的提示词缓解**不够**，要配确定性兜底（见 `strip_fake_tool_syntax`）。
 
 ## 提交前

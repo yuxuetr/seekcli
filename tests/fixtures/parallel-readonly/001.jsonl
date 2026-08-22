@@ -1,0 +1,92 @@
+{"Reasoning":"Both"}
+{"Reasoning":" results"}
+{"Reasoning":" are"}
+{"Reasoning":" back"}
+{"Reasoning":"."}
+{"Reasoning":" Let"}
+{"Reasoning":" me"}
+{"Reasoning":" present"}
+{"Reasoning":" them"}
+{"Reasoning":" together"}
+{"Reasoning":"."}
+{"Content":"两个"}
+{"Content":"结果"}
+{"Content":"如下"}
+{"Content":"：\n\n"}
+{"Content":"**"}
+{"Content":"glob"}
+{"Content":" "}
+{"Content":"找到"}
+{"Content":"的"}
+{"Content":" ."}
+{"Content":"rs"}
+{"Content":" "}
+{"Content":"文件"}
+{"Content":"（"}
+{"Content":"2"}
+{"Content":" "}
+{"Content":"个"}
+{"Content":"）"}
+{"Content":"**\n"}
+{"Content":"-"}
+{"Content":" `"}
+{"Content":"src"}
+{"Content":"/lib"}
+{"Content":".rs"}
+{"Content":"`\n"}
+{"Content":"-"}
+{"Content":" `"}
+{"Content":"src"}
+{"Content":"/main"}
+{"Content":".rs"}
+{"Content":"`\n\n"}
+{"Content":"**"}
+{"Content":"g"}
+{"Content":"rep"}
+{"Content":" "}
+{"Content":"搜索"}
+{"Content":" `"}
+{"Content":"fn"}
+{"Content":"`"}
+{"Content":" "}
+{"Content":"的"}
+{"Content":"匹配"}
+{"Content":"（"}
+{"Content":"2"}
+{"Content":" "}
+{"Content":"处"}
+{"Content":"）"}
+{"Content":"**\n"}
+{"Content":"-"}
+{"Content":" `"}
+{"Content":"src"}
+{"Content":"/lib"}
+{"Content":".rs"}
+{"Content":":"}
+{"Content":"1"}
+{"Content":"`"}
+{"Content":" —"}
+{"Content":" `"}
+{"Content":"pub"}
+{"Content":" fn"}
+{"Content":" helper"}
+{"Content":"()"}
+{"Content":" {}"}
+{"Content":"`\n"}
+{"Content":"-"}
+{"Content":" `"}
+{"Content":"src"}
+{"Content":"/main"}
+{"Content":".rs"}
+{"Content":":"}
+{"Content":"1"}
+{"Content":"`"}
+{"Content":" —"}
+{"Content":" `"}
+{"Content":"fn"}
+{"Content":" main"}
+{"Content":"()"}
+{"Content":" {"}
+{"Content":"`"}
+{"Usage":{"prompt_tokens":3015,"completion_tokens":91,"prompt_cache_hit_tokens":2944,"prompt_cache_miss_tokens":71}}
+{"Finish":"stop"}

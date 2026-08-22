@@ -47,11 +47,12 @@ jobs:
       # drift out of sync with what the test step actually ran.
       # Threshold is a ratchet against "new module with zero tests", not an
       # aspiration: raise it as coverage improves, never lower it to go green.
-      # Baseline at adoption (2026-08-22) was 46.29% lines.
+      # Baseline at adoption (2026-08-22) was 46.29%; raised to 60 after
+      # stage 25's replay tests took the loop from 13.8% to 65%.
       - name: Execute rust tests with coverage gate
         run: >-
           cargo llvm-cov nextest --all-features --workspace
-          --summary-only --fail-under-lines 45
+          --summary-only --fail-under-lines 60
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff

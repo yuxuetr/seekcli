@@ -1,0 +1,34 @@
+{"Reasoning":"The"}
+{"Reasoning":" user"}
+{"Reasoning":" wants"}
+{"Reasoning":" me"}
+{"Reasoning":" to"}
+{"Reasoning":" read"}
+{"Reasoning":" notes"}
+{"Reasoning":".md"}
+{"Reasoning":";"}
+{"Reasoning":" if"}
+{"Reasoning":" it"}
+{"Reasoning":" doesn"}
+{"Reasoning":"'t"}
+{"Reasoning":" exist"}
+{"Reasoning":","}
+{"Reasoning":" create"}
+{"Reasoning":" it"}
+{"Reasoning":" with"}
+{"Reasoning":" content"}
+{"Reasoning":" \""}
+{"Reasoning":"hello"}
+{"Reasoning":"\"."}
+{"Reasoning":" Let"}
+{"Reasoning":" me"}
+{"Reasoning":" first"}
+{"Reasoning":" check"}
+{"Reasoning":" if"}
+{"Reasoning":" the"}
+{"Reasoning":" file"}
+{"Reasoning":" exists"}
+{"Reasoning":"."}
+{"Usage":{"prompt_tokens":2832,"completion_tokens":76,"prompt_cache_hit_tokens":2816,"prompt_cache_miss_tokens":16}}
+{"ToolCall":{"id":"call_00_LNKzCkdhsISxcWIdFSRj8533","type":"function","function":{"name":"read_file","arguments":"{\"path\": \"notes.md\"}"}}}
+{"Finish":"tool_calls"}

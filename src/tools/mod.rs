@@ -67,8 +67,13 @@ impl ToolDispatcher {
 mod tests {
   use super::*;
 
+  // Holding the guard across the await is the point: the global policy mode
+  // must stay set for the whole call. Safe here because only tests take this
+  // lock and the test runtime cannot deadlock on it.
+  #[allow(clippy::await_holding_lock)]
   #[tokio::test]
   async fn restricted_mode_denial_is_reported_to_the_model_not_raised_as_an_error() {
+    let _guard = crate::testsync::lock();
     policy::set_mode(policy::Mode::ReadOnly);
     let d = ToolDispatcher::new();
     let out = d
@@ -85,8 +90,10 @@ mod tests {
     assert!(text.starts_with("[MODE DENIED]"), "got: {}", text);
   }
 
+  #[allow(clippy::await_holding_lock)]
   #[tokio::test]
   async fn malformed_arguments_are_reported_rather_than_coerced() {
+    let _guard = crate::testsync::lock();
     policy::set_mode(policy::Mode::Normal);
     let d = ToolDispatcher::new();
     let out = match d.execute("read_file", "not json at all").await {

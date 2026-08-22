@@ -1,0 +1,199 @@
+//! End-to-end tests of the agent loop, driven by recorded LLM traffic.
+//!
+//! These are the first tests that exercise `run_agent_loop` at all. Everything
+//! before stage 25 was pure logic: the loop had ~14% line coverage, and the
+//! stage 19 fake-tool-call bug could have silently returned at any time
+//! without a single test noticing.
+//!
+//! Each test replays a trajectory captured from the real API
+//! (`SEEKCLI_RECORD=...`), so it runs offline, deterministically, and without
+//! an API key. Fixtures live in `tests/fixtures/`; re-record one with:
+//!
+//! ```sh
+//! SEEKCLI_RECORD=tests/fixtures/<name> seekcli -p "<the prompt>"
+//! ```
+
+#[cfg(test)]
+mod tests {
+  use std::path::PathBuf;
+
+  use crate::api::record::Replaying;
+  use crate::engine::LoopStatus;
+  use crate::{App, tools};
+
+  fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("tests")
+      .join("fixtures")
+      .join(name)
+  }
+
+  fn app_for(name: &str) -> App {
+    match App::for_test(Box::new(Replaying::new(fixture(name)))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {}", e),
+    }
+  }
+
+  /// Run inside a scratch directory, since the loop's tools resolve paths
+  /// against the process cwd and `write_file` is confined to it.
+  struct Scratch {
+    original: PathBuf,
+    dir: PathBuf,
+    // Held for the lifetime of the test, released on drop with the cwd.
+    _guard: std::sync::MutexGuard<'static, ()>,
+  }
+
+  impl Scratch {
+    fn enter(name: &str) -> Self {
+      let guard = crate::testsync::lock();
+      // The loop may reach run_shell; without this it would block on stdin.
+      tools::approval::set_interaction(tools::approval::Interaction::AutoDeny);
+      let original = std::env::current_dir().unwrap_or_default();
+      let dir = std::env::temp_dir().join(format!("seekcli-loop-{}", name));
+      let _ = std::fs::remove_dir_all(&dir);
+      let _ = std::fs::create_dir_all(&dir);
+      let _ = std::env::set_current_dir(&dir);
+      // Resolve through the same canonicalisation the tools see, so
+      // comparisons do not trip over /var vs /private/var on macOS.
+      let dir = std::env::current_dir().unwrap_or(dir);
+      Self {
+        original,
+        dir,
+        _guard: guard,
+      }
+    }
+
+    /// Absolute path inside *this* scratch, never re-read from the process
+    /// cwd — that is what made these assertions race in the first place.
+    fn path(&self, rel: &str) -> PathBuf {
+      self.dir.join(rel)
+    }
+  }
+
+  impl Drop for Scratch {
+    fn drop(&mut self) {
+      let _ = std::env::set_current_dir(&self.original);
+    }
+  }
+
+  /// The stage 19 regression guard.
+  ///
+  /// The failing shape was: `read_file` misses, error recovery fires, the
+  /// Two-Stage micro trigger runs a tools-free planning pass, and then the
+  /// model narrates a fake tool call instead of emitting a real one — so it
+  /// reports success while the file is never written. Asserting on the file
+  /// rather than on the text is deliberate: the bug's signature was a model
+  /// that *said* it had done the work.
+  #[tokio::test]
+  async fn recovers_from_a_missing_file_and_actually_writes_it() {
+    let scratch = Scratch::enter("two-stage");
+    let mut app = app_for("two-stage-recovery");
+
+    let outcome = match app
+      .run_headless("读取 notes.md；如果它不存在就创建它，内容写 hello", None)
+      .await
+    {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert!(
+      scratch.path("notes.md").exists(),
+      "the model claimed success -- the file must actually exist"
+    );
+    // read (fail) -> planning pass -> write -> answer
+    assert_eq!(
+      outcome.llm_calls, 4,
+      "expected the full recovery trajectory"
+    );
+  }
+
+  /// Two read-only tools in one turn take the Fork-Join path. Recorded from a
+  /// real turn so the parallel branch is exercised, not just its predicate.
+  #[tokio::test]
+  async fn parallel_read_only_batch_returns_results_in_order() {
+    let scratch = Scratch::enter("parallel");
+    let _ = std::fs::create_dir_all(scratch.path("src"));
+    let _ = std::fs::write(
+      scratch.path("src/main.rs"),
+      "fn main() {\n  println!(\"a\");\n}\n",
+    );
+    let _ = std::fs::write(scratch.path("src/lib.rs"), "pub fn helper() {}\n");
+
+    let mut app = app_for("parallel-readonly");
+    let outcome = match app
+      .run_headless(
+        "用 glob 找出所有 .rs 文件，同时用 grep 搜索 fn，把两个结果一起告诉我",
+        None,
+      )
+      .await
+    {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert!(!outcome.text.is_empty());
+  }
+
+  /// The policy gate seen from inside the loop: a denial must come back as a
+  /// tool result the model can react to, not as an error that aborts the turn.
+  #[tokio::test]
+  async fn read_only_mode_denies_the_write_and_the_loop_still_finishes() {
+    let scratch = Scratch::enter("readonly");
+    let _ = std::fs::write(scratch.path("victim.txt"), "keep me\n");
+
+    tools::policy::set_mode(tools::policy::Mode::ReadOnly);
+    let mut app = app_for("readonly-denial");
+    let outcome = app.run_headless("删除 victim.txt", None).await;
+    tools::policy::set_mode(tools::policy::Mode::Normal);
+
+    let outcome = match outcome {
+      Ok(o) => o,
+      Err(e) => panic!("a denial must not abort the loop: {}", e),
+    };
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert!(
+      scratch.path("victim.txt").exists(),
+      "read-only mode must not let the file be deleted"
+    );
+  }
+
+  /// A structurally different request must fail loudly rather than replay an
+  /// answer that was never given to it.
+  ///
+  /// Note what does *not* trigger this: merely rewording the prompt. The shape
+  /// check is deliberately structural, so a fixture survives prompt edits but
+  /// not a changed conversation. Activating a Skill adds a system message, so
+  /// the message count no longer matches what was recorded.
+  #[tokio::test]
+  async fn a_structurally_different_request_fails_instead_of_going_green() {
+    let _scratch = Scratch::enter("divergent");
+    let mut app = app_for("two-stage-recovery");
+    let skill = crate::Skill {
+      name: "extra".into(),
+      description: "adds a system message the recording never had".into(),
+      system_prompt: "be terse".into(),
+      tools: None,
+    };
+    let result = app
+      .run_headless(
+        "读取 notes.md；如果它不存在就创建它，内容写 hello",
+        Some(&skill),
+      )
+      .await;
+    match result {
+      Ok(o) => panic!("a mismatched replay must fail, got status {:?}", o.status),
+      Err(e) => {
+        let msg = format!("{:#}", e);
+        assert!(
+          msg.contains("does not match") || msg.contains("replay exhausted"),
+          "unhelpful failure: {}",
+          msg
+        );
+      }
+    }
+  }
+}

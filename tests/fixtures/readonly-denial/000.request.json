@@ -1,0 +1,19 @@
+{
+  "model": "deepseek-v4-flash",
+  "message_count": 2,
+  "last_role": "user",
+  "thinking_mode": "none",
+  "tool_names": [
+    "create_skill",
+    "edit_file",
+    "glob",
+    "grep",
+    "invoke_agent",
+    "list_dir",
+    "load_skill",
+    "read_file",
+    "run_shell",
+    "write_file"
+  ],
+  "digest": "ce3e9267fa84dec2"
+}

@@ -5,4 +5,6 @@ PN = "PN"
 ratatui = "ratatui"
 
 [files]
-extend-exclude = ["CHANGELOG.md", "notebooks/*"]
+# typos runs over the whole repo (pass_filenames: false), so the
+# pre-commit-level exclude does not reach it -- list fixtures here too.
+extend-exclude = ["CHANGELOG.md", "notebooks/*", "tests/fixtures/**"]
