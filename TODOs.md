@@ -60,8 +60,8 @@
     - [ ] 支持 `./.seekcli.toml` 项目级覆盖（仅覆盖出现的字段）与 `SEEKCLI_CONFIG` 显式指定。
     - [ ] 检测到 CWD 遗留 `config.toml` 且用户级不存在 → 打印迁移提示，**不自动搬**。
     - [ ] 单测：三级配置合并优先级。
-- [ ] **20.3 补 LICENSE**
-    - [ ] 根目录补 MIT LICENSE 文件（`Cargo.toml` 已声明 MIT，当前声明与事实不符）。
+- [x] **20.3 补 LICENSE**
+    - [x] 根目录补 MIT LICENSE 文件（`Cargo.toml` 已声明 MIT，此前声明与事实不符，README 链接亦断开）。
 - [ ] **20.4 补仓库自身的 AGENTS.md**
     - [ ] `prompt.rs::workspace_rules` 专门读工作区 AGENTS.md，本仓库却没有。
     - [ ] 内容：2 空格缩进、禁 unwrap/expect、提交规范、先跑 `cargo deny`。
