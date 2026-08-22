@@ -151,7 +151,9 @@
     - [ ] `--output json`：`session_id` / `final` / `iterations` / `usage` / `cost_cny` / `tools` / `status`。
     - [ ] **日志一律走 stderr**，stdout 只放结果，保证 `jq` 可直接解析。
 - [ ] **23.3 非交互降级**
-    - [ ] headless 下审批 `Ask` → `Deny`（除非 `--yes`）；`ask_user_question` → 非交互拒绝。
+    - [ ] headless 下审批 `Ask` → `Deny`（除非 `--yes`）。
+    - [ ] 为「模型主动提问」预留非交互降级路径；`ask_user_question` 工具本身
+          在阶段二十七 27.4 落地（此时尚不存在）。
     - [ ] **绝不静默挂起**——无 TTY 时任何等待输入的路径都必须立即返回。
 - [ ] **23.4 退出码语义**：0 完成 / 1 运行时错误 / 2 未收敛 / 3 被策略拒绝。
 - [ ] **23.5 统一路径**：`--bench` 与 `--run-task` 内部改走同一条 headless 实现。
@@ -231,7 +233,8 @@
     - [ ] 阈值从字节改 token，接入 `TokenCounter`（L0-4）。
     - [ ] 删除现有幂等 marker 逻辑——事件流天然幂等。
 - [ ] **26.3 派生能力**
-    - [ ] `/resume <id>`、`/fork <id> [seq]`、`/search <kw>`（直接 grep events.jsonl，**不引入 SQLite**）。
+    - [ ] `/resume <id>`、`/fork <id> [seq]`（L4-2）。
+    - [ ] `/search <kw>`：直接 grep events.jsonl，**不引入 SQLite**（L4-3）。
     - [ ] `/history` 只读 `meta.json`，O(1) per session（L4-5）。
     - [ ] 标题生成：首条 UserMessage 后一次廉价补全写入 `meta.json`（L4-4）。
     - [ ] 中断写入 `Interrupted` 事件，配合 `/resume` 实现可续跑（L1-4）。
@@ -259,7 +262,14 @@
           前缀作为**给模型看的呈现层**保留，程序内部不再靠 `contains` 猜语义。
 - [ ] **27.3 中间件链**：`approval → path policy → mode gate → timeout → execute → offload → recovery`。
     - [ ] per-tool timeout 默认 120s，`run_shell` 可覆盖至 600s；超时返回 `Failed` 并提示可用后台模式。
-- [ ] **27.4 测试**：链顺序 / 各 `ToolKind` 分支 / 超时。
+- [ ] **27.4 `ask_user_question` 工具**（L2-7）
+    - [ ] `ask_user_question(question, options?, multi?)`，交互模式走 stderr + rustyline，
+          与 `approval` 的 y/N 同一通道。
+    - [ ] headless 下返回 `ToolKind::Denied` 并说明「非交互环境」——**绝不挂起**，
+          兑现阶段二十三 23.3 预留的降级路径。
+    - [ ] 放在本阶段而非二十三：有了 `ToolImpl` + `ToolResult` 之后新增工具最自然，
+          且非交互拒绝需要结构化的 `Denied` 而非字符串前缀。
+- [ ] **27.5 测试**：链顺序 / 各 `ToolKind` 分支 / 超时 / ask 的交互与非交互两条路径。
 
 **验收**：新增一个工具只需实现 `ToolImpl` 并注册，不改 dispatcher；
 所有既有行为经阶段二十五回放测试验证无变化。
@@ -384,17 +394,25 @@
 与 [security-model §6](docs/architecture/security-model.md#6-未来增强方向不在主线)。
 若将来重估，需先修改对应设计文档再开阶段。
 
-| 项 | 理由 |
-| --- | --- |
-| OS 沙箱（Landlock / Seatbelt / bwrap） | 威胁模型不同；需要隔离请在容器内运行 |
-| 持久 PTY / `terminal_*` 工具族 | `run_shell` + 后台 job 覆盖 90% 场景 |
-| Code Mode（`run_code`） | 收益在超大工具面时才显现 |
-| workflow / DAG 编排 | 是另一个产品 |
-| 跨会话语义记忆 | 与 CLI 即时性目标背离 |
-| 插件框架 / profile / bundle | 扩展需求由 MCP 承担 |
-| TUI / Web UI / ACP server | 与本地 CLI 定位冲突；`--output json` 覆盖多数集成需求 |
-| OTel 导出 | 单机无 collector；JSON span + `jq` 已够 |
-| 文档 i18n | 单人中文开发 |
+本表是**所有取舍级缺口的完整清单**——评估里每个未被阶段二十 ~ 三十三承接的
+缺口编号都必须出现在这里，由 `scripts/check-gap-coverage.py` 在 CI 中强制。
+
+| 缺口 | 项 | 理由 |
+| --- | --- | --- |
+| L3-5 | OS 沙箱（Landlock / Seatbelt / bwrap） | 威胁模型不同；需要隔离请在容器内运行 |
+| L2-6 | 持久 PTY / `terminal_*` 工具族 | `run_shell` + 后台 job 覆盖 90% 场景 |
+| L2-8 | `todo_write` 工具 | PLAN.md / TODO.md 文件约定已覆盖，且天然跨压缩持久 |
+| — | Code Mode（`run_code`） | 收益在超大工具面时才显现 |
+| L5-5 | workflow / DAG 编排 | 是另一个产品 |
+| — | 跨会话语义记忆 | 与 CLI 即时性目标背离 |
+| L5-3 | 插件框架 / profile / bundle | 扩展需求由 MCP 承担 |
+| L5-4 | hooks 协议桥 | 待 MCP 落地后重估——多数 hook 需求可用 MCP server 表达 |
+| L6-3 | ACP / JSON-RPC server | 待 `--output json` 落地后重估，多数集成需求它已覆盖 |
+| L6-4 | TUI / Web UI | 与本地 CLI 定位冲突 |
+| L7-3 | 快照回归测试框架 | 阶段二十五的录制回放已覆盖主要回归需求，再加一套是重复投资 |
+| L7-5 | OTel 导出 | 单机无 collector；JSON span + `jq` 已够 |
+| L8-2 | 模型自排程（`schedule_*`） | 需要持久调度状态机；外部 launchd + 声明式 TASK.md 已覆盖 |
+| — | 文档 i18n | 单人中文开发 |
 
 ---
 

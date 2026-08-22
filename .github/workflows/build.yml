@@ -33,6 +33,10 @@ jobs:
       - name: install nextest
         uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
+      # Keeps the roadmap derived from the evaluation instead of drifting into
+      # a wish list: every gap ID must be scheduled or explicitly a non-goal.
+      - name: Check gap traceability
+        run: python3 scripts/check-gap-coverage.py
       - name: Check code format
         run: cargo fmt -- --check
       - name: Check the package for errors

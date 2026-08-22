@@ -217,6 +217,7 @@ Skill 走 `SKILL.md`（agentskills.io 兼容，选型正确）+ **proposal 审�
 | L6-2 | 无结构化输出 | 无 `--output json` | 无法被上层程序消费 |
 | L6-3 | 无编辑器 / IDE 集成通道 | dsh 有 ACP server + JSON-RPC SDK + Python SDK |
 | L6-4 | 无 TUI / Web UI | dsh 有完整 host + client 双半 Web 应用（本项目**不追求**此项，仅记录差距） |
+| L6-5 | **配置文件读写 CWD**（**缺陷级**） | `config.rs:63` 读 `Path::new("config.toml")`——当前工作目录。换个目录即换套配置，且会到处撒文件。同见 §4 产品形态表 |
 
 → 补全设计：[L6-interface.md](../architecture/L6-interface.md)
 

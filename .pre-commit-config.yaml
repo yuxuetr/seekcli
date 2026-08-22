@@ -11,10 +11,11 @@ repos:
       - id: end-of-file-fixer
       - id: mixed-line-ending
       - id: trailing-whitespace
-  - repo: https://github.com/psf/black
-    rev: 22.10.0
-    hooks:
-      - id: black
+      # Syntax validation only. black was removed here on purpose: this
+      # project's Python style is 2-space indent, and black has no indent
+      # option (the `indent-size` key in ~/.config/black is silently ignored),
+      # so it would rewrite every script to 4 spaces on every commit.
+      - id: check-ast
   - repo: local
     hooks:
       - id: cargo-fmt
@@ -31,6 +32,13 @@ repos:
         language: rust
         files: \.rs$
         args: []
+      - id: gap-coverage
+        name: gap traceability
+        description: every evaluation gap must be scheduled or an explicit non-goal
+        entry: python3 scripts/check-gap-coverage.py
+        language: system
+        files: '(TODOs\.md|docs/(evaluation|architecture)/.*\.md)$'
+        pass_filenames: false
       - id: typos
         name: typos
         description: check typo
