@@ -78,6 +78,20 @@ base_url = "http://127.0.0.1:8000/v1"
 api_key  = "env:LOCAL_API_KEY"            # 只接受 env: / file:，字面量 key 会被拒绝
 ```
 
+### MCP（接入第三方能力）
+```toml
+[[mcp]]
+name    = "filesystem"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+env     = { }                             # 值同样接受 env: / file:
+enabled = true
+startup_timeout_secs = 10
+```
+工具以 `mcp__<server>__<tool>` 出现（`/tools` 可查看来源）。**一个 server 起不来只警告，
+不阻塞启动**；进程随 REPL 退出回收。外来工具与内置工具走**同一条策略门**——
+`--read-only` 对它们同样生效，且默认不参与并发，除非 server 明确声明 `readOnlyHint`。
+
 ### 重试与超时
 ```toml
 [resilience]

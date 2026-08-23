@@ -386,28 +386,39 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段二十八：L5 MCP 客户端（**打开生态**）
+### ✅ 阶段二十八：L5 MCP 客户端（**打开生态**）
 
 *目标：让第三方能给 SeekCLI 加能力，而不必改 Rust 源码。*
 *来源：L2-1 / L5-1 —— 评估认定的**最大单点缺口**。*
 *设计：[L5 §4.1](docs/architecture/L5-composition.md#41-mcp-客户端l5-1)*
 
-- [ ] **28.1 协议实现**
-    - [ ] **只做 stdio transport**；手写 JSON-RPC（约 300 行，零新依赖树），不引入完整 SDK。
-    - [ ] `initialize` → `tools/list` → 注册进工具注册表。
-- [ ] **28.2 配置**：`config.toml` 的 `[[mcp]]` 数组（name / command / args / env / enabled）。
-- [ ] **28.3 健壮性**
-    - [ ] **单个 server 失败不影响启动**：警告 + 跳过（外部进程不可靠是常态）。
-    - [ ] 启动超时上限（默认 10s/server），避免拖慢 REPL。
-    - [ ] 进程随 REPL 退出而回收。
-- [ ] **28.4 安全与命名**
-    - [ ] 命名空间 `mcp__<server>__<tool>`。
-    - [ ] MCP 工具**默认按非只读处理**（不进并发白名单），除非 server 明确声明只读。
-    - [ ] 一律过阶段二十四的 `PolicyGate`；Plan / ReadOnly 模式下全拒。
-- [ ] **28.5 `/tools` 命令**：列出当前生效工具及其来源（内置 / skill / MCP）。
+- [x] **28.1 协议实现**
+    - [x] **只做 stdio transport**；手写 JSON-RPC，零新依赖。拥有失败模式才好处理：
+          server 不应答、乱序应答、把日志打进 stdout 污染帧流——SDK 恰恰会藏起这些。
+    - [x] 读响应按 id 匹配并跳过无关行（通知、banner），而非假定下一行就是回复。
+    - [x] `isError` 与 JSON-RPC error 分开：前者是工具说「不」，后者是 server 坏了。
+    - [x] `initialize` → `notifications/initialized` → `tools/list` → 注册。
+- [x] **28.2 配置**：`config.toml` 的 `[[mcp]]` 数组（name / command / args / env / enabled）。
+- [x] **28.3 健壮性**
+    - [x] **单个 server 失败不影响启动**：警告 + 跳过（外部进程不可靠是常态）。
+    - [x] 启动超时上限（默认 10s/server），避免拖慢 REPL。
+    - [x] 进程随 REPL 退出而回收（`Drop` 里 kill，否则每次运行每个 server 泄漏一个进程）。
+- [x] **28.4 安全与命名**
+    - [x] 命名空间 `mcp__<server>__<tool>`——两个 server 都可能提供 `search`。
+    - [x] MCP 工具**默认按非只读处理**，除非 server 明确 `readOnlyHint`。
+    - [x] 一律过阶段二十四的策略门。⚠️ **首次实现有真实漏洞**：`is_mutating` 只按内置
+          工具名匹配，`--read-only` 下 `mcp__fs__write_file` 真的把文件写出来了（端到端
+          验证抓到）。修法是反转判定——我们没写的东西，除非 server 声明只读否则当作会写；
+          并删掉不带声明参数的便利重载，那正是会被顺手误用的不安全默认。
+    - [x] MCP 工具只给主 agent：子代理模板的 `allowed_tools` 是在不知道用户配了什么的
+          前提下写的，悄悄放宽会破坏「工具收窄」这个让子代理又便宜又安全的机制。
+- [x] **28.5 `/tools` 命令**：列出当前生效工具及其来源（内置 / MCP，含所属 server）。
 
-**验收**：配置 filesystem server 后 `/tools` 出现 `mcp__filesystem__*` 且可调用；
-故意写错某个 server 的 command，REPL 仍正常启动并只打印一条警告。
+**真实端到端验证**（`npx @modelcontextprotocol/server-filesystem`）：
+- 同时配一个真 server 与一个命令写错的：14 个工具接入，坏的只打印一条警告不阻塞启动
+- 模型真实调用 `mcp__fs__read_text_file` 并拿到文件内容
+- `--read-only` 下 `mcp__fs__write_file` 被拒且**磁盘验证文件未创建**（修复后）
+- `--read-only` 下 `mcp__fs__read_text_file` 仍可用——只读模式没有变成「全禁」
 
 ---
 
