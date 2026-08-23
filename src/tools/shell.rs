@@ -13,6 +13,44 @@ use super::{approval, audit, policy};
 /// command finishes too quickly for the spinner to be useful.
 const SPINNER_DELAY: Duration = Duration::from_millis(800);
 
+/// How often a running command checks whether the user pressed Ctrl-C.
+const CANCEL_POLL: Duration = Duration::from_millis(120);
+
+/// The interrupt flag the REPL's Ctrl-C watcher sets.
+///
+/// Shared rather than passed down: cancellation has to reach the innermost
+/// blocking operation, and threading an `Arc` through every tool signature to
+/// serve one tool would cost more than it explains. Same shape as the policy
+/// mode and the approval mode.
+static INTERRUPT: std::sync::Mutex<Option<Arc<AtomicBool>>> = std::sync::Mutex::new(None);
+
+pub fn set_interrupt(flag: Arc<AtomicBool>) {
+  if let Ok(mut guard) = INTERRUPT.lock() {
+    *guard = Some(flag);
+  }
+}
+
+fn interrupted() -> bool {
+  match INTERRUPT.lock() {
+    Ok(guard) => guard.as_ref().is_some_and(|f| f.load(Ordering::SeqCst)),
+    Err(_) => false,
+  }
+}
+
+/// Resolves once the user has asked to stop.
+///
+/// Deliberately does **not** clear the flag: the agent loop's own check is
+/// what ends the turn, and consuming it here would kill the command while
+/// leaving the loop to carry on as if nothing happened.
+async fn cancelled() {
+  loop {
+    if interrupted() {
+      return;
+    }
+    tokio::time::sleep(CANCEL_POLL).await;
+  }
+}
+
 pub async fn run_shell(args: &Value) -> Result<String> {
   let command = args
     .get("command")
@@ -80,19 +118,69 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   let stop_flag = Arc::new(AtomicBool::new(false));
   let spinner_task = spawn_delayed_spinner(command.to_string(), stop_flag.clone());
 
-  let output_result = tokio::process::Command::new("sh")
+  // Spawned rather than `.output()`ed so the child stays reachable: Ctrl-C
+  // used to return control to the REPL while the command kept running with
+  // nobody watching it -- a `sleep 60` or a `cargo build` would outlive the
+  // turn that started it.
+  let mut child = tokio::process::Command::new("sh")
     .arg("-c")
     .arg(command)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
-    .output()
-    .await;
+    .spawn()
+    .context("Failed to spawn shell command")?;
+
+  // Drain the pipes concurrently. A child that fills a pipe buffer blocks
+  // forever if nobody is reading, so this cannot wait for exit first.
+  let mut child_stdout = child.stdout.take();
+  let mut child_stderr = child.stderr.take();
+  let out_task = tokio::spawn(async move {
+    let mut buf = Vec::new();
+    if let Some(pipe) = child_stdout.as_mut() {
+      let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut buf).await;
+    }
+    buf
+  });
+  let err_task = tokio::spawn(async move {
+    let mut buf = Vec::new();
+    if let Some(pipe) = child_stderr.as_mut() {
+      let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut buf).await;
+    }
+    buf
+  });
+
+  let mut was_cancelled = false;
+  let status = tokio::select! {
+    status = child.wait() => status.context("waiting for shell command")?,
+    _ = cancelled() => {
+      was_cancelled = true;
+      let _ = child.start_kill();
+      child.wait().await.context("reaping interrupted shell command")?
+    }
+  };
 
   // Signal the spinner to stop and wait for it to clear cleanly.
   stop_flag.store(true, Ordering::SeqCst);
   let _ = spinner_task.await;
 
-  let output = output_result.context("Failed to spawn shell command")?;
+  let stdout_bytes = out_task.await.unwrap_or_default();
+  let stderr_bytes = err_task.await.unwrap_or_default();
+
+  if was_cancelled {
+    eprintln!("{} command interrupted by user.", "[Agent]".yellow());
+    let partial = String::from_utf8_lossy(&stdout_bytes);
+    return Ok(format!(
+      "[USER DENIED] Command interrupted by the user: {command}\n\
+       Do not retry it. Partial output before it was stopped:\n{}",
+      super::offload::offload(partial.into_owned(), Some("interrupted command")).await
+    ));
+  }
+
+  let output = std::process::Output {
+    status,
+    stdout: stdout_bytes,
+    stderr: stderr_bytes,
+  };
 
   let stdout = String::from_utf8_lossy(&output.stdout);
   let stderr = String::from_utf8_lossy(&output.stderr);

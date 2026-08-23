@@ -158,6 +158,8 @@ impl App {
 
     let interrupt = Arc::new(AtomicBool::new(false));
     spawn_interrupt_watcher(interrupt.clone());
+    // Cancellation must reach the innermost blocking operation, not just the loop.
+    tools::shell::set_interrupt(interrupt.clone());
 
     Ok(Self {
       brain,

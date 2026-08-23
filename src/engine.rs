@@ -66,6 +66,245 @@ impl App {
   }
 }
 
+impl App {
+  /// `invoke_agent`: run a typed sub-agent and bring back only its summary.
+  ///
+  /// Handled in the engine rather than the dispatcher because it re-enters the
+  /// loop — the dispatcher deliberately knows nothing about the loop, and
+  /// giving it a recursive escape hatch would undo that.
+  async fn delegate_to_subagent(
+    &mut self,
+    arguments: &str,
+    available: &[api::Tool],
+    depth: usize,
+    parent_span: Option<usize>,
+  ) -> String {
+    let (subagent_type, prompt) = Self::parse_invoke_agent_args(arguments);
+    let next_depth = depth + 1;
+    if next_depth > agent::MAX_SUBAGENT_DEPTH {
+      return format!(
+        "Cannot spawn sub-agent: max depth {} reached.",
+        agent::MAX_SUBAGENT_DEPTH
+      );
+    }
+    let Some(template) = subagents::registry::lookup(&subagent_type) else {
+      let listing: Vec<String> = subagents::registry::catalog()
+        .iter()
+        .map(|(name, desc)| format!("  - {}: {}", name, desc))
+        .collect();
+      return format!(
+        "Unknown subagent_type '{}'. Available types:\n{}",
+        subagent_type,
+        listing.join("\n")
+      );
+    };
+
+    let sub_tools = tools::registry::filter_by_allowed(available, template.allowed_tools);
+    let sub_messages = vec![
+      Message::Simple {
+        role: "system".to_string(),
+        content: template.system_prompt.to_string(),
+        reasoning_content: None,
+        tool_calls: None,
+      },
+      Message::new_user_text(prompt),
+    ];
+
+    eprintln!(
+      "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
+      "Agent:".magenta(),
+      template.name.green(),
+      next_depth,
+      template.max_iter
+    );
+    match Box::pin(self.run_agent_loop(
+      sub_messages,
+      Some(sub_tools),
+      next_depth,
+      template.max_iter,
+      parent_span,
+    ))
+    .await
+    {
+      Ok(run) => format!(
+        "Sub-agent '{}' completed. Summary:\n{}",
+        template.name, run.text
+      ),
+      Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
+    }
+  }
+
+  /// `load_skill`: swap the active persona mid-conversation.
+  ///
+  /// Main agent only. A sub-agent switching skills would mutate state its
+  /// parent owns and outlive the delegation that created it.
+  fn activate_skill_by_name(
+    &mut self,
+    arguments: &str,
+    depth: usize,
+    messages: &mut Vec<Message>,
+    deferred: &mut Vec<Message>,
+  ) -> String {
+    if depth > 0 {
+      return "[ERROR] load_skill is restricted to the main agent. \
+              Sub-agents cannot switch skills."
+        .to_string();
+    }
+    let name = Self::parse_load_skill_args(arguments);
+    let skills = match self.skill_manager.load_skills() {
+      Ok(s) => s,
+      Err(e) => return format!("Failed to enumerate skills: {}", e),
+    };
+    let Some(skill) = skills.iter().find(|s| s.name == name).cloned() else {
+      let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+      return format!("Skill '{}' not found. Available: {:?}", name, available);
+    };
+
+    // Same dedup as activate_skill: drop any prior skill's system message from
+    // the *working set* so personas don't accumulate. The log keeps both --
+    // the earlier skill really was active for those turns.
+    messages.retain(|m| {
+      !matches!(
+        m,
+        Message::Simple { role, content, .. }
+          if role == "system" && content.starts_with("# Activated Skill: ")
+      )
+    });
+    deferred.push(Message::Simple {
+      role: "system".to_string(),
+      content: format!(
+        "# Activated Skill: {}\n\n{}",
+        skill.name, skill.system_prompt
+      ),
+      reasoning_content: None,
+      tool_calls: None,
+    });
+    let skill_name = skill.name.clone();
+    self.current_skill = Some(skill);
+    eprintln!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
+    format!(
+      "Skill '{}' loaded. Its system prompt is now active. \
+       Continue the user's task in this persona.",
+      skill_name
+    )
+  }
+}
+
+/// One model response, assembled from the stream.
+struct Response {
+  content: String,
+  reasoning: String,
+  tool_calls: Vec<api::ToolCall>,
+}
+
+impl App {
+  /// Issue one request and consume its stream.
+  ///
+  /// Split out of the loop body because it is the one part with no control
+  /// flow of its own: it turns a stream of deltas into a single response, and
+  /// everything it touches (rendering, usage accounting, the mid-stream
+  /// interrupt check) belongs to that job rather than to the loop's.
+  async fn request_step(
+    &mut self,
+    messages: &[Message],
+    tools: &[api::Tool],
+    depth: usize,
+  ) -> Result<Response> {
+    let mut stream = self
+      .brain
+      .call_api_with_params(
+        &self.model,
+        messages.to_vec(),
+        self.thinking_mode.as_str(),
+        Some(tools.to_vec()),
+      )
+      .await?;
+
+    let mut out = Response {
+      content: String::new(),
+      reasoning: String::new(),
+      tool_calls: Vec::new(),
+    };
+    let mut is_reasoning = false;
+
+    while let Some(item) = stream.next().await {
+      // Mid-stream interrupt check. Don't reset the flag here — let the
+      // outer loop see it and exit cleanly.
+      if depth == 0 && self.interrupt.load(Ordering::SeqCst) {
+        eprintln!("\n{}", "[Agent] interrupted by user (mid-stream)".yellow());
+        break;
+      }
+      match item? {
+        StreamItem::Reasoning(r) => {
+          if !is_reasoning {
+            ui::content(&format!("\n{}", "Thinking: ".italic().bright_black()));
+            is_reasoning = true;
+          }
+          ui::content(&format!("{}", r.italic().bright_black()));
+          out.reasoning.push_str(&r);
+        }
+        StreamItem::Content(c) => {
+          if is_reasoning {
+            eprintln!();
+            is_reasoning = false;
+          }
+          ui::content(&c);
+          out.content.push_str(&c);
+        }
+        StreamItem::ToolCall(tc) => {
+          eprintln!(
+            "\n{} Called: {} {}",
+            "Agent:".cyan(),
+            tc.function.name.yellow(),
+            Self::preview_args(&tc.function.arguments).bright_black()
+          );
+          out.tool_calls.push(tc);
+        }
+        StreamItem::Finish(reason) => {
+          eprintln!();
+          if let Some(r) = reason
+            && r == "length"
+          {
+            eprintln!("\n{}", "[Note: Max output limit reached.]".yellow());
+          }
+        }
+        StreamItem::Usage(info) => {
+          let pct = info
+            .prompt_cache_hit_tokens
+            .checked_mul(100)
+            .and_then(|n| n.checked_div(info.prompt_tokens))
+            .unwrap_or(0);
+          eprintln!(
+            "{} prompt={} (cache hit {}%, {} miss), completion={}",
+            "[Usage]".dimmed(),
+            info.prompt_tokens,
+            pct,
+            info.prompt_cache_miss_tokens,
+            info.completion_tokens
+          );
+          // Fold into the running session bill (decorator-style accounting).
+          self.cost.record(&info);
+        }
+      }
+      ui::flush_content()?;
+    }
+    Ok(out)
+  }
+
+  /// Truncate tool arguments for the console line, on a char boundary.
+  fn preview_args(args: &str) -> String {
+    const LIMIT: usize = 160;
+    if args.len() <= LIMIT {
+      return args.to_string();
+    }
+    let mut cut = LIMIT;
+    while cut > 0 && !args.is_char_boundary(cut) {
+      cut -= 1;
+    }
+    format!("{}…", &args[..cut])
+  }
+}
+
 /// Append a message to the working set **and** the durable log in one step.
 ///
 /// The two must never be written separately: the moment a site appends to one
@@ -609,94 +848,14 @@ impl App {
       }
 
       let gen_span = self.tracer.begin("generate", "llm action", turn_span);
-      let mut stream = self
-        .brain
-        .call_api_with_params(
-          &self.model,
-          messages.clone(),
-          self.thinking_mode.as_str(),
-          Some(effective_tools.clone()),
-        )
+      let Response {
+        content: assistant_content,
+        reasoning: assistant_reasoning,
+        tool_calls,
+      } = self
+        .request_step(&messages, &effective_tools, depth)
         .await?;
 
-      let mut assistant_content = String::new();
-      let mut assistant_reasoning = String::new();
-      let mut tool_calls = Vec::new();
-      let mut is_reasoning = false;
-
-      while let Some(item) = stream.next().await {
-        // Mid-stream interrupt check. Don't reset the flag here — let the
-        // outer loop see it and exit cleanly.
-        if depth == 0 && self.interrupt.load(Ordering::SeqCst) {
-          eprintln!("\n{}", "[Agent] interrupted by user (mid-stream)".yellow());
-          break;
-        }
-        match item? {
-          StreamItem::Reasoning(r) => {
-            if !is_reasoning {
-              ui::content(&format!("\n{}", "Thinking: ".italic().bright_black()));
-              is_reasoning = true;
-            }
-            ui::content(&format!("{}", r.italic().bright_black()));
-            assistant_reasoning.push_str(&r);
-          }
-          StreamItem::Content(c) => {
-            if is_reasoning {
-              eprintln!();
-              is_reasoning = false;
-            }
-            ui::content(&c);
-            assistant_content.push_str(&c);
-          }
-          StreamItem::ToolCall(tc) => {
-            let preview = {
-              let args = &tc.function.arguments;
-              if args.len() > 160 {
-                let mut cut = 160;
-                while cut > 0 && !args.is_char_boundary(cut) {
-                  cut -= 1;
-                }
-                format!("{}…", &args[..cut])
-              } else {
-                args.clone()
-              }
-            };
-            eprintln!(
-              "\n{} Called: {} {}",
-              "Agent:".cyan(),
-              tc.function.name.yellow(),
-              preview.bright_black()
-            );
-            tool_calls.push(tc);
-          }
-          StreamItem::Finish(reason) => {
-            eprintln!();
-            if let Some(r) = reason
-              && r == "length"
-            {
-              eprintln!("\n{}", "[Note: Max output limit reached.]".yellow());
-            }
-          }
-          StreamItem::Usage(info) => {
-            let pct = info
-              .prompt_cache_hit_tokens
-              .checked_mul(100)
-              .and_then(|n| n.checked_div(info.prompt_tokens))
-              .unwrap_or(0);
-            eprintln!(
-              "{} prompt={} (cache hit {}%, {} miss), completion={}",
-              "[Usage]".dimmed(),
-              info.prompt_tokens,
-              pct,
-              info.prompt_cache_miss_tokens,
-              info.completion_tokens
-            );
-            // Fold into the running session bill (decorator-style accounting).
-            self.cost.record(&info);
-          }
-        }
-        ui::flush_content()?;
-      }
       // `verdict` makes the stage 19 failure mode visible at a glance: a turn
       // that produced prose but zero tool calls, while the model claimed to
       // have acted. That was found by reading traces by eye; naming it means
@@ -819,121 +978,16 @@ impl App {
         for tc in tool_calls {
           let mut dispatched_failure = false;
           let result_str = if tc.function.name == "invoke_agent" {
-            let (subagent_type, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
-            let next_depth = depth + 1;
-            if next_depth > agent::MAX_SUBAGENT_DEPTH {
-              format!(
-                "Cannot spawn sub-agent: max depth {} reached.",
-                agent::MAX_SUBAGENT_DEPTH
-              )
-            } else {
-              match subagents::registry::lookup(&subagent_type) {
-                None => {
-                  let listing: Vec<String> = subagents::registry::catalog()
-                    .iter()
-                    .map(|(name, desc)| format!("  - {}: {}", name, desc))
-                    .collect();
-                  format!(
-                    "Unknown subagent_type '{}'. Available types:\n{}",
-                    subagent_type,
-                    listing.join("\n")
-                  )
-                }
-                Some(template) => {
-                  let sub_tools =
-                    tools::registry::filter_by_allowed(&effective_tools, template.allowed_tools);
-                  let sub_messages = vec![
-                    Message::Simple {
-                      role: "system".to_string(),
-                      content: template.system_prompt.to_string(),
-                      reasoning_content: None,
-                      tool_calls: None,
-                    },
-                    Message::Simple {
-                      role: "user".to_string(),
-                      content: prompt,
-                      reasoning_content: None,
-                      tool_calls: None,
-                    },
-                  ];
-
-                  eprintln!(
-                    "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
-                    "Agent:".magenta(),
-                    template.name.green(),
-                    next_depth,
-                    template.max_iter
-                  );
-                  match Box::pin(self.run_agent_loop(
-                    sub_messages,
-                    Some(sub_tools),
-                    next_depth,
-                    template.max_iter,
-                    exec_span,
-                  ))
-                  .await
-                  {
-                    Ok(run) => {
-                      format!(
-                        "Sub-agent '{}' completed. Summary:\n{}",
-                        template.name, run.text
-                      )
-                    }
-                    Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
-                  }
-                }
-              }
-            }
+            self
+              .delegate_to_subagent(&tc.function.arguments, &effective_tools, depth, exec_span)
+              .await
           } else if tc.function.name == "load_skill" {
-            if depth > 0 {
-              "[ERROR] load_skill is restricted to the main agent. \
-             Sub-agents cannot switch skills."
-                .to_string()
-            } else {
-              let name = Self::parse_load_skill_args(&tc.function.arguments);
-              match self.skill_manager.load_skills() {
-                Err(e) => format!("Failed to enumerate skills: {}", e),
-                Ok(skills) => {
-                  let found = skills.iter().find(|s| s.name == name).cloned();
-                  match found {
-                    Some(skill) => {
-                      // Same dedup as activate_skill: drop any prior skill's
-                      // system message so personas don't accumulate.
-                      messages.retain(|m| {
-                        !matches!(
-                          m,
-                          Message::Simple { role, content, .. }
-                            if role == "system" && content.starts_with("# Activated Skill: ")
-                        )
-                      });
-
-                      let prompt_text = format!(
-                        "# Activated Skill: {}\n\n{}",
-                        skill.name, skill.system_prompt
-                      );
-                      deferred_system_msgs.push(Message::Simple {
-                        role: "system".to_string(),
-                        content: prompt_text,
-                        reasoning_content: None,
-                        tool_calls: None,
-                      });
-                      let skill_name = skill.name.clone();
-                      self.current_skill = Some(skill);
-                      eprintln!("{} Loaded skill: {}", "✦".cyan(), skill_name.green());
-                      format!(
-                        "Skill '{}' loaded. Its system prompt is now active. \
-                       Continue the user's task in this persona.",
-                        skill_name
-                      )
-                    }
-                    None => {
-                      let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
-                      format!("Skill '{}' not found. Available: {:?}", name, available)
-                    }
-                  }
-                }
-              }
-            }
+            self.activate_skill_by_name(
+              &tc.function.arguments,
+              depth,
+              &mut messages,
+              &mut deferred_system_msgs,
+            )
           } else {
             let outcome = Self::dispatch(
               &tool_dispatcher,

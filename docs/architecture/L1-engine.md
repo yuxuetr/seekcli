@@ -1,6 +1,6 @@
 # L1 引擎层：ReAct 主循环与运行时纠偏
 
-> 完成度 **80%（最强的一层）** ｜ 缺口来源：[评估 §3 L1](../evaluation/2026-08-harness-gap-analysis.md#l1-引擎层--80最强的一层)
+> 完成度 **90%**（阶段三十一后）｜ 缺口来源：[评估 §3 L1](../evaluation/2026-08-harness-gap-analysis.md#l1-引擎层--80最强的一层)
 
 ## 1. 职责边界
 
@@ -31,15 +31,15 @@ Harness 还有 Two-Stage、Reminders、Recovery、并发编排、迭代上限。
 
 | # | 缺口 | 证据 | 性质 |
 | --- | --- | --- | --- |
-| L1-1 | 循环封闭，无扩展点 | `run_agent_loop` 单函数 440 行 | 结构 |
+| ⚠️ L1-1 | 循环仍无正式扩展点 | 主循环 524 → **339 行**（阶段三十一拆解）；`LoopHook` 未做，理由见 §4.2 | 结构 |
 | L1-2 | 无 turn / step 概念 | 只有 `iter` | 结构 |
-| L1-3 | 无运行中上下文注入 | 无 `inject()` 对位 | 功能 |
+| ~~L1-3~~ | ~~无运行中上下文注入~~ | **阶段三十已落地**：后台任务完成通知在 step 顶部注入 | — |
 | L1-4 | 中断即终止，无法续跑 | Ctrl-C 后直接结束 | 功能 |
-| L1-5 | 取消不向下传播 | `run_shell` 子进程不接收取消 | 正确性 |
+| ~~L1-5~~ | ~~取消不向下传播~~ | **阶段三十一已落地**，实测 SIGINT 后子进程从 2 个降到 0 | — |
 
 ## 4. 目标设计
 
-### 4.1 拆解主循环（L1-1 / L1-2）
+### 4.1 拆解主循环（L1-1 / L1-2）✅ 阶段三十一已落地（部分）
 
 把 440 行拆成四个阶段函数，主循环只做编排：
 
@@ -59,14 +59,21 @@ enum StepOutcome {
 }
 ```
 
-- `prepare_step` —— 压缩 + 规划轮 + reminder 注入
-- `request` —— 调 provider，消费流，落 usage
-- `dispatch_tools` —— Fork-Join 分发 + recovery 包装
-- `observe` —— 更新 reminder tracker，决定 `StepOutcome`
+实际抽出的是**自成一体**的两块，而不是设计稿里那四个阶段函数：
 
-**这是纯重构，行为零变化**，靠现有 87 单测 + eval 套件（L7）守住。
+- `request_step` —— 把一条 delta 流变成一个响应。它没有自己的控制流，
+  渲染、usage 记账、流内中断检查都属于这件事而非循环。
+- `delegate_to_subagent` / `activate_skill_by_name` —— 引擎级的委派工具。
+  它们不走 dispatcher（前者会重入循环，而 dispatcher 刻意不认识循环），
+  在主循环里只剩两行调用。
 
-### 4.2 LoopHook 扩展点（L1-1）
+**524 → 339 行，行为零变化**，由阶段二十五的回放测试守住，并做了子代理委派的真实回归。
+
+未按设计稿切成 `prepare_step` / `observe`：剩下的部分不是「可以搬走的整块」，
+而是循环自身的控制流（迭代上限、中断、plan_next、reminder 触发）。
+硬切只会把控制流分散到多个函数、靠参数传状态，读起来更难而不是更容易。
+
+### 4.2 LoopHook 扩展点（L1-1）—— 暂不做
 
 ```rust
 #[async_trait]
@@ -78,11 +85,15 @@ pub trait LoopHook: Send + Sync {
 pub enum Control { Proceed, SkipStep, StopTurn(String) }
 ```
 
-把 compressor / reminders / tracer 逐个改造成 hook，`App` 持有 `Vec<Box<dyn LoopHook>>`。
+**暂不做**，理由与阶段二十七不做 `ToolImpl` 相同：抽象要有第二个用户才立得住。
 
-**明确不做**：事件总线 / waterfall / 动态注册。dsh 需要那套是因为它要支持第三方插件；
-SeekCLI 只需要「内部机制可组合、可单测」，一个静态 Vec 足够。
-过度对齐 dsh 在这里是负收益——见 [design-principles](design-principles.md)。
+现在挂在循环上的机制是 compressor、reminders、tracer、job 完成通知、recovery，
+全部是内部的、编译期已知的、且各自已有单测。把它们套进 `Vec<Box<dyn LoopHook>>`
+换来的是一层间接，而不是任何新能力——**没有第三方插件要挂进来**。
+
+真正让它值得做的信号是：出现一个需要在循环里插手、但又不该进 `engine.rs` 的东西。
+MCP 没有产生这个需求（它挂在工具层），L8 也没有（它在循环外）。
+届时再引入，那时它才有真实用户。
 
 ### 4.3 取消传播（L1-5）
 

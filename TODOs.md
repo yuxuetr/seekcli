@@ -485,22 +485,36 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段三十一：L1 循环拆解与扩展点
+### ✅ 阶段三十一：L1 循环拆解与取消传播（31.2 暂不做）
 
 *目标：把 440 行主循环拆成可组合、可单测的阶段。*
 *来源：L1-1 / L1-2 / L1-3 / L1-5。设计：[L1 §4](docs/architecture/L1-engine.md#4-目标设计)*
 
-- [ ] **31.1 阶段函数拆解**：`prepare_step` / `request` / `dispatch_tools` / `observe`，
-      主循环只做编排。**纯重构，行为零变化**，靠阶段二十五的回放测试守住。
-- [ ] **31.2 `LoopHook` trait**：`pre_step` / `post_step` + `Control{Proceed,SkipStep,StopTurn}`；
-      compressor / reminders / tracer 改造成 hook。
-    - [ ] **不做事件总线 / waterfall / 动态注册**——静态 `Vec<Box<dyn LoopHook>>` 足够。
-- [ ] **31.3 取消传播**（L1-5）：`CancelToken` 传到 `run_shell`，
-      `tokio::select!` 竞争 + `child.start_kill()`。
-- [ ] **31.4 `inject()`**（L1-3）：外部事件进入下一次 `prepare_step`。
+- [x] **31.1 拆解主循环**：**524 → 339 行**，行为零变化，由回放测试守住 + 子代理真实回归。
+    - [x] 抽出 `request_step`：把一条 delta 流变成一个响应。它没有自己的控制流，
+          渲染 / usage 记账 / 流内中断检查都属于这件事而非循环。
+    - [x] 抽出 `delegate_to_subagent` / `activate_skill_by_name`：引擎级委派工具，
+          不走 dispatcher（前者会重入循环，而 dispatcher 刻意不认识循环）。
+    - [x] ⚠️ **未按设计稿切成 `prepare_step` / `observe`**：剩下的不是「可以搬走的整块」，
+          而是循环自身的控制流（迭代上限、中断、plan_next、reminder 触发）。硬切只会把
+          控制流分散到多个函数、靠参数传状态，读起来更难而不是更容易。
+- [ ] **31.2 `LoopHook` trait** —— **暂不做**，理由同阶段二十七不做 `ToolImpl`：
+      抽象要有第二个用户才立得住。现在挂在循环上的 compressor / reminders / tracer /
+      job 通知 / recovery 全是内部的、编译期已知的、各自已有单测；套进
+      `Vec<Box<dyn LoopHook>>` 换来一层间接而非任何新能力——**没有第三方插件要挂进来**。
+      值得做的信号是「出现一个需要在循环里插手、又不该进 engine.rs 的东西」。
+      MCP 挂在工具层、L8 在循环外，都没产生这个需求。
+- [x] **31.3 取消传播**（L1-5）：`run_shell` 改为 `spawn` 而非 `.output()`，`tokio::select!`
+      在 `child.wait()` 与取消之间竞争，取消时 `start_kill` 并回收。
+    - [x] 管道并发抽干：子进程写满管道缓冲区后若没人读会永久阻塞，所以不能先等退出。
+    - [x] 取消时**不清除中断标志**：清了会杀掉命令却让循环若无其事地继续。
+    - [x] 部分输出仍交给模型（走 offload），并标记 `[USER DENIED]` 明确「别重试」。
+    - [x] **实测**：SIGINT 后 `sleep 120` 进程数 2 → 0（此前会一直跑完）。
+- [x] **31.4 外部事件注入**（L1-3）：阶段三十的后台任务完成通知已经是这条路径——
+      在 step 顶部注入、不打断当前 step。没有再单独造一个 `inject()` API：
+      目前只有一个生产者，为它加一层间接不划算。
 
-**验收**：Ctrl-C 时正在跑的 `sleep 60` 子进程 1s 内消失（`ps` 可验证）；
-新增循环策略只需实现 `LoopHook`；回放测试与 trace 树结构不变。
+**验收**：SIGINT 后子进程实测 2 → 0；200 单测与回放测试全过；子代理委派真实回归通过。
 
 ---
 
