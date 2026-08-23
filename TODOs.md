@@ -17,6 +17,20 @@
 | 工具面 | 8 个 |
 | 完成度 | 整体约 40%（引擎内核 65% / 产品形态 25%）——口径见 [scoring-rubric](docs/evaluation/scoring-rubric.md) |
 
+## 进展（2026-08-23）
+
+阶段二十 ~ 三十三**全部推进完毕**，其中三项经评估后**主动不做**并写明理由
+（30.4 后台子代理、31.2 LoopHook、25.3 压缩轨迹 fixture），阶段三十三的
+实际发布动作待仓库所有者执行。
+
+| 指标 | 阶段十九 | 现在 |
+| --- | --- | --- |
+| 单测 | 87 | **207** |
+| 行覆盖率 | 46.3% | **~68%**（`engine.rs` 13.8% → 65%） |
+| 内置工具 | 8 | **14** + 任意 MCP |
+| 编译警告 | — | **0** |
+| CI 覆盖率门禁 | 无（装了不跑） | 60% 棘轮 |
+
 ## 本轮规划的三条主线
 
 1. **先补可用性**（阶段二十 ~ 二十三）：几十到几百行的改动，收益立刻可感。
@@ -518,18 +532,23 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段三十二：L8 任务声明式化
+### ✅ 阶段三十二：L8 任务声明式化
 
 *目标：加一个定时任务不再需要改 Rust。*
 *来源：L8-1。设计：[L8 §4.1](docs/architecture/L8-loop.md#41-任务声明式化l8-1)*
 
-- [ ] **32.1 `TASK.md` 格式**：与 Skill **完全同构**，复用既有 frontmatter parser
-      （name / description / skill / interval_hint + Markdown body 作为 prompt）。
-- [ ] **32.2 `task_spec` 硬编码 match 改为读 `~/.seekcli/tasks/<name>/TASK.md`**；
-      找不到时报错并列出可用任务。
-- [ ] **32.3 内置 reminders 首次运行自动写出默认 `TASK.md`**，用户可直接改。
-- [ ] **32.4 `seekcli task install <name>`**：按 `interval_hint` 生成 plist 到 stdout，
-      **不提供自动安装器**——往用户 LaunchAgents 塞东西应当是显式动作。
+- [x] **32.1 `TASK.md` 格式**：与 `SKILL.md` 同构，**共用同一个 frontmatter 切分器**
+      （`skills::split_frontmatter`）——两者都是「YAML 头 + 一段其实是 prompt 的 Markdown
+      正文」，在 BOM 或 CRLF 上各自漂移毫无意义。
+    - [x] `skill: null` 与省略该行等价；正文为空直接报错（正文就是 prompt）。
+- [x] **32.2 `task_spec` 改为读 `~/.seekcli/tasks/<name>/TASK.md`**；找不到时报错并列出可用任务。
+    - [x] 新增 `seekcli task list`：一个坏掉的定义只让那一行显示「无法解析」，
+          不让整张表读不出来。
+- [x] **32.3 内置 reminders 首次运行或首次 `task list` 时自动写出 `TASK.md`**。
+      让它走与用户自定义任务**完全相同的路径**——否则两条路会漂移，而只有一条被真正跑过。
+- [x] **32.4 `seekcli task install <name>`**：按 `interval_hint`（`15m` / `2h` / `1d` / 裸秒数）
+      生成 plist 到 stdout，**不提供自动安装器**——往用户 LaunchAgents 塞东西应当是显式动作。
+    - [x] `task` 子命令只需要 config，不构造 provider——查看任务不该要 API key。
 
 **真实验证**：`task list` 首次调用自动写出内置 reminders；随后**只写一个 `TASK.md`**
 就多出一个 `standup` 任务，无需改代码或重编译；`task install standup` 依据
