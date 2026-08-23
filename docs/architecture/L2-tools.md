@@ -1,6 +1,6 @@
 # L2 边界层：工具注册与执行管线
 
-> 完成度 **70%**（阶段二十一、二十七后）｜ 缺口来源：[评估 §3 L2](../evaluation/2026-08-harness-gap-analysis.md#l2-边界层--45)
+> 完成度 **85%**（阶段二十一、二十七、三十后）｜ 缺口来源：[评估 §3 L2](../evaluation/2026-08-harness-gap-analysis.md#l2-边界层--45)
 
 ## 1. 职责边界
 
@@ -36,7 +36,7 @@
 | ~~L2-2~~ | ~~无原生 `glob` / `grep`~~ | — | **已于阶段二十一落地** |
 | ~~L2-3~~ | ~~派发无中间件~~ | — | **阶段二十七已落地**（统一管线 + per-tool 超时） |
 | ~~L2-4~~ | ~~无结构化 `ToolResult`~~ | — | **阶段二十七已落地**（`ToolKind`，兑现阶段八 8.3） |
-| L2-5 | 无后台执行 / job 控制 | 功能级 | 长命令阻塞整个对话 |
+| ~~L2-5~~ | ~~无后台执行 / job 控制~~ | — | **阶段三十已落地** |
 | L2-6 | 无持久 PTY | 取舍级 | 明确不做，见 §5 |
 | ~~L2-7~~ | ~~无 `ask_user_question`~~ | — | **阶段二十七已落地** |
 | L2-8 | 无 `todo_write` | 取舍级 | 已用 PLAN.md / TODO.md 文件约定替代 |
@@ -101,7 +101,7 @@ parse args → policy gate(L3：模式/路径/命令) → deadline → execute �
   字符串前缀作为**给模型看的呈现层**保留，但**程序内部不再靠 `contains` 判断**。
 - `timeout` 默认 120s，`run_shell` 可由参数覆盖至 600s，超时返回 `Failed` 并附「可用后台模式」提示。
 
-### 4.3 后台任务（L2-5）
+### 4.3 后台任务（L2-5）✅ 阶段三十已落地
 
 ```
 run_shell(command, background?: bool)   -> background=true 立即返回 job_id
@@ -110,9 +110,15 @@ job_output(job_id, tail?: int)          -> 增量输出
 job_kill(job_id)
 ```
 
-- `JobRegistry` 持有 `HashMap<JobId, JobHandle>`，输出写 `~/.seekcli/jobs/<id>.log`。
-- 任务结束时通过 L1 的 `inject()` 在下一轮告知模型，**不打断当前 step**。
-- 进程随 REPL 退出而清理，**不做守护进程**。
+- 输出写 `~/.seekcli/jobs/<id>.log` 而非内存缓冲：一次长构建不能无界撑大进程，
+  `job_output` 也才能只取尾部而不必持有全部。
+- **stderr 与 stdout 写同一个日志**：构建的报错正是模型需要的，分流会藏起它们
+  并丢掉事情发生的先后顺序。
+- 完成通知在 **step 顶部**注入，不打断当前 step——一次构建结束不该把模型正在做的
+  事情打断。且**只播报一次**：每轮重复是唠叨不是信息。
+- 进程随 REPL / headless 运行退出而清理，**不做守护进程**：留下没人能收集输出的
+  后台进程是用户没要过的意外。
+- 日志与 offload blob 一起纳入 30 天清扫。
 
 ### 4.4 MCP 客户端（L2-1）✅ 阶段二十八已落地
 

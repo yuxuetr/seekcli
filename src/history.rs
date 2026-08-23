@@ -54,9 +54,12 @@ impl HistoryManager {
     if let Some(root) = self.base_dir.parent() {
       removed += crate::tools::offload::sweep(&root.join("tmp"), MAX_AGE);
     }
+    // Background job logs grow the same way and are equally disposable once
+    // the conversation that produced them is long gone.
+    removed += crate::tools::jobs::sweep_logs(MAX_AGE);
     if removed > 0 {
       eprintln!(
-        "[Session] removed {} offloaded file(s) older than 30 days",
+        "[Session] removed {} stale offload / job file(s) older than 30 days",
         removed
       );
     }

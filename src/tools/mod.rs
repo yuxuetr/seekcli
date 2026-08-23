@@ -10,6 +10,7 @@ pub mod ask;
 pub mod audit;
 pub mod edit;
 pub mod fs;
+pub mod jobs;
 pub mod meta;
 pub mod offload;
 pub mod path_security;
@@ -132,6 +133,9 @@ impl ToolDispatcher {
       "glob" => search::glob(args).await,
       "grep" => search::grep(args).await,
       "run_shell" => shell::run_shell(args).await,
+      "job_list" => jobs::job_list(args).await,
+      "job_output" => jobs::job_output(args).await,
+      "job_kill" => jobs::job_kill(args).await,
       "create_skill" => meta::create_skill(args).await,
       "ask_user_question" => ask::ask_user_question(args).await,
       _ => anyhow::bail!("Unknown tool: {}", name),

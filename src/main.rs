@@ -482,13 +482,22 @@ async fn main() -> Result<()> {
       None => prompt,
     };
     let code = run_prompt(&mut app, prompt, cli.output).await?;
+    tools::jobs::kill_all();
     std::process::exit(code);
   }
   if let Some(path) = cli.bench {
-    return app.run_benchmark(&path).await;
+    let outcome = app.run_benchmark(&path).await;
+    tools::jobs::kill_all();
+    return outcome;
   }
   if let Some(name) = cli.run_task {
-    return tasks::run_task(&mut app, &name).await;
+    let outcome = tasks::run_task(&mut app, &name).await;
+    tools::jobs::kill_all();
+    return outcome;
   }
-  app.run().await
+  let outcome = app.run().await;
+  // Jobs are children of this process: leaving them running after the REPL
+  // exits would strand work nobody can collect the output of any more.
+  tools::jobs::kill_all();
+  outcome
 }

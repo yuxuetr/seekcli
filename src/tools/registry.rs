@@ -124,9 +124,46 @@ pub fn system_tools() -> Vec<Tool> {
       json!({
         "type": "object",
         "properties": {
-          "command": { "type": "string", "description": "Shell command to execute" }
+          "command": { "type": "string", "description": "Shell command to execute" },
+          "background": {
+            "type": "boolean",
+            "description": "Run detached and return immediately with a job id. \
+              Use for anything long-running (builds, test suites, installs) so \
+              the conversation is not blocked. Collect it later with job_output."
+          }
         },
         "required": ["command"]
+      }),
+    ),
+    make_tool(
+      "job_list",
+      "List background jobs with their state (running / done / failed / killed), \
+       elapsed time and command.",
+      json!({ "type": "object", "properties": {} }),
+    ),
+    make_tool(
+      "job_output",
+      "Read a background job's output. Returns the tail; raise `tail` to see more. \
+       Output is told when it was truncated — never assume a short tail is the \
+       whole story.",
+      json!({
+        "type": "object",
+        "properties": {
+          "id":   { "type": "integer", "description": "Job id from run_shell(background) or job_list" },
+          "tail": { "type": "integer", "description": "How many trailing lines to return (default 40)" }
+        },
+        "required": ["id"]
+      }),
+    ),
+    make_tool(
+      "job_kill",
+      "Stop a running background job.",
+      json!({
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "description": "Job id to stop" }
+        },
+        "required": ["id"]
       }),
     ),
     make_tool(
@@ -234,7 +271,11 @@ pub fn system_tools() -> Vec<Tool> {
 /// mutate engine state. Per the harness "read-concurrent, write-serial" rule,
 /// a turn is parallelized only when EVERY call is read-only.
 pub fn is_parallel_readonly(tool_name: &str) -> bool {
-  matches!(tool_name, "read_file" | "list_dir" | "glob" | "grep")
+  // job_list / job_output only read registry state and a log file.
+  matches!(
+    tool_name,
+    "read_file" | "list_dir" | "glob" | "grep" | "job_list" | "job_output"
+  )
 }
 
 /// Filter `tools` down to those listed in `allowed`. Used to apply a

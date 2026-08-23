@@ -20,6 +20,13 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     .context("Missing 'command' argument")?;
 
   // Sub-command aware: `ls; rm -rf /tmp/x` is judged by the `rm`, not the `ls`.
+  // Background dispatch happens before the spinner and the blocking wait, but
+  // after nothing else -- a backgrounded command still passes every gate.
+  let background = args
+    .get("background")
+    .and_then(Value::as_bool)
+    .unwrap_or(false);
+
   match policy::classify_command(command) {
     approval::Decision::Allow => {}
     approval::Decision::Deny(reason) => {
@@ -60,6 +67,10 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   }
 
   audit::record_command(command, audit::Outcome::Executed, "");
+
+  if background {
+    return super::jobs::spawn(command).await;
+  }
 
   eprintln!("\n{} {}", "[Agent Executing]".cyan(), command);
 

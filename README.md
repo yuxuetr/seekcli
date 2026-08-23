@@ -117,6 +117,17 @@ seekcli -p "..." --yes                          # 危险命令自动批准（默
 
 headless 下**绝不等待输入**：审批默认自动拒绝，模型收到 `[USER DENIED]` 后自行调整。
 
+### 后台任务
+```
+run_shell(command, background=true)   → 立即返回 job id，不阻塞对话
+job_list()                            → 运行中 / 已完成 / 失败 / 已终止
+job_output(id, tail?)                 → 读输出尾部（截断时会明确告知省略了多少行）
+job_kill(id)
+```
+输出写 `~/.seekcli/jobs/<id>.log`，stdout 与 stderr 合流以保留发生顺序。
+任务完成会在下一个 step 顶部**自动通知模型一次**，不打断它当前在做的事。
+**不是守护进程**：随 SeekCLI 退出一并终止。
+
 ### 安全边界
 所有工具走同一个策略门（`tools/policy.rs`）：**模式门 → 路径门 → 命令门**。
 

@@ -457,18 +457,31 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段三十：L2 后台任务与 job 控制
+### ✅ 阶段三十：L2 后台任务与 job 控制（30.4 另行排期）
 
 *目标：长命令与子代理不再阻塞对话。*
 *来源：L2-5 / L5-2。设计：[L2 §4.3](docs/architecture/L2-tools.md#43-后台任务l2-5)*
 
-- [ ] **30.1 `JobRegistry`**：输出写 `~/.seekcli/jobs/<id>.log`，随 REPL 退出清理，**不做守护进程**。
-- [ ] **30.2 工具**：`run_shell(background)` / `job_list` / `job_output(tail)` / `job_kill`。
-- [ ] **30.3 完成通知**：经 L1 `inject()` 在下一轮告知模型，**不打断当前 step**。
-- [ ] **30.4 后台子代理**：`invoke_agent(background)` 复用同一 registry；
-      子代理事件写独立 session，主轴只记 `SubagentDelegated { session_id, summary }`。
+- [x] **30.1 job 注册表**：输出写 `~/.seekcli/jobs/<id>.log` 而非内存缓冲——一次长构建
+      不能无界撑大进程，`job_output` 也才能只取尾部。stderr 与 stdout 写同一日志：
+      构建的报错正是模型需要的，分流会藏起它们并丢掉先后顺序。
+    - [x] 随 REPL / headless 退出清理，**不做守护进程**；日志纳入 30 天清扫。
+- [x] **30.2 工具**：`run_shell(background)` / `job_list` / `job_output(tail)` / `job_kill`。
+    - [x] `job_output` 截断时**显式说明省略了多少行**——一个看起来完整的尾部会让模型
+          断定某个报错从没发生过。
+    - [x] `job_list` / `job_output` 进只读并发白名单；未知 id 返回 `[FAILED]` 而非 panic。
+- [x] **30.3 完成通知**：在 step **顶部**注入，不打断当前 step——一次构建结束不该把模型
+      正在做的事打断。且**只播报一次**：每轮重复是唠叨不是信息。
+- [ ] **30.4 后台子代理**：`invoke_agent(background)` —— **本阶段未做**。
+      后台 shell 与后台子代理只是共享「注册表」这个词，实际机制不同：前者是子进程 +
+      日志文件，后者要在同一进程内跑一整条 agent 循环并把事件写进独立 session。
+      硬塞进同一次改动只会让两者都变形。留作独立小阶段。
 
-**验收**：`run_shell("sleep 300", background=true)` 立即返回，`job_output` 能读增量输出。
+**真实端到端验证**：模型后台运行 `sleep 3; echo BUILD_DONE` → 立即返回并用
+`job_list` 看到 running → 完成通知自动注入 → `job_output` 读到输出。全链路一次跑通。
+
+**顺带**：job 注册表是进程级的，job 测试的完成通知会泄漏进回放测试并改变消息条数。
+已并入 `crate::testsync` 单锁——与 cwd / 策略模式 / 审批模式同一类问题。
 
 ---
 

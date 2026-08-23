@@ -578,6 +578,16 @@ impl App {
         self.tracer.end(cspan);
       }
 
+      // A finished background job is reported at the top of a step, never
+      // mid-step: a build completing should not derail whatever the model is
+      // in the middle of doing.
+      if depth == 0
+        && let Some(note) = tools::jobs::drain_completions()
+      {
+        eprintln!("{} {}", "[Jobs]".magenta(), note);
+        log_push(&mut messages, &mut events, Message::new_user_text(note));
+      }
+
       // Two-Stage ReAct (dynamic): before acting, run a tools-free planning
       // pass when (a) opening a task with thinking enabled — macro trigger,
       // or (b) the previous turn hit a tool failure — micro trigger.
