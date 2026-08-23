@@ -133,6 +133,11 @@ impl App {
     let config = loaded.config;
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
+    observability::cost::set_rates(observability::cost::Rates {
+      cache_hit: config.pricing.cache_hit_cny_per_m,
+      cache_miss: config.pricing.cache_miss_cny_per_m,
+      output: config.pricing.output_cny_per_m,
+    });
     // Session storage first: it does not depend on credentials, and running
     // the legacy migration before a possible "API key not set" exit means a
     // user fixing their key later does not find their history still stuck in
@@ -349,21 +354,53 @@ fn spawn_interrupt_watcher(flag: Arc<AtomicBool>) {
   });
 }
 
+/// How long to wait for piped stdin before giving up on it.
+///
+/// A pipe that is open but silent is indistinguishable from one whose data is
+/// still coming. Waiting forever is the worse failure: `seekcli -p ...`
+/// launched from a script that leaves stdin open would hang with no output and
+/// no error — exactly the failure mode stage 23 set out to eliminate, and one
+/// that turned up while verifying stage 29. Two seconds is far longer than any
+/// real producer needs to write its first byte.
+const STDIN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Assemble the effective prompt: the `-p` text, plus stdin when it is piped.
 ///
-/// Only read stdin when it is NOT a terminal. Reading an interactive stdin
-/// would block forever waiting for EOF, which is the exact hang this stage
-/// exists to eliminate.
+/// Only read stdin when it is NOT a terminal — reading an interactive stdin
+/// would block waiting for an EOF the user has no reason to send.
 fn read_piped_stdin() -> Result<Option<String>> {
   use std::io::{IsTerminal, Read};
   if io::stdin().is_terminal() {
     return Ok(None);
   }
-  let mut buf = String::new();
-  io::stdin()
-    .read_to_string(&mut buf)
-    .context("cannot read stdin")?;
-  let trimmed = buf.trim();
+
+  // Read on a side thread so a silent pipe costs a bounded wait instead of
+  // the whole run. The thread is abandoned rather than joined: it is blocked
+  // on a read that may never return, and the process is about to do useful
+  // work regardless.
+  let (tx, rx) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let mut buf = String::new();
+    let outcome = io::stdin().read_to_string(&mut buf).map(|_| buf);
+    let _ = tx.send(outcome);
+  });
+
+  let text = match rx.recv_timeout(STDIN_WAIT) {
+    Ok(Ok(text)) => text,
+    Ok(Err(e)) => return Err(anyhow::Error::from(e).context("cannot read stdin")),
+    Err(_) => {
+      eprintln!(
+        "{}",
+        format!(
+          "[Input] stdin stayed open with no data for {:?}; continuing without it",
+          STDIN_WAIT
+        )
+        .yellow()
+      );
+      return Ok(None);
+    }
+  };
+  let trimmed = text.trim();
   if trimmed.is_empty() {
     Ok(None)
   } else {

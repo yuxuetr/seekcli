@@ -1,0 +1,50 @@
+{
+  "tasks": [
+    {
+      "name": "fix_bug_and_verify",
+      "prompt": "The file calc.py has a bug: add() should return the sum but returns the difference. Fix it, then run test_calc.py to confirm.",
+      "files": {
+        "calc.py": "def add(a, b):\n    return a - b\n",
+        "test_calc.py": "from calc import add\nassert add(2, 3) == 5, 'add is broken'\nprint('ok')\n"
+      },
+      "eval": "python3 test_calc.py"
+    },
+    {
+      "name": "find_then_edit",
+      "prompt": "Somewhere under src/ a constant TIMEOUT is set to 30. Find it and change it to 60.",
+      "files": {
+        "src/a.rs": "pub const RETRIES: u32 = 3;\n",
+        "src/net/client.rs": "pub const TIMEOUT: u64 = 30;\n",
+        "src/b.rs": "pub fn go() {}\n"
+      },
+      "eval": "grep -q 'TIMEOUT: u64 = 60' src/net/client.rs"
+    },
+    {
+      "name": "consolidate_across_files",
+      "prompt": "Each file in parts/ contains one number. Sum them and write only the total into total.txt.",
+      "files": {
+        "parts/one.txt": "10\n",
+        "parts/two.txt": "25\n",
+        "parts/three.txt": "7\n"
+      },
+      "eval": "test \"$(tr -d ' ' < total.txt)\" = \"42\""
+    },
+    {
+      "name": "rename_symbol_everywhere",
+      "prompt": "Rename the function `old_name` to `new_name` everywhere it appears under src/, including call sites.",
+      "files": {
+        "src/lib.rs": "pub fn old_name() -> u8 { 1 }\n",
+        "src/main.rs": "mod lib;\nfn main() { let _ = lib::old_name(); }\n"
+      },
+      "eval": "! grep -rq 'old_name' src/ && grep -q 'new_name' src/lib.rs && grep -q 'new_name' src/main.rs"
+    },
+    {
+      "name": "create_from_spec",
+      "prompt": "Read spec.md and create the files it describes, with exactly the contents it specifies.",
+      "files": {
+        "spec.md": "# Spec\n\nCreate two files:\n\n- `a.txt` containing exactly: alpha\n- `b.txt` containing exactly: beta\n"
+      },
+      "eval": "grep -qx 'alpha' a.txt && grep -qx 'beta' b.txt"
+    }
+  ]
+}

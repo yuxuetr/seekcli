@@ -187,9 +187,19 @@ impl App {
     messages.push(Message::new_user_text(prompt.to_string()));
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
     let tools = skill.and_then(|s| s.to_api_tools());
+    // Headless runs used to produce no trace at all: this path never opened a
+    // run span and never flushed. That left tracing broken in exactly the mode
+    // where nobody is watching the terminal — `-p`, `--bench`, `--run-task`.
+    let run_span = self.tracer.start_run();
     let run = self
-      .run_agent_loop(messages, tools, 0, self.max_iter, None)
+      .run_agent_loop(messages, tools, 0, self.max_iter, run_span)
       .await?;
+    self.tracer.end(run_span);
+    match self.tracer.flush() {
+      Ok(Some(path)) => eprintln!("{} trace written to {}", "[Trace]".dimmed(), path.display()),
+      Ok(None) => {}
+      Err(e) => eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e),
+    }
     #[cfg(test)]
     {
       self.last_events = run.events.clone();
@@ -677,9 +687,25 @@ impl App {
         }
         ui::flush_content()?;
       }
+      // `verdict` makes the stage 19 failure mode visible at a glance: a turn
+      // that produced prose but zero tool calls, while the model claimed to
+      // have acted. That was found by reading traces by eye; naming it means
+      // the next occurrence is greppable.
+      let verdict = if !tool_calls.is_empty() {
+        "acted"
+      } else if assistant_content.trim().is_empty() {
+        "empty"
+      } else {
+        "answered"
+      };
       self.tracer.annotate(
         gen_span,
-        serde_json::json!({ "tool_calls": tool_calls.len() }),
+        serde_json::json!({
+          "tool_calls": tool_calls.len(),
+          "verdict": verdict,
+          "content_bytes": assistant_content.len(),
+          "reasoning_bytes": assistant_reasoning.len(),
+        }),
       );
       self.tracer.end(gen_span);
 
@@ -940,7 +966,10 @@ impl App {
       }
       self.tracer.annotate(
         exec_span,
-        serde_json::json!({ "had_failure": turn_had_failure }),
+        serde_json::json!({
+          "had_failure": turn_had_failure,
+          "tools": turn_tool_calls.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>(),
+        }),
       );
       self.tracer.end(exec_span);
 

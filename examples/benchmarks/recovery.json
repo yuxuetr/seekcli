@@ -1,0 +1,30 @@
+{
+  "tasks": [
+    {
+      "name": "missing_file_then_create",
+      "prompt": "Read notes.md. If it does not exist, create it containing exactly: hello",
+      "eval": "grep -qx 'hello' notes.md"
+    },
+    {
+      "name": "wrong_path_then_locate",
+      "prompt": "Read config.yaml from the current directory. If it is not there, find where it actually is and report its path in found.txt.",
+      "files": { "conf/config.yaml": "port: 1\n" },
+      "eval": "grep -q 'conf/config.yaml' found.txt"
+    },
+    {
+      "name": "failing_command_then_adapt",
+      "prompt": "Run ./setup.sh to create output.txt. If the script fails, achieve the same result another way: output.txt must contain exactly: done",
+      "files": { "setup.sh": "#!/bin/sh\necho 'error: toolchain missing' >&2\nexit 1\n" },
+      "setup": ["chmod +x setup.sh"],
+      "eval": "grep -qx 'done' output.txt"
+    },
+    {
+      "name": "ambiguous_edit_then_disambiguate",
+      "prompt": "In app.py, change the SECOND occurrence of `value = 1` to `value = 2`. Leave the first one alone.",
+      "files": {
+        "app.py": "def a():\n    value = 1\n    return value\n\ndef b():\n    value = 1\n    return value\n"
+      },
+      "eval": "test \"$(grep -c 'value = 1' app.py)\" = \"1\" && grep -q 'value = 2' app.py"
+    }
+  ]
+}

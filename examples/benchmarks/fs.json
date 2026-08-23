@@ -1,0 +1,50 @@
+{
+  "tasks": [
+    {
+      "name": "create_file",
+      "prompt": "Create a file named hello.txt in the current directory containing exactly the text: hello world",
+      "eval": "grep -qx 'hello world' hello.txt"
+    },
+    {
+      "name": "surgical_edit",
+      "prompt": "In config.yaml, change the port from 8080 to 9090. Change nothing else.",
+      "files": {
+        "config.yaml": "name: demo\nport: 8080\ndebug: false\nregions:\n  - eu\n  - us\n"
+      },
+      "eval": "grep -q 'port: 9090' config.yaml && grep -q 'name: demo' config.yaml && grep -q '  - eu' config.yaml"
+    },
+    {
+      "name": "read_then_answer",
+      "prompt": "Read data.txt and write the number of lines it contains (a plain integer, nothing else) into count.txt.",
+      "files": { "data.txt": "alpha\nbeta\ngamma\ndelta\n" },
+      "eval": "test \"$(cat count.txt)\" = \"4\""
+    },
+    {
+      "name": "glob_discovery",
+      "prompt": "How many .rs files are there under src/? Write just the number into answer.txt.",
+      "files": {
+        "src/main.rs": "fn main() {}\n",
+        "src/lib.rs": "pub fn a() {}\n",
+        "src/util/helper.rs": "pub fn b() {}\n",
+        "src/notes.md": "not rust\n",
+        "target/debug/build.rs": "fn main() {}\n"
+      },
+      "eval": "test \"$(cat answer.txt)\" = \"3\""
+    },
+    {
+      "name": "grep_locates_definition",
+      "prompt": "Which file defines the function `compute_total`? Write only its path (relative, e.g. src/foo.rs) into found.txt.",
+      "files": {
+        "src/a.rs": "pub fn helper() {}\n",
+        "src/b.rs": "pub fn compute_total(x: i32) -> i32 { x * 2 }\n",
+        "src/c.rs": "pub fn other() {}\n"
+      },
+      "eval": "grep -q 'src/b.rs' found.txt"
+    },
+    {
+      "name": "create_nested_path",
+      "prompt": "Create a file at docs/notes/today.md containing exactly: # Today",
+      "eval": "grep -qx '# Today' docs/notes/today.md"
+    }
+  ]
+}

@@ -53,10 +53,21 @@ impl App {
         }
       };
 
+      // A task can demand a mode (e.g. --read-only). Safety cases are only
+      // meaningful under the mode they test, so the suite carries it rather
+      // than depending on how the runner happened to be invoked.
+      let restricted = task.flags.iter().any(|f| f == "--read-only");
+      crate::tools::policy::set_mode(if restricted {
+        crate::tools::policy::Mode::ReadOnly
+      } else {
+        crate::tools::policy::Mode::Normal
+      });
+
       // AgentRun: tools resolve against process cwd, so sandbox by chdir.
       env::set_current_dir(&testbed)?;
       let run = self.run_headless(&task.prompt, None).await;
       env::set_current_dir(&original_cwd)?;
+      crate::tools::policy::set_mode(crate::tools::policy::Mode::Normal);
 
       let llm_calls = match run {
         Ok(outcome) => outcome.llm_calls,

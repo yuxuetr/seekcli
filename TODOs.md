@@ -424,21 +424,36 @@ CI 门禁棘轮从 45 上调到 60。
 
 ## 🟡 P2：产品化与深水区
 
-### 阶段二十九：L7 评估闭环强化
+### ✅ 阶段二十九：L7 评估闭环强化
 
 *目标：让「引擎变好还是变坏」有数可依。*
 *来源：L7-1。设计：[L7 §4.2](docs/architecture/L7-observability.md#42-eval-套件扩容l7-1)*
 
-- [ ] **29.1 eval 套件扩到 20+ 任务**：`fs.json`(6) / `shell.json`(4) / `multistep.json`(5) /
-      `recovery.json`(4) / `safety.json`(4)。
-- [ ] **29.2 反向断言**：`safety.json` 期望模型**没有**做成某事，
-      需在 Fail-to-Pass 范式上支持 `expect_fail: true`。
-- [ ] **29.3 Cost / Trace 小改**
-    - [ ] 费率从硬编码移进 `config.toml`，明确标注「估算」。
-    - [ ] trace span 增加 `tool_calls` 计数与 `verdict`，
-          让「模型声称完成但该轮 tool_calls=0」一眼可见（阶段十九靠人肉发现）。
+- [x] **29.1 eval 套件扩到 26 个任务**：`fs.json`(6) / `shell.json`(4) / `multistep.json`(5) /
+      `recovery.json`(4) / `safety.json`(4) + 原 `basic.json`(3)。
+    - [x] 单测强制「所有随包套件都能解析、任务有名有 eval、总数 ≥20」——
+          手写 JSON 的笔误否则要等到有人花真金白银跑 benchmark 才暴露。
+- [x] **29.2 反向断言**：`expect_fail: true` 让 eval 命令保持陈述句形式——
+      写成取反的 shell 表达式会把意图埋进 `!` 和 `test` 里。
+    - [x] 配套 `flags`（如 `--read-only`）把「在哪个模式下测」留在套件内，而不是
+          取决于运行器怎么被调用。没有 flags 的反向断言会在普通模式下悄悄通过，
+          所以有单测强制两者同时出现。
+- [x] **29.3 Cost / Trace 小改**
+    - [x] 费率移进 `config.toml [pricing]`：published 费率会变、按模型不同，
+          硬编码只会变成一份「悄悄算错」的账单而不是一份明显错的。
+    - [x] trace span 增加 `verdict`（acted / answered / empty）、`content_bytes` 与本轮工具名单。
+          阶段十九是靠人肉读 trace 发现的，命名之后下一次可以直接 grep。
 
-**验收**：`--bench` 跑通全部 5 个套件并给出分套件成功率与成本。
+**顺带修掉两个真实缺陷**（都是做本阶段验证时撞出来的）：
+1. **headless 下 tracing 完全不工作**：`run_headless` 从不调用 `start_run` / `flush`，
+   `-p` / `--bench` / `--run-task` 一条 trace 都不产生——而那恰恰是没人盯着终端、
+   最需要 trace 的模式。
+2. **`-p` 遇到「已打开但不产出」的 stdin 管道会永久挂住**：从脚本里启动且 stdin
+   未关闭时，进程无输出无报错地卡死——正是阶段二十三立誓要消灭的失败模式。
+   改为在侧线程读取、2 秒无数据即放弃并告警；实测空管道不再挂住、真实管道数据仍读得到。
+
+**待真实跑分**：`seekcli --bench examples/benchmarks/<suite>.json` 需要真实 API 与成本，
+留给你按需执行。套件本身的结构正确性已由单测覆盖。
 
 ---
 

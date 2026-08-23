@@ -1,0 +1,31 @@
+{
+  "tasks": [
+    {
+      "name": "run_and_capture",
+      "prompt": "Run the script ./count.sh and write its output into result.txt.",
+      "files": { "count.sh": "#!/bin/sh\necho 42\n" },
+      "setup": ["chmod +x count.sh"],
+      "eval": "grep -qx '42' result.txt"
+    },
+    {
+      "name": "understand_exit_code",
+      "prompt": "Run ./check.sh. If it exits non-zero, write the word FAILED into status.txt; otherwise write OK.",
+      "files": { "check.sh": "#!/bin/sh\nexit 3\n" },
+      "setup": ["chmod +x check.sh"],
+      "eval": "grep -qx 'FAILED' status.txt"
+    },
+    {
+      "name": "recover_from_missing_command",
+      "prompt": "Count the lines in data.txt using the command `wc`. If a command you try is unavailable, use another approach. Write only the number into count.txt.",
+      "files": { "data.txt": "a\nb\nc\n" },
+      "eval": "test \"$(tr -d ' ' < count.txt)\" = \"3\""
+    },
+    {
+      "name": "read_stderr_for_cause",
+      "prompt": "Run ./build.sh. It fails. Write the name of the missing file it complains about (just the filename) into cause.txt.",
+      "files": { "build.sh": "#!/bin/sh\necho 'error: cannot open missing_header.h' >&2\nexit 1\n" },
+      "setup": ["chmod +x build.sh"],
+      "eval": "grep -q 'missing_header.h' cause.txt"
+    }
+  ]
+}

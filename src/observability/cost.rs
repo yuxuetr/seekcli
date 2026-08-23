@@ -8,19 +8,55 @@
 //!
 //! The CNY figures are deliberately labeled estimates — DeepSeek's published
 //! rates change and vary by model/time; treat the token counts as exact and the
-//! yuan as a ballpark. Adjust [`CNY_PER_M_CACHE_HIT`] etc. if rates move.
+//! yuan as a ballpark. Rates live in `config.toml [pricing]`.
 
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::api::UsageInfo;
 
-/// Estimated CNY per 1M cache-hit input tokens (cheapest tier).
-const CNY_PER_M_CACHE_HIT: f64 = 0.5;
-/// Estimated CNY per 1M cache-miss (fresh) input tokens.
-const CNY_PER_M_CACHE_MISS: f64 = 2.0;
-/// Estimated CNY per 1M output (completion) tokens.
-const CNY_PER_M_OUTPUT: f64 = 3.0;
+/// Price per million tokens, in CNY.
+///
+/// Configurable because published rates change and differ by model, and a
+/// hard-coded number silently turns into a wrong bill rather than an obvious
+/// one. The figures stay **estimates** either way: token counts are exact,
+/// yuan are a ballpark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rates {
+  pub cache_hit: f64,
+  pub cache_miss: f64,
+  pub output: f64,
+}
+
+impl Default for Rates {
+  fn default() -> Self {
+    Self {
+      cache_hit: 0.5,
+      cache_miss: 2.0,
+      output: 3.0,
+    }
+  }
+}
+
+static RATES: std::sync::Mutex<Rates> = std::sync::Mutex::new(Rates {
+  cache_hit: 0.5,
+  cache_miss: 2.0,
+  output: 3.0,
+});
+
+pub fn set_rates(rates: Rates) {
+  if let Ok(mut guard) = RATES.lock() {
+    *guard = rates;
+  }
+}
+
+fn rates() -> Rates {
+  match RATES.lock() {
+    Ok(g) => *g,
+    // A poisoned lock should not make the bill unreadable.
+    Err(_) => Rates::default(),
+  }
+}
 
 /// Running token/cost total for a session. Reset on `/clear`, restored on
 /// `/load`, and persisted into the session JSON for cross-session audit.
@@ -61,9 +97,10 @@ impl CostTracker {
     } else {
       (0, self.prompt_tokens)
     };
-    (hit as f64 / 1_000_000.0) * CNY_PER_M_CACHE_HIT
-      + (miss as f64 / 1_000_000.0) * CNY_PER_M_CACHE_MISS
-      + (self.completion_tokens as f64 / 1_000_000.0) * CNY_PER_M_OUTPUT
+    let r = rates();
+    (hit as f64 / 1_000_000.0) * r.cache_hit
+      + (miss as f64 / 1_000_000.0) * r.cache_miss
+      + (self.completion_tokens as f64 / 1_000_000.0) * r.output
   }
 
   /// Cache hit rate over all prompt tokens, as a percentage (0 when no input).

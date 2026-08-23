@@ -1,6 +1,6 @@
 # L7 可观测层：Cost · Tracing · Benchmark
 
-> 完成度 **75%**（阶段二十五后）｜ 缺口来源：[评估 §3 L7](../evaluation/2026-08-harness-gap-analysis.md#l7-可观测层--55)
+> 完成度 **95%**（阶段二十五、二十九后）｜ 缺口来源：[评估 §3 L7](../evaluation/2026-08-harness-gap-analysis.md#l7-可观测层--55)
 
 ## 1. 职责边界
 
@@ -63,7 +63,7 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
   与 `cargo test` 并行执行的冲突，用 `crate::testsync` 单锁串行化——
   否则一个测试翻转策略模式会让无关测试失败，看起来像被测代码的 bug。
 
-### 4.2 eval 套件扩容（L7-1）
+### 4.2 eval 套件扩容（L7-1）✅ 阶段二十九已落地
 
 `examples/benchmarks/` 从 1 个文件扩到按能力分组，目标 20+ 任务：
 
@@ -76,9 +76,12 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
 | `safety.json` | 危险命令、越权写、Plan Mode 门禁 | 4 |
 
 `safety.json` 的 eval 断言是**反向**的：期望模型**没有**做成某件事。
-这类用例在现有 Fail-to-Pass 范式下要显式支持 `expect_fail: true`。
+`expect_fail: true` 让 eval 命令保持为「陈述句」——写成取反的 shell 表达式会把
+意图埋进 `!` 和 `test` 里。配套的 `flags`（如 `--read-only`）把「在哪个模式下测」
+留在套件内，而不是取决于运行器当时怎么被调用——一个没有 flags 的反向断言会在
+普通模式下悄悄通过，所以有单测强制两者同时出现。
 
-### 4.3 CI 门禁（L7-4）
+### 4.3 CI 门禁（L7-4）✅ 阶段二十已落地
 
 `build.yml` 补上实际调用：
 
@@ -94,11 +97,15 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
 **不追求高覆盖率数字**，目的是防止「新增模块零测试」这类退化——
 随重构上调，**永远不为了让 CI 变绿而下调**。
 
-### 4.4 Cost / Trace 小改
+### 4.4 Cost / Trace 小改 ✅ 阶段二十九已落地
 
 - Cost：`estimated_cny` 的费率移进 `config.toml`（现在硬编码），并标注「估算」。
-- Trace：span 树增加 `tool_calls` 计数与 `verdict` 字段，
-  让「模型声称完成但该轮 tool_calls=0」这类问题一眼可见（阶段十九靠人肉发现的）。
+- Trace：span 树增加 `verdict`（acted / answered / empty）、`content_bytes` 与本轮工具名单，
+  让「模型声称完成但该轮 tool_calls=0」一眼可见——阶段十九是靠人肉读 trace 发现的，
+  命名之后下一次可以直接 grep。
+- ⚠️ 顺带修掉一个真实缺陷：**headless 下 tracing 完全不工作**。`run_headless` 从不调用
+  `start_run` / `flush`，于是 `-p` / `--bench` / `--run-task` 一条 trace 都不产生——
+  而那恰恰是没人盯着终端、最需要 trace 的模式。
 
 ## 5. 明确不做
 

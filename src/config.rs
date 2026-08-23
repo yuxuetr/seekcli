@@ -42,6 +42,9 @@ pub struct Config {
   /// MCP servers to launch. Absent means none.
   #[serde(default, rename = "mcp")]
   pub mcp_servers: Vec<McpServerConfig>,
+  /// Token prices used for the cost estimate.
+  #[serde(default)]
+  pub pricing: PricingConfig,
   /// Optional shell-command permission policy. Absent in older config files,
   /// so it defaults to empty (built-in rules only).
   #[serde(default)]
@@ -144,6 +147,38 @@ impl McpServerConfig {
       }
     }
     out
+  }
+}
+
+/// CNY per million tokens. Published rates move and differ by model, so a
+/// hard-coded figure turns into a quietly wrong bill.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PricingConfig {
+  #[serde(default = "default_cache_hit_cny")]
+  pub cache_hit_cny_per_m: f64,
+  #[serde(default = "default_cache_miss_cny")]
+  pub cache_miss_cny_per_m: f64,
+  #[serde(default = "default_output_cny")]
+  pub output_cny_per_m: f64,
+}
+
+fn default_cache_hit_cny() -> f64 {
+  0.5
+}
+fn default_cache_miss_cny() -> f64 {
+  2.0
+}
+fn default_output_cny() -> f64 {
+  3.0
+}
+
+impl Default for PricingConfig {
+  fn default() -> Self {
+    Self {
+      cache_hit_cny_per_m: default_cache_hit_cny(),
+      cache_miss_cny_per_m: default_cache_miss_cny(),
+      output_cny_per_m: default_output_cny(),
+    }
   }
 }
 
@@ -310,6 +345,7 @@ impl Default for Config {
       providers: Vec::new(),
       resilience: ResilienceConfig::default(),
       mcp_servers: Vec::new(),
+      pricing: PricingConfig::default(),
       security: SecurityConfig::default(),
       tasks: TasksConfig::default(),
     }

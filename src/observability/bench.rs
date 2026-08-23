@@ -31,6 +31,21 @@ pub struct Task {
   pub setup: Vec<String>,
   /// Verification command. Task passes iff this exits 0 (Fail-to-Pass).
   pub eval: String,
+  /// Invert the verdict: the task passes when `eval` **fails**.
+  ///
+  /// Safety cases are stated backwards — "the agent must NOT have deleted
+  /// this" — and writing them as a negated shell expression buries the intent
+  /// in `!` and `test`. Naming the inversion keeps the eval command a plain
+  /// statement of what the agent was supposed to be blocked from doing.
+  #[serde(default)]
+  pub expect_fail: bool,
+  /// Extra flags for the agent run, e.g. `--read-only`.
+  ///
+  /// A safety case is only meaningful under the mode it tests, and encoding
+  /// that in the suite keeps the whole scenario in one file instead of
+  /// splitting it between the JSON and how the runner was invoked.
+  #[serde(default)]
+  pub flags: Vec<String>,
 }
 
 /// A loaded benchmark suite.
@@ -98,7 +113,10 @@ impl Task {
       .with_context(|| format!("running eval `{}`", self.eval))?;
     let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.success(), combined))
+    // `expect_fail` inverts the verdict, not the output: the note still
+    // describes what actually happened, which is what a failing report needs.
+    let raw = out.status.success();
+    Ok((raw != self.expect_fail, combined))
   }
 }
 
@@ -208,12 +226,85 @@ mod tests {
       files: BTreeMap::from([("a.txt".to_string(), "seed".to_string())]),
       setup: vec!["echo more > b.txt".to_string()],
       eval: "true".to_string(),
+      expect_fail: false,
+      flags: Vec::new(),
     };
     let root = std::env::temp_dir().join(format!("seekcli_bench_{}", uuid::Uuid::new_v4()));
     let bed = task.prepare_testbed(&root).expect("prepare");
     assert_eq!(std::fs::read_to_string(bed.join("a.txt")).unwrap(), "seed");
     assert!(bed.join("b.txt").exists());
     std::fs::remove_dir_all(&root).ok();
+  }
+
+  /// Every shipped suite must parse. A hand-written JSON typo would otherwise
+  /// only surface when someone spends real tokens running the benchmark.
+  #[test]
+  fn every_shipped_suite_parses_and_is_well_formed() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/benchmarks");
+    let mut total = 0usize;
+    let mut suites = 0usize;
+    let entries = match std::fs::read_dir(&dir) {
+      Ok(e) => e,
+      Err(e) => panic!("cannot read {}: {}", dir.display(), e),
+    };
+    for entry in entries.flatten() {
+      let path = entry.path();
+      if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        continue;
+      }
+      let suite = match TestSuite::load(&path) {
+        Ok(s) => s,
+        Err(e) => panic!("{} does not parse: {:#}", path.display(), e),
+      };
+      assert!(!suite.tasks.is_empty(), "{} has no tasks", path.display());
+      for task in &suite.tasks {
+        assert!(!task.name.is_empty(), "unnamed task in {}", path.display());
+        assert!(!task.eval.is_empty(), "task `{}` has no eval", task.name);
+        // A reverse assertion only means something under the mode it tests;
+        // without flags it would silently pass in normal mode.
+        if task.expect_fail {
+          assert!(
+            !task.flags.is_empty(),
+            "task `{}` inverts its verdict but names no mode to test",
+            task.name
+          );
+        }
+        total += 1;
+      }
+      suites += 1;
+    }
+    assert!(suites >= 5, "expected the full suite set, found {}", suites);
+    assert!(total >= 20, "eval coverage regressed to {} tasks", total);
+  }
+
+  /// Safety cases assert the agent was *prevented* from doing something, so
+  /// the runner has to be able to say "passing means this command fails".
+  #[test]
+  fn expect_fail_inverts_the_verdict() {
+    let dir = std::env::temp_dir().join("seekcli-bench-expectfail");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::remove_file(dir.join("forbidden.txt"));
+
+    let guard = Task {
+      name: "no_write".into(),
+      prompt: String::new(),
+      files: BTreeMap::new(),
+      setup: Vec::new(),
+      // Reads as "the file exists" -- and the task passes when it does NOT.
+      eval: "test -f forbidden.txt".into(),
+      expect_fail: true,
+      flags: Vec::new(),
+    };
+    match guard.run_eval(&dir) {
+      Ok((passed, _)) => assert!(passed, "absent file means the guard held"),
+      Err(e) => panic!("eval failed: {}", e),
+    }
+
+    let _ = std::fs::write(dir.join("forbidden.txt"), "leaked");
+    match guard.run_eval(&dir) {
+      Ok((passed, _)) => assert!(!passed, "the file exists, so the guard was breached"),
+      Err(e) => panic!("eval failed: {}", e),
+    }
   }
 
   #[test]
@@ -225,6 +316,8 @@ mod tests {
       files: BTreeMap::new(),
       setup: vec![],
       eval: "true".to_string(),
+      expect_fail: false,
+      flags: Vec::new(),
     };
     let bed = pass.prepare_testbed(&root).unwrap();
     assert!(pass.run_eval(&bed).unwrap().0);
