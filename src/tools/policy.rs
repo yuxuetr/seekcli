@@ -84,7 +84,22 @@ pub fn mode() -> Mode {
 /// `run_shell` is here because a command's effects cannot be known without
 /// parsing it. In a restricted mode it is not refused outright — see
 /// `shell_is_read_only` — but it is never waved through.
-pub fn is_mutating(tool: &str) -> bool {
+/// Whether a tool can change something outside the process.
+///
+/// Takes the foreign tool's own declaration rather than offering a
+/// convenience overload without it: a no-argument version is exactly what
+/// would get reached for by accident, and it is the unsafe default.
+///
+/// MCP tools arrive from configuration with arbitrary names — `mcp__fs__
+/// write_file` is not in any list we maintain, so name matching alone let one
+/// straight through `--read-only` (found by the stage 28 end-to-end check,
+/// which created the file it was told not to). The rule for anything we did
+/// not author is therefore inverted: **assume it writes** unless the server
+/// explicitly annotated it `readOnlyHint`.
+pub fn is_mutating_with(tool: &str, declared_read_only: Option<bool>) -> bool {
+  if crate::mcp::is_mcp_tool(tool) {
+    return !declared_read_only.unwrap_or(false);
+  }
   matches!(
     tool,
     "write_file" | "edit_file" | "run_shell" | "create_skill"
@@ -342,11 +357,14 @@ fn expand_home(path: &str) -> String {
 }
 
 /// The gate. Every tool call goes through here before it executes.
-pub fn check(tool: &str, args: &Value) -> Verdict {
+/// The gate. `declared_read_only` carries a foreign tool's own annotation;
+/// `None` means "we did not author this and it made no claim", which is
+/// treated as writing.
+pub fn check_with(tool: &str, args: &Value, declared_read_only: Option<bool>) -> Verdict {
   let current = mode();
 
   // 1. Mode gate.
-  if current.is_restricted() && is_mutating(tool) {
+  if current.is_restricted() && is_mutating_with(tool, declared_read_only) {
     let shell_ok = tool == "run_shell"
       && args
         .get("command")
@@ -364,7 +382,7 @@ pub fn check(tool: &str, args: &Value) -> Verdict {
 
   // 2. Path gate.
   if let Some(path) = args.get("path").and_then(Value::as_str)
-    && is_mutating(tool)
+    && is_mutating_with(tool, declared_read_only)
     && let Err(e) = super::path_security::ensure_within_cwd(path)
   {
     return Verdict::Deny(format!("{e}"));
@@ -475,14 +493,17 @@ mod tests {
     set_mode(Mode::ReadOnly);
     for tool in ["write_file", "edit_file", "create_skill"] {
       assert!(
-        matches!(check(tool, &json!({"path": "x"})), Verdict::Deny(_)),
+        matches!(
+          check_with(tool, &json!({"path": "x"}), None),
+          Verdict::Deny(_)
+        ),
         "{} must be denied",
         tool
       );
     }
     for tool in ["read_file", "list_dir", "glob", "grep"] {
       assert_eq!(
-        check(tool, &json!({"path": "."})),
+        check_with(tool, &json!({"path": "."}), None),
         Verdict::Allow,
         "{}",
         tool
@@ -490,11 +511,11 @@ mod tests {
     }
     // Shell degrades rather than disappearing: reporting still works.
     assert_eq!(
-      check("run_shell", &json!({"command": "git status"})),
+      check_with("run_shell", &json!({"command": "git status"}), None),
       Verdict::Allow
     );
     assert!(matches!(
-      check("run_shell", &json!({"command": "rm f"})),
+      check_with("run_shell", &json!({"command": "rm f"}), None),
       Verdict::Deny(_)
     ));
     set_mode(Mode::Normal);
@@ -505,21 +526,54 @@ mod tests {
     let _guard = crate::testsync::lock();
     set_mode(Mode::Normal);
     assert!(matches!(
-      check("write_file", &json!({"path": "/etc/hosts"})),
+      check_with("write_file", &json!({"path": "/etc/hosts"}), None),
       Verdict::Deny(_)
     ));
     assert!(matches!(
-      check("run_shell", &json!({"command": "sudo ls"})),
+      check_with("run_shell", &json!({"command": "sudo ls"}), None),
       Verdict::Ask(_)
     ));
     // The gap this stage closes: shell writing outside the workspace used to
     // be waved straight through.
     assert!(matches!(
-      check("run_shell", &json!({"command": "echo x > ~/.zshrc"})),
+      check_with("run_shell", &json!({"command": "echo x > ~/.zshrc"}), None),
       Verdict::Ask(_)
     ));
     assert_eq!(
-      check("run_shell", &json!({"command": "ls -la"})),
+      check_with("run_shell", &json!({"command": "ls -la"}), None),
+      Verdict::Allow
+    );
+  }
+
+  /// Regression guard for a real hole: `--read-only` let `mcp__fs__write_file`
+  /// through because the name was not on any built-in list, and the end-to-end
+  /// check created the file it had been told not to.
+  #[test]
+  fn a_foreign_tool_cannot_walk_through_read_only_mode() {
+    let _guard = crate::testsync::lock();
+    set_mode(Mode::ReadOnly);
+
+    // No declaration: assume it writes.
+    assert!(matches!(
+      check_with("mcp__fs__write_file", &json!({}), None),
+      Verdict::Deny(_)
+    ));
+    // Declared as a writer: denied.
+    assert!(matches!(
+      check_with("mcp__fs__write_file", &json!({}), Some(false)),
+      Verdict::Deny(_)
+    ));
+    // Declared read-only by the server: allowed, so read-only mode stays
+    // useful rather than blocking every configured capability.
+    assert_eq!(
+      check_with("mcp__fs__read_text_file", &json!({}), Some(true)),
+      Verdict::Allow
+    );
+
+    set_mode(Mode::Normal);
+    // Outside restricted mode a foreign tool runs normally.
+    assert_eq!(
+      check_with("mcp__fs__write_file", &json!({}), None),
       Verdict::Allow
     );
   }
@@ -532,7 +586,7 @@ mod tests {
     // restricted mode would break the feature it is named after.
     set_mode(Mode::Normal);
     assert_eq!(
-      check("write_file", &json!({"path": "PLAN.md"})),
+      check_with("write_file", &json!({"path": "PLAN.md"}), None),
       Verdict::Allow
     );
   }

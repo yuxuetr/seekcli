@@ -17,6 +17,7 @@ mod completer;
 mod config;
 mod engine;
 mod history;
+mod mcp;
 mod observability;
 mod session;
 mod skills;
@@ -107,6 +108,9 @@ struct App {
   /// run can lower it with `--max-iter` so an unattended job has a bounded
   /// worst-case cost.
   max_iter: usize,
+  /// Tools contributed by MCP servers. Empty when none are configured, and
+  /// then it costs nothing.
+  mcp: mcp::McpRegistry,
   /// Events produced by the most recent headless run. Test-only: the
   /// invariant test needs to assert on the log a run produced, and threading
   /// that through the public return type would put test scaffolding in the
@@ -120,7 +124,7 @@ struct App {
 }
 
 impl App {
-  fn new() -> Result<Self> {
+  async fn new() -> Result<Self> {
     let loaded = Config::load()?;
     // Notices go to stderr so a future `-p --output json` keeps stdout clean.
     for notice in &loaded.notices {
@@ -142,6 +146,11 @@ impl App {
     // Offloaded tool output belongs to the session that produced it.
     tools::offload::set_blob_dir(history.blobs_dir(current_session.id()));
 
+    // Servers are launched here rather than lazily: the model needs their
+    // schemas in the very first request, and discovering a tool mid-turn
+    // would change the tool set under prompt caching.
+    let mcp = mcp::McpRegistry::connect_all(&config.mcp_servers).await;
+
     let interrupt = Arc::new(AtomicBool::new(false));
     spawn_interrupt_watcher(interrupt.clone());
 
@@ -159,6 +168,7 @@ impl App {
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::from_env(),
+      mcp,
       #[cfg(test)]
       last_events: Vec::new(),
       interrupt,
@@ -190,6 +200,7 @@ impl App {
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::new(false),
+      mcp: mcp::McpRegistry::empty(),
       last_events: Vec::new(),
       interrupt: Arc::new(AtomicBool::new(false)),
     })
@@ -423,7 +434,7 @@ async fn main() -> Result<()> {
     tools::policy::set_mode(tools::policy::Mode::ReadOnly);
   }
 
-  let mut app = App::new()?;
+  let mut app = App::new().await?;
   if let Some(n) = cli.max_iter {
     app.max_iter = n.max(1);
   }

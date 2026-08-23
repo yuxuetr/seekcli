@@ -39,6 +39,9 @@ pub struct Config {
   /// Retry / timeout tuning. Absent means the built-in defaults.
   #[serde(default)]
   pub resilience: ResilienceConfig,
+  /// MCP servers to launch. Absent means none.
+  #[serde(default, rename = "mcp")]
+  pub mcp_servers: Vec<McpServerConfig>,
   /// Optional shell-command permission policy. Absent in older config files,
   /// so it defaults to empty (built-in rules only).
   #[serde(default)]
@@ -75,6 +78,73 @@ pub struct ProviderConfig {
   /// credential. The prefix form also leaves room for `keychain:` later
   /// without another schema change.
   pub api_key: String,
+}
+
+/// One MCP server to launch as a child process.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct McpServerConfig {
+  pub name: String,
+  pub command: String,
+  #[serde(default)]
+  pub args: Vec<String>,
+  /// Extra environment. Values use the same `env:VAR` / `file:PATH` /
+  /// literal forms as `api_key`, so a token can be passed to a server without
+  /// being written into the config file.
+  #[serde(default)]
+  pub env: std::collections::BTreeMap<String, String>,
+  #[serde(default = "default_true")]
+  pub enabled: bool,
+  /// Ceiling on the handshake. A server that hangs must not stop the REPL
+  /// from opening.
+  #[serde(default = "default_mcp_timeout")]
+  pub startup_timeout_secs: u64,
+}
+
+fn default_true() -> bool {
+  true
+}
+
+fn default_mcp_timeout() -> u64 {
+  10
+}
+
+impl McpServerConfig {
+  /// Environment for the child, with indirections resolved.
+  ///
+  /// A value that names a missing variable is dropped with a warning rather
+  /// than passed through literally — handing a server the string `env:TOKEN`
+  /// produces a confusing auth error instead of an obvious configuration one.
+  pub fn resolved_env(&self) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (key, spec) in &self.env {
+      let value = if let Some(var) = spec.strip_prefix("env:") {
+        match std::env::var(var) {
+          Ok(v) => Some(v),
+          Err(_) => {
+            eprintln!(
+              "[MCP] server `{}`: ${} is not set; {} will be unset",
+              self.name, var, key
+            );
+            None
+          }
+        }
+      } else if let Some(path) = spec.strip_prefix("file:") {
+        match fs::read_to_string(shellexpand_home(path)) {
+          Ok(v) => Some(v.trim().to_string()),
+          Err(e) => {
+            eprintln!("[MCP] server `{}`: cannot read {}: {}", self.name, path, e);
+            None
+          }
+        }
+      } else {
+        Some(spec.clone())
+      };
+      if let Some(v) = value {
+        out.push((key.clone(), v));
+      }
+    }
+    out
+  }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -239,6 +309,7 @@ impl Default for Config {
       },
       providers: Vec::new(),
       resilience: ResilienceConfig::default(),
+      mcp_servers: Vec::new(),
       security: SecurityConfig::default(),
       tasks: TasksConfig::default(),
     }
@@ -436,6 +507,19 @@ fn write_default_config(path: &Path) -> Result<()> {
      # wire     = \"openai\"            # openai | anthropic\n\
      # base_url = \"http://127.0.0.1:8000/v1\"\n\
      # api_key  = \"env:LOCAL_API_KEY\"\n\
+     \n\
+     # MCP servers. Each is launched as a child process on startup; a server\n\
+     # that fails or hangs is skipped with a warning, never blocking startup.\n\
+     # Tools appear as `mcp__<server>__<tool>` and pass the same policy gate\n\
+     # as built-ins, so --read-only applies to them too.\n\
+     #\n\
+     # [[mcp]]\n\
+     # name    = \"filesystem\"\n\
+     # command = \"npx\"\n\
+     # args    = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"]\n\
+     # env     = {{ }}                 # values accept env: / file: like api_key\n\
+     # enabled = true\n\
+     # startup_timeout_secs = 10\n\
      \n\
      # Retry / timeout. Shown with the built-in defaults.\n\
      # Only the initial request is retried; once the stream is flowing a\n\

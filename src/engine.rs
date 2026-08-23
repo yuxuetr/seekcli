@@ -39,6 +39,33 @@ pub(crate) struct LoopResult {
   pub iterations: usize,
 }
 
+impl App {
+  /// Route a tool call to the built-in pipeline or to an MCP server.
+  ///
+  /// MCP tools go through `ToolDispatcher` too, so the policy gate, the
+  /// deadline and the audit log apply to foreign tools exactly as they do to
+  /// ours. A capability that arrives from configuration must not be a way
+  /// around `--read-only`.
+  async fn dispatch(
+    dispatcher: &tools::ToolDispatcher,
+    mcp: &crate::mcp::McpRegistry,
+    name: &str,
+    arguments: &str,
+  ) -> tools::result::ToolResult {
+    if crate::mcp::is_mcp_tool(name) {
+      // The server's own read-only annotation is the only thing that can
+      // exempt a foreign tool from the mode gate.
+      let declared = Some(mcp.is_read_only(name));
+      return dispatcher
+        .execute_with(name, arguments, declared, |args| async move {
+          mcp.call(name, &args).await
+        })
+        .await;
+    }
+    dispatcher.execute(name, arguments).await
+  }
+}
+
 /// Append a message to the working set **and** the durable log in one step.
 ///
 /// The two must never be written separately: the moment a site appends to one
@@ -484,7 +511,13 @@ impl App {
 
     let tool_dispatcher = tools::ToolDispatcher::new();
     let effective_tools = if depth == 0 {
-      tools::registry::merge_with_skill(tools)
+      // MCP tools go to the main agent only. A sub-agent runs under a template
+      // whose allowed_tools list was written without knowledge of whatever the
+      // user happens to have configured, so silently widening it would break
+      // the tool-narrowing that makes sub-agents cheap and safe.
+      let mut merged = tools::registry::merge_with_skill(tools);
+      merged.extend(self.mcp.schemas());
+      merged
     } else {
       tools.unwrap_or_default()
     };
@@ -695,9 +728,13 @@ impl App {
       // concurrently (the harness "read-concurrent, write-serial" rule). Any
       // write / shell / delegation forces the safe sequential path below.
       let parallelizable = tool_calls.len() > 1
-        && tool_calls
-          .iter()
-          .all(|tc| tools::registry::is_parallel_readonly(&tc.function.name));
+        && tool_calls.iter().all(|tc| {
+          if crate::mcp::is_mcp_tool(&tc.function.name) {
+            self.mcp.is_read_only(&tc.function.name)
+          } else {
+            tools::registry::is_parallel_readonly(&tc.function.name)
+          }
+        });
 
       if parallelizable {
         eprintln!(
@@ -707,11 +744,12 @@ impl App {
         );
         let futs = tool_calls.iter().map(|tc| {
           let disp = &tool_dispatcher;
+          let mcp = &self.mcp;
           let name = tc.function.name.clone();
           let args = tc.function.arguments.clone();
           let id = tc.id.clone();
           async move {
-            let outcome = disp.execute(&name, &args).await;
+            let outcome = Self::dispatch(disp, mcp, &name, &args).await;
             let failed = outcome.kind.is_failure();
             let text = if failed {
               agent::recovery::augment(&name, outcome.render())
@@ -861,9 +899,13 @@ impl App {
               }
             }
           } else {
-            let outcome = tool_dispatcher
-              .execute(&tc.function.name, &tc.function.arguments)
-              .await;
+            let outcome = Self::dispatch(
+              &tool_dispatcher,
+              &self.mcp,
+              &tc.function.name,
+              &tc.function.arguments,
+            )
+            .await;
             dispatched_failure = outcome.kind.is_failure();
             // Context-aware Error Recovery: append an actionable hint on a
             // real failure, so the model follows a debug SOP instead of

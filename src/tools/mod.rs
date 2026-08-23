@@ -54,6 +54,30 @@ impl ToolDispatcher {
   /// stack would add indirection without ever being reconfigured. What matters
   /// is that there is exactly *one* path, so no tool can bypass a stage.
   pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
+    self
+      .execute_with(name, arguments, None, |args| async move {
+        Self::run(name, &args).await
+      })
+      .await
+  }
+
+  /// The pipeline, with the execution step supplied by the caller.
+  ///
+  /// Exists so MCP tools traverse the *same* gate, deadline and audit path as
+  /// built-ins. A capability that arrives from configuration must not become a
+  /// way around `--read-only`; giving foreign tools their own execute path is
+  /// exactly how that happens.
+  pub async fn execute_with<F, Fut>(
+    &self,
+    name: &str,
+    arguments: &str,
+    declared_read_only: Option<bool>,
+    run: F,
+  ) -> ToolResult
+  where
+    F: FnOnce(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+  {
     // A malformed arguments payload used to be silently coerced to `Null`,
     // which then surfaced as a confusing "missing argument" error. Surface it
     // explicitly so Error Recovery can hand the model an actionable hint.
@@ -67,7 +91,7 @@ impl ToolDispatcher {
     // Single gate for every tool: mode -> path -> command.
     // `run_shell` re-reads the command verdict inside shell.rs to drive the
     // interactive prompt; `check` here is what guarantees no tool bypasses it.
-    match policy::check(name, &args) {
+    match policy::check_with(name, &args, declared_read_only) {
       policy::Verdict::Allow => {}
       policy::Verdict::Deny(reason) => {
         audit::record(name, &args, audit::Outcome::Denied, &reason);
@@ -79,7 +103,7 @@ impl ToolDispatcher {
     }
 
     let limit = timeout_for(name);
-    let result = match tokio::time::timeout(limit, Self::run(name, &args)).await {
+    let result = match tokio::time::timeout(limit, run(args.clone())).await {
       Ok(outcome) => ToolResult::from_legacy(outcome),
       Err(_) => ToolResult::timed_out(format!(
         "`{}` exceeded {:?}. If this is legitimately long-running, run it in \

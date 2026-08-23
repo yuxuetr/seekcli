@@ -30,6 +30,7 @@ impl App {
     println!("  /resume <id>            Resume a previous session (alias: /load)");
     println!("  /fork <id> [n]          Fork a session at event n into a new one");
     println!("  /search <text>          Find sessions mentioning text");
+    println!("  /tools                  List active tools (built-in + MCP)");
     println!("  /help                   Show this help");
     println!("  /quit                   Exit\n");
   }
@@ -229,6 +230,26 @@ impl App {
           );
         } else {
           println!("{} Read-only {}", "✦".cyan(), "OFF".yellow());
+        }
+      }
+      "/tools" => {
+        let builtin = crate::tools::registry::system_tools();
+        println!("{} ({})", "Built-in".bold(), builtin.len());
+        for t in &builtin {
+          println!("  {}", t.function.name);
+        }
+        let mcp = self.mcp.listing();
+        if mcp.is_empty() {
+          println!(
+            "{} none configured — add [[mcp]] entries to {}",
+            "MCP:".dimmed(),
+            "~/.seekcli/config.toml".dimmed()
+          );
+        } else {
+          println!("{} ({})", "MCP".bold(), mcp.len());
+          for (name, server) in mcp {
+            println!("  {}  {}", name, format!("[{}]", server).dimmed());
+          }
         }
       }
       "/history" => {
