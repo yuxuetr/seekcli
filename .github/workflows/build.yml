@@ -14,11 +14,10 @@ permissions:
   contents: write
 
 jobs:
-  build-rust:
-    strategy:
-      matrix:
-        platform: [ubuntu-latest]
-    runs-on: ${{ matrix.platform }}
+  # Gates run once, on Linux. Running the full check suite on four platforms
+  # would quadruple CI time to re-prove the same thing.
+  check:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -53,10 +52,58 @@ jobs:
         run: >-
           cargo llvm-cov nextest --all-features --workspace
           --summary-only --fail-under-lines 60
+
+  # Only on a tag: build the binaries a user actually installs. Previously a
+  # release shipped a changelog and nothing else -- there was no artifact to
+  # download, so "release" meant "we wrote about it".
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross-linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="seekcli-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/seekcli" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # Checksums travel with the artifact so a download can be verified
+          # without trusting the page it came from.
+          shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           config: cliff.toml
           args: -vv --latest --strip header
@@ -64,6 +111,8 @@ jobs:
           OUTPUT: CHANGELOG.md
       - name: Release
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           body: ${{ steps.git-cliff.outputs.content }}
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256

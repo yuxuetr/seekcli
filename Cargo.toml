@@ -1,8 +1,18 @@
 [package]
-edition = "2024"
-license = "MIT"
 name = "seekcli"
 version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A local CLI coding agent: DeepSeek + tools + a harness (ReAct loop, policy gate, session event log, MCP)."
+repository = "https://github.com/yuxuetr/seekcli"
+homepage = "https://github.com/yuxuetr/seekcli"
+readme = "README.md"
+keywords = ["agent", "cli", "llm", "deepseek", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+# Ship only what a build needs. Recorded LLM fixtures are ~76K of test data and
+# examples/ is documentation, not code — neither belongs in a published crate.
+include = ["src/**/*", "README.md", "LICENSE", "CHANGELOG.md"]
+rust-version = "1.85"
 
 [dependencies]
 anyhow = "1.0"

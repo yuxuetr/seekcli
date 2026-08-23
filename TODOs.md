@@ -537,19 +537,39 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 阶段三十三：分发与发布
+### 🟡 阶段三十三：分发与发布（配置就绪，发布待执行）
 
 *目标：让第二个用户装得上。*
 *来源：评估 §4 产品形态。*
 
-- [ ] **33.1 多平台 release**：`build.yml` 矩阵扩到 macOS(arm64/x86_64) + Linux(x86_64/arm64)，
-      tag 时上传二进制产物（当前只发 changelog，不传产物）。
-- [ ] **33.2 `cargo install seekcli` 可用**：补 `description` / `repository` / `keywords` /
-      `readme` 等 crates.io 必需元数据。
-- [ ] **33.3 README 重写**：安装 / 快速上手 / 配置 / MCP 接入，面向新用户而非作者。
-- [ ] **33.4 CONTRIBUTING + issue 模板**。
+- [x] **33.1 多平台 release**：`build.yml` 拆成 `check` + `release` 两个 job。
+      门禁只在 Linux 跑一次（四平台跑同一套检查只会让 CI 时间翻四倍去重复证明同一件事）；
+      tag 时构建 macOS(arm64/x86_64) + Linux(x86_64/arm64) 四份产物并上传 tar.gz。
+    - [x] 附 SHA-256 校验和：让下载可以被验证，而不必信任提供下载的那个页面。
+    - [x] 此前 release 只发 changelog、没有任何产物——「发布」等于「写了篇说明」。
+- [x] **33.2 `cargo install seekcli` 可用**：补齐 description / repository / homepage /
+      readme / keywords / categories / rust-version。
+    - [x] `include` 只打包 `src/` + README + LICENSE + CHANGELOG：录制的 LLM fixture
+          是 76K 测试数据、`examples/` 是文档，都不该进已发布的 crate。已用
+          `cargo package --list` 核对。
+- [x] **33.3 README 重写**：开头改为面向新用户——一句话说清它是什么、怎么装、
+      五条常用命令，然后才是设计定位。「刻意不做什么」直接列出并指向理由所在。
+- [x] **33.4 CONTRIBUTING + issue 模板**。
+    - [x] CONTRIBUTING 首先讲「先读哪份设计文档」，并说明 `check-gap-coverage.py`
+          会强制「评估 → 设计 → 路线」这条链不断。
+    - [x] 单独一节讲「改动 LLM 交互时要格外小心」——这类 bug 不会编译失败也不会 panic。
+    - [x] bug 模板引导附 `SEEKCLI_TRACE` 决策树，并提示 `verdict: answered` +
+          `tool_calls: 0` 意味着模型只是在说话；同时提醒 trace 含提示词内容。
+    - [x] feature 模板先问「是否已被明确排除」与「能不能用 MCP 解决」。
 
-**验收**：在一台干净机器上 `cargo install seekcli` 后可直接使用。
+> ⏳ **待你执行**：真正的发布需要 crates.io 账号与打 tag，我只准备到配置层。
+> 发布前建议按顺序做：
+> 1. `cargo publish --dry-run` 确认打包无误
+> 2. `git tag v0.1.0 && git push --tags` 触发多平台 release
+> 3. `cargo publish`
+>
+> 注意 `Cargo.toml` 的 `rust-version = "1.85"` 是按 edition 2024 估的下界，
+> 若要严格保证，需要用该版本工具链实测一次。
 
 ---
 

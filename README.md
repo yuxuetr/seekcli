@@ -1,25 +1,47 @@
 # SeekCLI
 
-**SeekCLI** 是一个基于 **DeepSeek V4** 的本地 CLI Harness Agent。
-它把 DeepSeek 的推理能力 + 本地工具调用 + ReAct 闭环包进一个极简的终端 REPL，
-让你在 shell 里直接驱动一个真正会"思考 → 用工具 → 观察 → 再思考"的 Agent。
+在终端里跑的本地 coding agent：一个 ReAct 循环、一组文件与 shell 工具、
+一道所有工具都绕不开的策略门，以及一份 append-only 的会话事件日志。
 
-> **架构设计**: 见 [`docs/architecture/`](./docs/architecture/README.md)
-> **演进路线**: 见 [`TODOs.md`](./TODOs.md) ｜ **能力评估**: 见 [`docs/evaluation/`](./docs/evaluation/README.md)
+默认对接 DeepSeek，也能指向任意 OpenAI / Anthropic 兼容端点。
+能力扩展走 **MCP**，不需要改 Rust。
 
----
+## 安装
 
-## 🎯 设计定位
+```bash
+cargo install seekcli
+# 或从 Releases 下载对应平台的二进制
+```
 
-SeekCLI 选择**做减法**：
+## 快速上手
 
-- ✅ **DeepSeek V4 深度适配,双 wire 协议** —— OpenAI / Anthropic 兼容端点经 `LlmProvider` trait 二选一,但不做运行时多模型路由
-- ✅ **Tool Calling 是唯一能力扩展路径** —— 不再有"客户端预注入"
-- ✅ **ReAct + 类型化 SubAgent + 策展 Skill** —— 不引入 plan-execute / multi-agent 框架
-- ✅ **本地 CLI 即时性** —— 不引入跨会话语义记忆
-- ✅ **安全为一等公民** —— 危险命令必须审批，fs 工具受路径白名单约束
+```bash
+export DEEPSEEK_API_KEY="your_key"
 
-不在范围内：浏览器、MCP（首版）、跨会话向量记忆、自演化 skill。
+seekcli                                   # 交互式 REPL
+seekcli -p "这个仓库里 TODO 最多的是哪个文件？"   # 一次性执行
+seekcli -p "总结这段日志" --output json | jq .   # 结构化输出，stdout 只有 JSON
+cat error.log | seekcli -p "分析这个报错"        # 管道输入
+seekcli -p "审查这次改动" --read-only            # 只看不改
+```
+
+首次运行会在 `~/.seekcli/config.toml` 生成一份带注释的配置。
+**不会往当前目录写任何东西。**
+
+## 它做什么、不做什么
+
+**做**：一个纯 ReAct 循环 + 类型化子代理 + 策展 Skill；工具面靠 MCP 扩展；
+安全是一等公民——危险命令要审批，写操作受工作区约束，所有工具走同一道策略门。
+
+**刻意不做**：OS 沙箱、持久 PTY、workflow / DAG 编排、跨会话语义记忆、
+插件框架、TUI / Web UI、在线自演化 Skill。
+每一条的理由都写在 [`design-principles.md`](./docs/architecture/design-principles.md)
+和各层文档的「明确不做」里——如果你觉得某条理由不成立，欢迎直接指出是哪一条。
+
+> **架构设计**: [`docs/architecture/`](./docs/architecture/README.md) ｜
+> **能力评估**: [`docs/evaluation/`](./docs/evaluation/README.md) ｜
+> **演进路线**: [`TODOs.md`](./TODOs.md) ｜
+> **参与贡献**: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 
 ---
 
@@ -36,7 +58,7 @@ SeekCLI 选择**做减法**：
 | 类型化 SubAgent   | `invoke_agent("explore", ...)` 派发只读探索子任务，仅带摘要回主轴         |
 | Tool 调度         | 内置 `read_file / write_file / edit_file / list_dir / run_shell` 等，schema 注入 LLM |
 | 容错 edit_file    | `old_text→new_text` 外科手术式替换，L1-L4 模糊匹配吸收缩进幻觉 + 唯一性校验 |
-| 大输出卸载        | 工具输出 > 8K 落盘 `~/.seekcli/tmp/`，仅回首尾预览 + 路径                 |
+| 大输出卸载        | 工具输出 > 8K 落盘会话 `blobs/`，仅回首尾预览 + 路径，30 天自动清理        |
 | 动态 Prompt       | 启动时读工作区 `AGENTS.md` / `CLAUDE.md` 注入项目规约                     |
 | Plan Mode         | `/plan` 引导模型把长任务状态外部化到 `PLAN.md` / `TODO.md`                |
 | Skill 策展        | 内置 skill 模板 + `create_skill` proposal（用户审核后生效）              |
