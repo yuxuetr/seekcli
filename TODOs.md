@@ -531,7 +531,9 @@ CI 门禁棘轮从 45 上调到 60。
 - [ ] **32.4 `seekcli task install <name>`**：按 `interval_hint` 生成 plist 到 stdout，
       **不提供自动安装器**——往用户 LaunchAgents 塞东西应当是显式动作。
 
-**验收**：新增任务只写一个 `TASK.md` 即可运行；现有 reminders 行为不变。
+**真实验证**：`task list` 首次调用自动写出内置 reminders；随后**只写一个 `TASK.md`**
+就多出一个 `standup` 任务，无需改代码或重编译；`task install standup` 依据
+`interval_hint: 1d` 正确生成 `StartInterval=86400` 的 plist。
 
 ---
 
