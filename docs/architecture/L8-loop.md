@@ -1,6 +1,6 @@
 # L8 循环层：系统级调度 · Headless Task · Digest
 
-> 完成度 **60%** ｜ 缺口来源：[评估 §3 L8](../evaluation/2026-08-harness-gap-analysis.md#l8-循环层--60)
+> 完成度 **90%**（阶段三十二后）｜ 缺口来源：[评估 §3 L8](../evaluation/2026-08-harness-gap-analysis.md#l8-循环层--60)
 
 ## 1. 职责边界
 
@@ -15,7 +15,7 @@ L8 不给 Harness 加新工具或新控制流分支——它只是换一套 prom
 | 机制 | 位置 |
 | --- | --- |
 | 任务分发 | `tasks.rs::run_task` —— chdir 进 tasks 目录 → `run_headless` → chdir 回原 cwd |
-| 任务定义 | `tasks.rs::task_spec(name) -> (prompt, skill_name)` —— **硬编码 match** |
+| 任务定义 | `~/.seekcli/tasks/<name>/TASK.md` —— 声明式，与 `SKILL.md` 同构并共用切分器 |
 | 状态目录 | `~/.seekcli/tasks/`（可由 `config.toml [tasks] dir` 覆盖），含 `digest/` |
 | 状态格式 | `reminders.md` / `todos.md` markdown checkbox + `[notified:...]` 标记 |
 | 通知 | 模型经 `run_shell` 调 `osascript display notification` |
@@ -29,12 +29,12 @@ L8 不给 Harness 加新工具或新控制流分支——它只是换一套 prom
 
 | # | 缺口 | 影响 |
 | --- | --- | --- |
-| L8-1 | 任务硬编码在 `task_spec` | 加一个任务要改 Rust 并重编译 |
+| ~~L8-1~~ | ~~任务硬编码在 `task_spec`~~ | **阶段三十二已落地** |
 | L8-2 | 模型无法自己排程 | 取舍级，见 §5 |
 
 ## 4. 目标设计
 
-### 4.1 任务声明式化（L8-1）
+### 4.1 任务声明式化（L8-1）✅ 阶段三十二已落地
 
 任务从 Rust `match` 分支变成目录，**格式与 Skill 完全同构**（复用既有 frontmatter parser）：
 
@@ -61,10 +61,12 @@ interval_hint: 15m
 
 - `seekcli --run-task <name>` 读 `<name>/TASK.md`；找不到就报错列出可用任务。
 - `interval_hint` 仅供生成 launchd plist 用，**SeekCLI 自己不做调度**。
-- 内置任务（reminders）首次运行时自动写出默认 `TASK.md`，用户可直接改。
+- 内置任务（reminders）首次运行 **或首次 `task list`** 时自动写出 `TASK.md`，用户可直接改。
+  让它走与用户自定义任务**完全相同的路径**——否则两条路会漂移，而只有一条被真正跑过。
+- 一个坏掉的定义只让那一行显示为「无法解析」，不让整张任务表读不出来。
 - 保持 [design-principles](design-principles.md) 的约束：**L8 不新增 Rust 工具**。
 
-### 4.2 plist 生成辅助
+### 4.2 plist 生成辅助 ✅ 阶段三十二已落地
 
 `seekcli task install <name>` 依据 `interval_hint` 生成 plist 到标准输出，
 用户自己决定是否 `launchctl load`。**不提供自动安装器**——

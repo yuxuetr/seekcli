@@ -481,14 +481,18 @@ fn extract_asset_description(path: &Path) -> Result<String> {
   Ok(String::new())
 }
 
-/// Split a SKILL.md document into `(frontmatter, body)`. Errors if the
-/// document doesn't begin with a `---` line or the frontmatter is unclosed.
-pub fn parse_skill_md(content: &str) -> Result<(Frontmatter, String)> {
+/// Split a `---`-delimited document into `(frontmatter yaml, body)`.
+///
+/// Shared with L8's `TASK.md` (`tasks.rs`): both are "YAML header plus a
+/// Markdown body that is really a prompt", and having them drift apart on
+/// BOMs or CRLF would be a pointless class of bug. `label` only shapes the
+/// error message.
+pub fn split_frontmatter(content: &str, label: &str) -> Result<(String, String)> {
   let trimmed = content.trim_start_matches('\u{feff}'); // strip BOM if present
   let rest = trimmed
     .strip_prefix("---\n")
     .or_else(|| trimmed.strip_prefix("---\r\n"))
-    .ok_or_else(|| anyhow::anyhow!("SKILL.md must start with a '---' frontmatter delimiter"))?;
+    .ok_or_else(|| anyhow::anyhow!("{} must start with a '---' frontmatter delimiter", label))?;
 
   let end = rest
     .find("\n---\n")
@@ -502,12 +506,50 @@ pub fn parse_skill_md(content: &str) -> Result<(Frontmatter, String)> {
         None
       }
     })
-    .ok_or_else(|| anyhow::anyhow!("SKILL.md frontmatter not closed (expected '---' separator)"))?;
+    .ok_or_else(|| {
+      anyhow::anyhow!(
+        "{} frontmatter not closed (expected '---' separator)",
+        label
+      )
+    })?;
 
-  let yaml = &rest[..end.0];
-  let body = rest[end.0 + end.1.len()..].trim_start().to_string();
+  Ok((
+    rest[..end.0].to_string(),
+    rest[end.0 + end.1.len()..].trim_start().to_string(),
+  ))
+}
 
-  let fm = parse_frontmatter(yaml)?;
+/// Read one scalar key out of frontmatter, ignoring everything else.
+///
+/// Enough for `TASK.md`, which has no lists. Returns `None` for a missing key
+/// and for the explicit YAML nulls, so `skill: null` reads the same as
+/// omitting the line.
+pub fn frontmatter_scalar(yaml: &str, key: &str) -> Option<String> {
+  for line in yaml.lines() {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+      continue;
+    }
+    let Some((k, v)) = line.split_once(':') else {
+      continue;
+    };
+    if k.trim() != key {
+      continue;
+    }
+    let value = v.trim().trim_matches(['"', '\'']).trim();
+    if value.is_empty() || value == "null" || value == "~" {
+      return None;
+    }
+    return Some(value.to_string());
+  }
+  None
+}
+
+/// Split a SKILL.md document into `(frontmatter, body)`. Errors if the
+/// document doesn't begin with a `---` line or the frontmatter is unclosed.
+pub fn parse_skill_md(content: &str) -> Result<(Frontmatter, String)> {
+  let (yaml, body) = split_frontmatter(content, "SKILL.md")?;
+  let fm = parse_frontmatter(&yaml)?;
   Ok((fm, body))
 }
 

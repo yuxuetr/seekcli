@@ -117,6 +117,19 @@ seekcli -p "..." --yes                          # 危险命令自动批准（默
 
 headless 下**绝不等待输入**：审批默认自动拒绝，模型收到 `[USER DENIED]` 后自行调整。
 
+### 定时任务（L8）
+任务是声明式的，新增一个只写文件、不改代码：
+```
+~/.seekcli/tasks/<name>/TASK.md      YAML frontmatter + Markdown 正文（正文即 prompt）
+```
+```bash
+seekcli task list                    # 列出任务
+seekcli task install <name>          # 按 interval_hint 生成 launchd plist（只打印）
+seekcli --run-task <name>            # 由 launchd/cron 调用
+```
+frontmatter 支持 `name` / `description` / `skill`（预激活的 Skill）/ `interval_hint`（`15m` `2h` `1d`）。
+内置的 `reminders` 首次使用时自动写出，可直接编辑。
+
 ### 后台任务
 ```
 run_shell(command, background=true)   → 立即返回 job id，不阻塞对话

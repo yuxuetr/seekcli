@@ -319,6 +319,29 @@ struct Cli {
   /// REPL. Intended for launchd/cron invocation, not interactive use.
   #[arg(long, value_name = "TASK_NAME")]
   run_task: Option<String>,
+
+  #[command(subcommand)]
+  task: Option<TaskCommand>,
+}
+
+#[derive(clap::Subcommand)]
+enum TaskCommand {
+  /// Inspect scheduled tasks.
+  Task {
+    #[command(subcommand)]
+    action: TaskAction,
+  },
+}
+
+#[derive(clap::Subcommand)]
+enum TaskAction {
+  /// List defined tasks.
+  List,
+  /// Print a launchd plist for a task.
+  ///
+  /// Prints only — installing it is left to the user, because writing into
+  /// someone's LaunchAgents should be an explicit act.
+  Install { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -471,6 +494,17 @@ async fn main() -> Result<()> {
   }
   if cli.read_only {
     tools::policy::set_mode(tools::policy::Mode::ReadOnly);
+  }
+
+  // Task inspection needs config, not a provider or a model.
+  if let Some(TaskCommand::Task { action }) = &cli.task {
+    let loaded = Config::load()?;
+    let text = match action {
+      TaskAction::List => tasks::list(&loaded.config)?,
+      TaskAction::Install { name } => tasks::render_plist(&loaded.config, name)?,
+    };
+    print!("{}", text);
+    return Ok(());
   }
 
   let mut app = App::new().await?;
