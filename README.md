@@ -39,7 +39,7 @@ seekcli -p "审查这次改动" --read-only            # 只看不改
 和各层文档的「明确不做」里——如果你觉得某条理由不成立，欢迎直接指出是哪一条。
 
 > **架构设计**: [`docs/architecture/`](./docs/architecture/README.md) ｜
-> **能力评估**: [`docs/evaluation/`](./docs/evaluation/README.md) ｜
+> **能力评估**: [`docs/evaluation/`](./docs/evaluation/README.md)（对照 deepseek-harness，当前约 80%）｜
 > **演进路线**: [`TODOs.md`](./TODOs.md) ｜
 > **参与贡献**: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 

@@ -5,7 +5,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [scoring-rubric.md](scoring-rubric.md) | 评分口径与缺口分级标准。**先读这个**，否则不同次评估的数字无法比较 |
-| [2026-08-harness-gap-analysis.md](2026-08-harness-gap-analysis.md) | 对照 `deepseek-harness` 的完整逐层评估（当前基线） |
+| [2026-08-harness-gap-analysis.md](2026-08-harness-gap-analysis.md) | 首评：对照 `deepseek-harness` 的完整逐层评估（缺口编号在此定义） |
+| [2026-08-24-reassessment.md](2026-08-24-reassessment.md) | **复评**：推进完阶段二十 ~ 三十三后的复盘（当前基线） |
 
 ## 与其它文档的关系
 
