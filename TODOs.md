@@ -21,7 +21,7 @@
 
 阶段二十 ~ 三十三**全部推进完毕**，其中三项经评估后**主动不做**并写明理由
 （30.4 后台子代理、31.2 LoopHook、25.3 压缩轨迹 fixture），阶段三十三的
-实际发布动作待仓库所有者执行。
+crates.io 发布已于 2026-09-12 定为不做，多平台 release 的 tag 仍待打。
 
 | 指标 | 阶段十九 | 现在 |
 | --- | --- | --- |
@@ -556,7 +556,7 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
-### 🟡 阶段三十三：分发与发布（配置就绪，发布待执行）
+### 🟡 阶段三十三：分发与发布（crates.io 已定为不做，tag 待打）
 
 *目标：让第二个用户装得上。*
 *来源：评估 §4 产品形态。*
@@ -581,11 +581,12 @@ CI 门禁棘轮从 45 上调到 60。
           `tool_calls: 0` 意味着模型只是在说话；同时提醒 trace 含提示词内容。
     - [x] feature 模板先问「是否已被明确排除」与「能不能用 MCP 解决」。
 
-> ⏳ **待你执行**：真正的发布需要 crates.io 账号与打 tag，我只准备到配置层。
-> 发布前建议按顺序做：
-> 1. `cargo publish --dry-run` 确认打包无误
-> 2. `git tag v0.1.0 && git push --tags` 触发多平台 release
-> 3. `cargo publish`
+> **2026-09-12 决定：不发布到 crates.io**（仓库所有者）。
+> 33.2 的元数据工作不作废——`cargo install --git` 依赖同一份 `Cargo.toml` 字段，
+> 且它是将来若改主意时的前置。README 的安装指令已同步改为 `--git` 形式。
+>
+> ⏳ **仍待执行**：`git tag v0.1.0 && git push --tags` 触发多平台 release。
+> 不打 tag 则 README 里「从 Releases 下载二进制」这条路同样不存在。
 >
 > 注意 `Cargo.toml` 的 `rust-version = "1.85"` 是按 edition 2024 估的下界，
 > 若要严格保证，需要用该版本工具链实测一次。
@@ -804,6 +805,7 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 | — | 文档 i18n | 单人中文开发 |
 | — | Cordis 式 DI / Proxy context | Rust 的 `Drop` + 所有权已是 effect 可逆性的编译期版本；Fiber 754 行状态机在 GC 语言里手工重建的东西，rustc 免费提供 |
 | — | 运行期代码挂载（dlopen / WASM） | 跨 ABI 不安全、卸载几乎必然 UB；WASM 要拖进整个 runtime 且无法授予宿主级权限。等价需求由 MCP 的**进程边界**满足——kill 即完整 quiescence |
+| — | 发布到 crates.io | 仓库所有者决定不发布。`cargo install --git` 与 Releases 二进制已覆盖安装需求；发布会引入版本号承诺与 yank 语义这类长期义务 |
 | — | RL 训练端 | 定位是**环境与评测器**，不是训练器。训练端是另一套技术栈，塞进 Rust CLI 违反 design-principles §5 三问 |
 
 ---

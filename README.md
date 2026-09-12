@@ -9,7 +9,7 @@
 ## 安装
 
 ```bash
-cargo install seekcli
+cargo install --git https://github.com/yuxuetr/seekcli
 # 或从 Releases 下载对应平台的二进制
 ```
 
