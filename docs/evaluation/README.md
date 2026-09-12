@@ -7,6 +7,7 @@
 | [scoring-rubric.md](scoring-rubric.md) | 评分口径与缺口分级标准。**先读这个**，否则不同次评估的数字无法比较 |
 | [2026-08-harness-gap-analysis.md](2026-08-harness-gap-analysis.md) | 首评：对照 `deepseek-harness` 的完整逐层评估（缺口编号在此定义） |
 | [2026-08-24-reassessment.md](2026-08-24-reassessment.md) | **复评**：推进完阶段二十 ~ 三十三后的复盘（当前基线） |
+| [2026-09-12-self-evolution-baseline.md](2026-09-12-self-evolution-baseline.md) | **三评**：换用 D 口径（自进化地基）的基线，新增缺口 L1-6 / L4-7 / L5-6 / L7-6 / L7-7 / L7-8 |
 
 ## 与其它文档的关系
 

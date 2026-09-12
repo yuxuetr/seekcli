@@ -2,7 +2,7 @@
 
 > **定位**：单纯的本地 CLI Agent，核心 = DeepSeek + Tools + Harness Agent 引擎。
 > **心智模型与逐层设计**：[`docs/architecture/`](docs/architecture/README.md)
-> **缺口从哪来**：[`docs/evaluation/2026-08-harness-gap-analysis.md`](docs/evaluation/2026-08-harness-gap-analysis.md)
+> **缺口从哪来**：[`docs/evaluation/`](docs/evaluation/README.md)（首评定义缺口编号，三评新增 D 口径与六条新缺口）
 > **阶段一 ~ 阶段十九**：已全部完成并归档至 [`docs/archive/TODOs-phase-01-19.md`](docs/archive/TODOs-phase-01-19.md)
 
 ---
@@ -592,6 +592,172 @@ CI 门禁棘轮从 45 上调到 60。
 
 ---
 
+## 🟣 第二轮：自进化地基（阶段三十四 ~ 三十九）
+
+*坐标系：D 口径（自进化七条件）。来源：[2026-09-12 三评](docs/evaluation/2026-09-12-self-evolution-baseline.md)。*
+
+**定位补充（不改主定位）**：SeekCLI 是 RL / 进化实验的**环境与评测器**，不是训练器。
+理由：完全复用已有 L7 基建，训练端留在外部，不违反 design-principles §2 任何一条。
+
+> ⚠️ **开工前置**：本轮六个阶段的「设计」环节尚未落到 `docs/architecture/` 层文档。
+> 按 `docs/evaluation/README.md` 的「评估 → 设计 → 路线」链路，
+> 每个阶段动手前需先在对应层文档补一节目标设计。另有四处文档修订待做，见本节末。
+
+### 依赖关系
+
+```
+34 教学式错误（L1-6）        ← 零架构改动，随时可做
+35 自描述（L7-6）            ← 零架构改动，随时可做
+
+36 SessionStore seam（L4-7）─┬─→ 38 eval 回灌（L7-7）
+37 提案闸门通用化（L5-6）────┘
+                             └─→ 39 trajectory 导出（L7-8）
+```
+
+**三十四、三十五互相独立且不依赖任何人**，是本轮唯一可以立刻开始的两项。
+
+---
+
+### 🟣 阶段三十四：L1 教学式错误
+
+*目标：每一次拒绝都变成模型能据此行动的下一步，而不是一句「不允许」。*
+*来源：L1-6。设计：待补（`docs/architecture/L1-engine.md`）*
+
+样板已经存在——`src/tools/mod.rs` `execute_with` 的 `bad_args` 分支注释写着
+「Surface it explicitly so Error Recovery can hand the model an actionable hint」。
+本阶段是把这个已经做对一次的模板推广到另外三处。
+
+- [ ] **34.1 策略门拒绝带上下文**：`src/tools/policy.rs` 的 `Verdict::Deny(reason)`
+      补「当前 mode 允许什么」与「建议的替代调用」。
+    - [ ] 不改判定逻辑，只改拒绝消息的信息量——**判定与措辞必须分开改**，
+          否则一次改动同时动了安全语义和文案，回归时说不清是哪边坏的。
+- [ ] **34.2 MCP 启动失败原因喂给模型**：`src/mcp/mod.rs` 现在是跳过 + 一行告警，
+      模型完全不知道少了哪些工具。失败原因进上下文后它可能自己就能修配置。
+    - [ ] 仍然保持「不静默降级」——可见输出照旧，这里只是多一条模型可见路径。
+- [ ] **34.3 未知工具名 / 参数错误附最接近的候选**：`src/tools/registry.rs`
+      给出最接近的可用工具名 + 其 schema 片段。
+- [ ] **34.4 eval 增补**：三条反向断言——拒绝消息必须包含可行动信息，
+      而不只是断言「被拒绝了」。
+
+**验收**：L-a 层进化（把知识写进拒绝路径而非 system prompt）在三条路径上成立；
+A 口径的 recovery 质量可由 eval 前后对比证明。
+
+---
+
+### 🟣 阶段三十五：L7 自描述（`harness_inspect`）
+
+*目标：模型能查询自己的运行时，而不是靠盲试推断边界。*
+*来源：L7-6。设计：待补（`docs/architecture/L7-observability.md`）*
+
+dsh 的教训写在它的 Agent Note 里：模型猜方法签名、猜返回值形状要花很多步盲试。
+**自描述的收益先于自修改兑现**——即使永远不做自修改，这一条也值。
+
+- [ ] **35.1 只读工具 `harness_inspect`**，一个 `what` 参数分区返回：
+    - [ ] `tools`：当前工具面 + schema（含 MCP 来源标注）
+    - [ ] `policy`：当前 mode 与**生效中的路径 / 命令规则**
+    - [ ] `skills`：活跃 skill 与待审提案
+    - [ ] `mcp`：各 server 状态与失败原因
+    - [ ] `session`：事件日志统计（事件数 / 压缩次数 / 当前 token 估算）
+- [ ] **35.2 与策略门同源**：`policy` 分区必须读 `policy.rs` 的同一份规则，
+      **不得另写一份描述**——手写描述会漂移，且漂移时模型信的是错的那份。
+- [ ] **35.3 归入只读并行工具**：`is_parallel_readonly` 加白名单。
+- [ ] **35.4 eval 增补**：模型被拒后应能用 `harness_inspect` 自行定位原因。
+
+**验收**：七条件第 1 条从 ❌ 到具备；且 35.2 保证它不会成为第二份会漂移的事实来源。
+
+---
+
+### 🟣 阶段三十六：L4 会话存储 seam
+
+*目标：把 `LlmProvider` 的 seam 模式从 L0 推广到 L4。*
+*来源：L4-7。设计：待补（`docs/architecture/L4-memory.md`）*
+
+**判据是「真的出现第二个实现」**——trajectory 导出（三十九）、SQLite 索引、
+跨会话检索，任一个都够。这与当初推迟 `LoopHook` 用的是同一条判据
+（见「🔵 已知仍开放」），区别只在于这次判据被满足了。
+
+- [ ] **36.1 `trait SessionStore`**：`save` / `load` / `list` / `stat`。
+    - [ ] 现有 JSONL 实现原样塞进去，**行为零变化**——这一步只做搬家。
+    - [ ] `Session` 保持纯数据；`to_jsonl` / `from_jsonl` 降为该实现的私有细节。
+- [ ] **36.2 全部调用点改走 trait 对象**，确认 `/resume`、`fork`、检索、标题
+      四条路径无行为差异（录制回放回归）。
+- [ ] **36.3 不引入第二个后端**——本阶段只开缝，不塞东西。
+      塞东西是三十九的事，届时才验证这条缝开对了。
+
+**验收**：`cargo test` 全绿且录制回放无 diff；新增 trait 但**不新增任何行为**。
+
+---
+
+### 🟣 阶段三十七：L5 提案闸门通用化
+
+*目标：把已经做对的人工闸门从「只服务 skill」推广到全部可进化资产。*
+*来源：L5-6。设计：待补（`docs/architecture/L5-composition.md`）*
+
+七条件第 6 条（选择压力）是 SeekCLI **强于 dsh** 的两处之一——
+dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶段扩大这个优势面。
+
+- [ ] **37.1 提案类型泛化**：`proposals/` 下按类型分目录，`skill` 之外新增
+      `mcp`（server 配置）、`policy`（策略规则）、`task`（TASK.md）。
+- [ ] **37.2 `/skill accept|reject` 泛化为 `/propose list|accept|reject`**，
+      保留 `/skill` 旧入口为别名——**不破坏既有肌肉记忆**。
+- [ ] **37.3 每类提案有自己的落地校验**：policy 提案接受前必须能解析，
+      mcp 提案接受前必须能启动一次。**接受一个坏提案比拒绝一个好提案贵得多。**
+- [ ] **37.4 补全 completer**：`src/completer.rs` 已按 Tab 重扫目录，跟着泛化。
+
+**验收**：写一个 MCP server 配置提案 → `accept` → 重启后工具面真的多出来，全程不改 Rust。
+
+---
+
+### 🟣 阶段三十八：L7 eval 回灌提案闸门 ★
+
+*目标：把「可判定的评价信号」接到「选择压力」上——闭上进化飞轮。*
+*来源：L7-7。依赖：三十六、三十七。设计：待补（`docs/architecture/L7-observability.md`）*
+
+> **这是 dsh 做不到的事。** 它的 e2e / snapshot / web 测试在 CI 里跑，不在会话里跑。
+> 单人本地 CLI 的 eval **可以在接受提案的那一刻当场跑完**——
+> 体量劣势反过来变成结构优势。
+
+- [ ] **38.1 `/propose accept` 前跑相关 eval 套件**，输出 before/after 对照。
+- [ ] **38.2 提案可声明关联套件**；未声明则跑默认冒烟集。
+      **默认必须是「跑一点」而不是「不跑」**——默认不跑等于这个功能不存在。
+- [ ] **38.3 回归即拒绝**：任一 Fail-to-Pass 任务由通过变失败则拒绝接受，
+      并把失败任务名告诉模型（教学式错误，与三十四同一原则）。
+    - [ ] 提供 `--force` 逃生口，但**必须打印被牺牲了哪几条**。
+- [ ] **38.4 eval 增补**：一个故意引入回归的提案必须被挡下。
+
+**验收**：七条件第 5 条与第 6 条之间建立机械连接；进化从「可编程」变成「可判定」。
+
+---
+
+### 🟣 阶段三十九：L7 trajectory 导出
+
+*目标：让 SeekCLI 成为可被外部 RL / 进化流程消费的环境。*
+*来源：L7-8。依赖：三十六。设计：待补（`docs/architecture/L7-observability.md`）*
+
+- [ ] **39.1 `--bench` 导出标准 trajectory**：`(state, action, reward)` 序列，
+      reward 取 Fail-to-Pass 的退出码判定（含反向断言的取反语义）。
+- [ ] **39.2 走 36.1 的 `SessionStore` 缝**——这是验证那条缝开对了的第一个真实用户。
+- [ ] **39.3 明确不做训练端**：只产出数据，不引入任何训练依赖。
+- [ ] **39.4 格式文档化**：外部消费者需要一份稳定契约，否则导出等于没导出。
+
+**验收**：`events.jsonl` 之外产出一份外部可消费的轨迹；L7-8 关闭。
+
+---
+
+### 本轮附带的文档修订（未排期，动手前逐条确认）
+
+按 P3 表的规矩——「若将来重估，需先修改对应设计文档再开阶段」——以下四处
+**必须在相关阶段动手前完成**，本轮仅登记，不在此提交中修改：
+
+| 文件 | 改什么 | 关联 |
+| --- | --- | --- |
+| `docs/architecture/design-principles.md` §2 | 「在线自演化 Skill」现写作排除项，实为七条件第 6 条**做对了**，表述反了 | 三十七 |
+| `docs/architecture/design-principles.md` §5 | 补判据本质：dsh 是为不确定性买保险，SeekCLI 是为确定性优化 | 全部 |
+| `docs/architecture/README.md` §5 | 「不借鉴 Cordis」升级为精确版：Rust 的 `Drop` + 所有权是 Fiber 754 行状态机的编译期版本 | 全部 |
+| P3 表「插件框架 / profile / bundle」一行 | 取舍性质变化：不是「不做插件」，是**「MCP 就是我们的插件格式」** | 三十七 |
+
+---
+
 ## 🔵 已知仍开放（未排期，但不是「不做」）
 
 推进完阶段二十 ~ 三十三后，核对层文档与路线图发现这四项仍然开放。
@@ -636,6 +802,9 @@ CI 门禁棘轮从 45 上调到 60。
 | L7-5 | OTel 导出 | 单机无 collector；JSON span + `jq` 已够 |
 | L8-2 | 模型自排程（`schedule_*`） | 需要持久调度状态机；外部 launchd + 声明式 TASK.md 已覆盖 |
 | — | 文档 i18n | 单人中文开发 |
+| — | Cordis 式 DI / Proxy context | Rust 的 `Drop` + 所有权已是 effect 可逆性的编译期版本；Fiber 754 行状态机在 GC 语言里手工重建的东西，rustc 免费提供 |
+| — | 运行期代码挂载（dlopen / WASM） | 跨 ABI 不安全、卸载几乎必然 UB；WASM 要拖进整个 runtime 且无法授予宿主级权限。等价需求由 MCP 的**进程边界**满足——kill 即完整 quiescence |
+| — | RL 训练端 | 定位是**环境与评测器**，不是训练器。训练端是另一套技术栈，塞进 Rust CLI 违反 design-principles §5 三问 |
 
 ---
 
