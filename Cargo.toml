@@ -27,7 +27,15 @@ grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.33"
 indicatif = "0.17"
-reqwest = {version = "0.12", features = ["json", "stream"]}
+# rustls rather than the default native-tls. Two reasons, both about shipping
+# binaries: cross-compiling to aarch64-linux needs an aarch64 libssl that the
+# release runner does not have, and a native-tls build dynamically links the
+# builder's libssl -- so a tarball built on ubuntu-latest will not start on a
+# distro carrying a different one. `native-roots` keeps reading the OS trust
+# store, so a corporate / MITM proxy's own CA still works; and
+# `macos-system-configuration` is a default feature that must be re-listed
+# here, since it is what picks up the macOS system proxy.
+reqwest = {version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "macos-system-configuration", "rustls-tls-native-roots"]}
 rustyline = "12.0"
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
