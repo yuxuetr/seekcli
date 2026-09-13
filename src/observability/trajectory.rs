@@ -112,7 +112,7 @@ fn steps_of(prompt: &str, events: &[EventPayload]) -> Vec<Step> {
 
   for event in events {
     match event {
-      EventPayload::UserMessage { content } => push_line(&mut observation, content),
+      EventPayload::UserMessage { content, .. } => push_line(&mut observation, content),
       EventPayload::ToolResult { content, .. } => push_line(&mut observation, content),
       // A compaction replaced part of the projection; the summary is what the
       // model actually saw next, so it belongs in the observation.
@@ -186,6 +186,7 @@ mod tests {
         content: "you are an agent".into(),
       },
       EventPayload::UserMessage {
+        images: Vec::new(),
         content: "read notes.md".into(),
       },
       EventPayload::AssistantMessage {
@@ -284,6 +285,7 @@ mod tests {
     // A task the agent never answered must not produce a phantom step whose
     // action is empty -- that reads as "it chose to say nothing".
     let only_input = vec![EventPayload::UserMessage {
+      images: Vec::new(),
       content: "hello".into(),
     }];
     assert!(steps_of("hello", &only_input).is_empty());

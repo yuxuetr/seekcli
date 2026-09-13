@@ -206,6 +206,7 @@ impl App {
     let sub_tools = tools::registry::filter_by_allowed(available, template.allowed_tools);
     let sub_messages = vec![
       Message::Simple {
+        images: Vec::new(),
         role: "system".to_string(),
         content: template.system_prompt.to_string(),
         reasoning_content: None,
@@ -275,6 +276,7 @@ impl App {
       )
     });
     deferred.push(Message::Simple {
+      images: Vec::new(),
       role: "system".to_string(),
       content: format!(
         "# Activated Skill: {}\n\n{}",
@@ -455,6 +457,7 @@ impl App {
     self.interrupt.store(false, Ordering::SeqCst);
 
     self.current_session.record(EventPayload::UserMessage {
+      images: Vec::new(),
       content: content.to_string(),
     });
 
@@ -525,6 +528,7 @@ impl App {
     let mut messages = Vec::new();
     if let Some(skill) = skill {
       messages.push(Message::Simple {
+        images: Vec::new(),
         role: "system".to_string(),
         content: format!(
           "# Activated Skill: {}\n\n{}",
@@ -618,6 +622,7 @@ impl App {
       return;
     }
     messages.push(Message::Simple {
+      images: Vec::new(),
       role: "assistant".to_string(),
       content: plan,
       reasoning_content: None,
@@ -643,6 +648,7 @@ impl App {
   /// confirms success without ever calling anything for real.
   fn planning_only_directive() -> Message {
     Message::Simple {
+      images: Vec::new(),
       role: "system".to_string(),
       content: "[Two-Stage ReAct planning pass] Tools are deliberately withheld for \
                 this one completion only — you cannot actually invoke anything right \
@@ -768,6 +774,7 @@ impl App {
       messages.insert(
         0,
         Message::Simple {
+          images: Vec::new(),
           role: "system".to_string(),
           content: target,
           reasoning_content: None,
@@ -801,6 +808,7 @@ impl App {
         messages.insert(
           insert_at,
           Message::Simple {
+            images: Vec::new(),
             role: "system".to_string(),
             content: rules,
             reasoning_content: None,
@@ -820,6 +828,7 @@ impl App {
       messages.insert(
         head_end,
         Message::Simple {
+          images: Vec::new(),
           role: "system".to_string(),
           content: plan_msg,
           reasoning_content: None,
@@ -992,6 +1001,7 @@ impl App {
         &mut messages,
         &mut events,
         Message::Simple {
+          images: Vec::new(),
           role: "assistant".to_string(),
           content: assistant_content.clone(),
           reasoning_content: if assistant_reasoning.is_empty() {

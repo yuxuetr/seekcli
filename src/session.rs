@@ -41,6 +41,14 @@ pub enum PromptKind {
 pub enum EventPayload {
   UserMessage {
     content: String,
+    /// Images the user attached, stored as **blob references, not bytes**.
+    ///
+    /// `#[serde(default)]` is what lets every pre-stage-41 log deserialize
+    /// unchanged — no version bump, no migration chain. And keeping bytes out
+    /// means one screenshot does not add hundreds of KB to `events.jsonl`
+    /// (`docs/architecture/L4-memory.md` §4.6.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<ImageRef>,
   },
   AssistantMessage {
     content: String,
@@ -67,6 +75,18 @@ pub enum EventPayload {
   },
   Usage(UsageInfo),
   Interrupted,
+}
+
+/// A stored reference to an image blob.
+///
+/// The durable half of the pair whose transient half is `api::ImagePart`.
+/// `media_type` travels with the path because the blob filename need not carry
+/// a usable extension, and guessing it at replay time would be a second source
+/// of truth.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageRef {
+  pub path: String,
+  pub media_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +197,68 @@ pub fn short_id(id: &str) -> &str {
 /// those events and splices in the summary as a system message. The skipped
 /// events remain in `events.jsonl`, which is the whole point — a compacted
 /// session is still fully auditable and replayable.
+/// Rebuild a user message, loading any referenced image blobs.
+///
+/// A blob that is gone — the 30-day sweep reclaims them — leaves a visible line
+/// in the text rather than disappearing. Per [design-principles §4] degradation
+/// beats interruption, but never silently: the model must not be told the image
+/// was there when it was not, and `/resume` must not fail over an expired
+/// screenshot (`docs/architecture/L4-memory.md` §4.6.2).
+fn rebuild_user_message(content: &str, images: &[ImageRef]) -> Message {
+  if images.is_empty() {
+    return Message::new_user_text(content.to_string());
+  }
+  let mut text = content.to_string();
+  let mut loaded = Vec::new();
+  for image in images {
+    match std::fs::read(&image.path) {
+      Ok(bytes) => loaded.push(crate::api::ImagePart {
+        media_type: image.media_type.clone(),
+        data_base64: base64_encode(&bytes),
+      }),
+      Err(_) => {
+        if !text.is_empty() {
+          text.push('\n');
+        }
+        text.push_str(&format!(
+          "[image no longer available: {} — offload blobs are swept after 30 days]",
+          image.path
+        ));
+      }
+    }
+  }
+  Message::new_user_with_images(text, loaded)
+}
+
+/// Standard base64, written out rather than pulled in as a dependency.
+///
+/// One short encoder on a path that already reads a file does not justify a
+/// crate, and `cargo deny` has one fewer thing to have an opinion about — the
+/// same call as the hand-written edit distance in `tools/registry.rs`.
+fn base64_encode(bytes: &[u8]) -> String {
+  const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+  for chunk in bytes.chunks(3) {
+    let b0 = chunk[0] as u32;
+    let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+    let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+    let triple = (b0 << 16) | (b1 << 8) | b2;
+    out.push(TABLE[(triple >> 18) as usize & 63] as char);
+    out.push(TABLE[(triple >> 12) as usize & 63] as char);
+    out.push(if chunk.len() > 1 {
+      TABLE[(triple >> 6) as usize & 63] as char
+    } else {
+      '='
+    });
+    out.push(if chunk.len() > 2 {
+      TABLE[triple as usize & 63] as char
+    } else {
+      '='
+    });
+  }
+  out
+}
+
 pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
   // Later compactions win, so build the skip set first.
   let mut skip_until: Vec<(u64, u64, &str)> = Vec::new();
@@ -195,6 +277,7 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
       .find(|(from, to, _)| event.seq >= *from && event.seq < *to)
     {
       out.push(Message::Simple {
+        images: Vec::new(),
         role: "system".to_string(),
         content: format!("[Compressed earlier turns]\n\n{}", summary),
         reasoning_content: None,
@@ -208,14 +291,15 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
     }
 
     match &event.payload {
-      EventPayload::UserMessage { content } => {
-        out.push(Message::new_user_text(content.clone()));
+      EventPayload::UserMessage { content, images } => {
+        out.push(rebuild_user_message(content, images));
       }
       EventPayload::AssistantMessage {
         content,
         reasoning,
         tool_calls,
       } => out.push(Message::Simple {
+        images: Vec::new(),
         role: "assistant".to_string(),
         content: content.clone(),
         reasoning_content: reasoning.clone(),
@@ -231,6 +315,7 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
         tool_call_id: call_id.clone(),
       }),
       EventPayload::SystemPrompt { content, .. } => out.push(Message::Simple {
+        images: Vec::new(),
         role: "system".to_string(),
         content: content.clone(),
         reasoning_content: None,
@@ -312,10 +397,30 @@ pub fn event_for(message: &Message) -> Option<EventPayload> {
       content,
       reasoning_content,
       tool_calls,
+      images,
     } => match role.as_str() {
-      "user" => Some(EventPayload::UserMessage {
+      // `images` is deliberately not carried here: this direction converts a
+      // transient `Message` whose bytes have no blob on disk yet. The one path
+      // that attaches an image (`/paste`) writes the blob first and records the
+      // event with its `ImageRef` directly, so nothing reaches the log by this
+      // route (`docs/architecture/L4-memory.md` §4.6.2).
+      "user" if images.is_empty() => Some(EventPayload::UserMessage {
         content: content.clone(),
+        images: Vec::new(),
       }),
+      // Loud rather than lossy: silently dropping would break
+      // "model-visible means logged".
+      "user" => {
+        eprintln!(
+          "[Session] {} image(s) on a converted user message cannot be logged; \
+           attach images through the path that writes blobs first",
+          images.len()
+        );
+        Some(EventPayload::UserMessage {
+          content: content.clone(),
+          images: Vec::new(),
+        })
+      }
       "assistant" => Some(EventPayload::AssistantMessage {
         content: content.clone(),
         reasoning: reasoning_content.clone(),
@@ -372,6 +477,98 @@ pub fn from_jsonl(text: &str) -> Vec<SessionEvent> {
 
 #[cfg(test)]
 mod tests {
+
+  /// Against the RFC 4648 vectors, including both padding lengths. A
+  /// hand-written encoder with no test is how a subtly wrong data URI ships.
+  #[test]
+  fn base64_matches_the_standard_vectors() {
+    assert_eq!(base64_encode(b""), "");
+    assert_eq!(base64_encode(b"f"), "Zg==");
+    assert_eq!(base64_encode(b"fo"), "Zm8=");
+    assert_eq!(base64_encode(b"foo"), "Zm9v");
+    assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+    assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+    assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    // Bytes outside ASCII must survive: a PNG is mostly these.
+    assert_eq!(base64_encode(&[0xff, 0x00, 0x80]), "/wCA");
+  }
+
+  #[test]
+  fn a_logged_image_is_reloaded_into_the_projection() {
+    let dir = std::env::temp_dir().join(format!("seekcli_img_{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::create_dir_all(&dir);
+    let blob = dir.join("shot.png");
+    let _ = std::fs::write(&blob, b"foobar");
+
+    let msg = rebuild_user_message(
+      "what is this?",
+      &[ImageRef {
+        path: blob.display().to_string(),
+        media_type: "image/png".into(),
+      }],
+    );
+    assert_eq!(msg.images().len(), 1);
+    assert_eq!(msg.images()[0].data_base64, "Zm9vYmFy");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  /// Blobs are swept after 30 days. Resuming such a session must neither fail
+  /// nor quietly pretend the model saw the image.
+  #[test]
+  fn an_expired_blob_degrades_visibly_instead_of_vanishing() {
+    let msg = rebuild_user_message(
+      "describe it",
+      &[ImageRef {
+        path: "/nonexistent/gone.png".into(),
+        media_type: "image/png".into(),
+      }],
+    );
+    assert!(msg.images().is_empty(), "no bytes should be invented");
+    let text = match &msg {
+      Message::Simple { content, .. } => content.clone(),
+      other => panic!("unexpected variant: {other:?}"),
+    };
+    assert!(text.contains("describe it"), "{text}");
+    assert!(text.contains("no longer available"), "{text}");
+    assert!(text.contains("gone.png"), "must name which one: {text}");
+  }
+
+  /// The whole reason `images` is `#[serde(default)]`: a log written before
+  /// stage 41 must still load, with no version bump and no migration.
+  #[test]
+  fn a_pre_stage_41_log_line_still_deserializes() {
+    let line =
+      r#"{"seq":1,"ts":"2026-01-01T00:00:00Z","payload":{"UserMessage":{"content":"hi"}}}"#;
+    let events = from_jsonl(line);
+    assert_eq!(events.len(), 1, "the old shape must still parse");
+    match &events[0].payload {
+      EventPayload::UserMessage { content, images } => {
+        assert_eq!(content, "hi");
+        assert!(images.is_empty());
+      }
+      other => panic!("unexpected payload: {other:?}"),
+    }
+  }
+
+  /// And a text-only event must serialize back to the old shape, so a log
+  /// written now stays readable by anything that predates this field.
+  #[test]
+  fn a_text_only_event_does_not_gain_an_images_key() {
+    let events = vec![SessionEvent {
+      seq: 1,
+      ts: chrono::Utc::now(),
+      payload: EventPayload::UserMessage {
+        content: "hi".into(),
+        images: Vec::new(),
+      },
+    }];
+    let text = match to_jsonl(&events) {
+      Ok(t) => t,
+      Err(e) => panic!("{e}"),
+    };
+    assert!(!text.contains("images"), "{text}");
+  }
+
   use super::*;
 
   fn session() -> Session {
@@ -381,6 +578,7 @@ mod tests {
       content: "kernel".into(),
     });
     s.record(EventPayload::UserMessage {
+      images: Vec::new(),
       content: "hi".into(),
     });
     s.record(EventPayload::AssistantMessage {

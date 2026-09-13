@@ -114,12 +114,14 @@ mod tests {
   fn message_counting_includes_tool_call_arguments() {
     use crate::api::{FunctionCall, ToolCall};
     let bare = vec![Message::Simple {
+      images: Vec::new(),
       role: "assistant".into(),
       content: "ok".into(),
       reasoning_content: None,
       tool_calls: None,
     }];
     let with_call = vec![Message::Simple {
+      images: Vec::new(),
       role: "assistant".into(),
       content: "ok".into(),
       reasoning_content: None,

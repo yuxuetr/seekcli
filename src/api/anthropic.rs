@@ -45,6 +45,28 @@ impl AnthropicProvider {
 
 /// Translate the neutral schema into an Anthropic Messages request body.
 /// Pure and testable — no I/O.
+/// Refuse a request carrying images, which this wire cannot express yet.
+///
+/// Its shape differs from the OpenAI one (`{"type":"image","source":{"type":
+/// "base64",…}}`) and translating it is not part of stage 41. Refusing loudly
+/// beats dropping: a silent drop would let the user believe the model looked at
+/// the screenshot (`docs/architecture/L4-memory.md` §4.6.4).
+fn reject_images(messages: &[Message]) -> Result<()> {
+  let Some(m) = messages.iter().find(|m| !m.images().is_empty()) else {
+    return Ok(());
+  };
+  let role = match m {
+    Message::Simple { role, .. } => role.as_str(),
+    Message::ToolResponse { .. } => "tool",
+  };
+  anyhow::bail!(
+    "the anthropic wire cannot carry images yet ({} attached to a {} message). \
+     Use the default openai-compatible endpoint for image input.",
+    m.images().len(),
+    role
+  )
+}
+
 pub fn build_body(
   model: &str,
   messages: &[Message],
@@ -169,6 +191,7 @@ impl LlmProvider for AnthropicProvider {
     thinking_mode: &str,
     tools: Option<Vec<Tool>>,
   ) -> Result<StreamResult> {
+    reject_images(&messages)?;
     let body = build_body(model, &messages, thinking_mode, tools.as_deref());
 
     let resp = self
@@ -405,6 +428,7 @@ mod tests {
 
   fn sys(c: &str) -> Message {
     Message::Simple {
+      images: Vec::new(),
       role: "system".into(),
       content: c.into(),
       reasoning_content: None,
@@ -430,6 +454,7 @@ mod tests {
     let msgs = vec![
       user("read it"),
       Message::Simple {
+        images: Vec::new(),
         role: "assistant".into(),
         content: "ok".into(),
         reasoning_content: None,

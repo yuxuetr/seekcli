@@ -143,9 +143,16 @@ pub enum EventPayload {
 转换（把 system 拉到顶层、合并连续 tool 结果）。openai 侧也已有 `strip_reasoning`
 这一步。所以：
 
-- `Message::Simple` 加一个 `#[serde(skip)]` 的 `images` 字段，**默认空，
-  75 处构造点一行不改**。
-- **在 wire 边界拼多段内容**，openai 侧一处、anthropic 侧一处。
+- `Message::Simple` 加一个 `#[serde(skip)]` 的 `images` 字段。
+- **在 wire 边界拼多段内容**：openai 侧展开成 multipart，anthropic 侧显式报错。
+
+> **落地时修正**：设计初稿写的是「75 处构造点一行不改」，这是错的。
+> Rust 的结构体字面量必须写全字段，enum variant 也没有 `..Default::default()`，
+> 所以 **23 处 `Message::Simple { … }` 字面量各加了一行 `images: Vec::new()`**。
+>
+> 这个代价是对的，不该绕：编译器把 23 处**全部**指了出来，
+> 没有一处能漏。真正被避免的是另一件事——**把 `content: String` 改成枚举**
+> 会波及全部 123 处 `content:` 的读写，那才是不可接受的。
 
 #### 4.6.2 图像不内联进事件日志
 

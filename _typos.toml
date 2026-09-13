@@ -3,6 +3,10 @@ PNGf = "PNGf"
 PN = "PN"
 # Rust TUI crate name, not a misspelling of "ratatouille"
 ratatui = "ratatui"
+# RFC 4648 base64 test vectors are "", f, fo, foo, foob, fooba, foobar --
+# canonical input strings, not prose. Keeping the full set documents which
+# padding lengths the encoder is checked against.
+fo = "fo"
 
 [files]
 # typos runs over the whole repo (pass_filenames: false), so the

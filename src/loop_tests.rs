@@ -175,6 +175,7 @@ mod tests {
 
     let mut session = Session::new("invariant-test".into(), "m".into());
     session.record(EventPayload::UserMessage {
+      images: Vec::new(),
       content: prompt.to_string(),
     });
 

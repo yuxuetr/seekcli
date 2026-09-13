@@ -133,6 +133,7 @@ pub async fn maybe_compress(
 
   let mut rebuilt = messages[..head_end].to_vec();
   rebuilt.push(Message::Simple {
+    images: Vec::new(),
     role: "system".to_string(),
     content: format!("[Compressed earlier turns]\n\n{}", summary),
     reasoning_content: None,
@@ -280,6 +281,7 @@ async fn summarize_messages(
   );
 
   let summary_messages = vec![Message::Simple {
+    images: Vec::new(),
     role: "user".to_string(),
     content: prompt,
     reasoning_content: None,
@@ -308,6 +310,7 @@ mod tests {
 
   fn make_simple(role: &str, content: &str) -> Message {
     Message::Simple {
+      images: Vec::new(),
       role: role.to_string(),
       content: content.to_string(),
       reasoning_content: None,

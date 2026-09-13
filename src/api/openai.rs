@@ -97,9 +97,13 @@ impl LlmProvider for OpenAiProvider {
     // tokens on replay, and reasoning models don't expect it back. Session
     // persistence keeps the full reasoning; only the wire payload drops it.
     let sanitized = super::strip_reasoning(&messages);
+    // Images become multipart `content` here and nowhere else. A message
+    // without images serializes exactly as it always did, which is what keeps
+    // every recorded fixture valid (`docs/architecture/L4-memory.md` §4.6.1).
+    let wire = super::to_openai_wire(&sanitized)?;
     let mut body = serde_json::json!({
       "model": model,
-      "messages": sanitized,
+      "messages": wire,
       "stream": true,
     });
 

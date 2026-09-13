@@ -211,7 +211,7 @@ impl HistoryManager {
 fn excerpt_of(line: &str) -> String {
   let text = match serde_json::from_str::<crate::session::SessionEvent>(line) {
     Ok(event) => match event.payload {
-      EventPayload::UserMessage { content } => content,
+      EventPayload::UserMessage { content, .. } => content,
       EventPayload::AssistantMessage { content, .. } => content,
       EventPayload::ToolResult { content, .. } => content,
       EventPayload::SystemPrompt { content, .. } => content,
@@ -318,6 +318,7 @@ mod tests {
     let h = store("roundtrip");
     let mut s = h.create_session("m".into());
     s.record(EventPayload::UserMessage {
+      images: Vec::new(),
       content: "hello".into(),
     });
     s.meta.title = "greeting".into();
@@ -357,6 +358,7 @@ mod tests {
     for suffix in ["aa", "ab"] {
       let mut s = Session::new(format!("dup-{}", suffix), "m".into());
       s.record(EventPayload::UserMessage {
+        images: Vec::new(),
         content: "x".into(),
       });
       let _ = h.save_session(&s);
@@ -412,11 +414,13 @@ mod tests {
     let h = store("search");
     let mut a = Session::new("aaa".into(), "m".into());
     a.record(EventPayload::UserMessage {
+      images: Vec::new(),
       content: "how do I configure ripgrep".into(),
     });
     let _ = h.save_session(&a);
     let mut b = Session::new("bbb".into(), "m".into());
     b.record(EventPayload::UserMessage {
+      images: Vec::new(),
       content: "unrelated chatter".into(),
     });
     let _ = h.save_session(&b);
@@ -435,6 +439,7 @@ mod tests {
       seq: 0,
       ts: chrono::Utc::now(),
       payload: EventPayload::UserMessage {
+        images: Vec::new(),
         content: "how do I\n  configure   ripgrep".into(),
       },
     };
@@ -452,6 +457,7 @@ mod tests {
     let msgs = vec![
       Message::new_user_text("u".into()),
       Message::Simple {
+        images: Vec::new(),
         role: "assistant".into(),
         content: "a".into(),
         reasoning_content: None,

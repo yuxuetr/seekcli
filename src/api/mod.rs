@@ -135,7 +135,95 @@ pub enum Message {
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ToolCall>>,
+    /// Images travelling with this message.
+    ///
+    /// `skip` rather than a serialized field: `Message` is **not** the wire
+    /// type — `anthropic.rs::build_body` has always transformed it — and the
+    /// multipart shape is assembled at the wire boundary by
+    /// [`to_openai_wire`]. Keeping `content: String` is what lets this land
+    /// without touching the 75 sites that construct a `Message`
+    /// (`docs/architecture/L4-memory.md` §4.6.1).
+    #[serde(skip)]
+    images: Vec<ImagePart>,
   },
+}
+
+/// One image, loaded and ready to send.
+///
+/// The transient half of the pair: the durable half is `session::ImageRef`,
+/// which stores a blob path instead of bytes so one screenshot does not add
+/// hundreds of KB to `events.jsonl` (`docs/architecture/L4-memory.md` §4.6.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagePart {
+  /// e.g. `image/png`.
+  pub media_type: String,
+  pub data_base64: String,
+}
+
+impl ImagePart {
+  /// The `data:` URI the OpenAI-shaped wire expects.
+  fn data_uri(&self) -> String {
+    format!("data:{};base64,{}", self.media_type, self.data_base64)
+  }
+}
+
+impl Message {
+  /// A user message carrying images alongside its text.
+  pub fn new_user_with_images(text: String, images: Vec<ImagePart>) -> Self {
+    Message::Simple {
+      role: "user".to_string(),
+      content: text,
+      reasoning_content: None,
+      tool_calls: None,
+      images,
+    }
+  }
+
+  /// Images attached to this message, if any.
+  pub fn images(&self) -> &[ImagePart] {
+    match self {
+      Message::Simple { images, .. } => images,
+      Message::ToolResponse { .. } => &[],
+    }
+  }
+}
+
+/// Serialize messages for the OpenAI-shaped wire, expanding any images into
+/// multipart content.
+///
+/// A message with no images serializes **exactly as before** — a plain string
+/// `content` — which is what keeps every recorded fixture valid.
+pub fn to_openai_wire(messages: &[Message]) -> Result<Vec<serde_json::Value>> {
+  messages
+    .iter()
+    .map(|m| {
+      let mut value = serde_json::to_value(m)?;
+      let images = m.images();
+      if images.is_empty() {
+        return Ok(value);
+      }
+      let text = value
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+      let mut parts: Vec<serde_json::Value> = Vec::new();
+      // An empty text part is not just noise: some providers reject it.
+      if !text.is_empty() {
+        parts.push(serde_json::json!({ "type": "text", "text": text }));
+      }
+      for image in images {
+        parts.push(serde_json::json!({
+          "type": "image_url",
+          "image_url": { "url": image.data_uri() }
+        }));
+      }
+      if let Some(object) = value.as_object_mut() {
+        object.insert("content".to_string(), serde_json::Value::Array(parts));
+      }
+      Ok(value)
+    })
+    .collect()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -187,6 +275,7 @@ pub struct UsageInfo {
 impl Message {
   pub fn new_user_text(text: String) -> Self {
     Self::Simple {
+      images: Vec::new(),
       role: "user".to_string(),
       content: text,
       reasoning_content: None,
@@ -204,19 +293,18 @@ impl Message {
 pub fn strip_reasoning(messages: &[Message]) -> Vec<Message> {
   messages
     .iter()
-    .map(|m| match m {
-      Message::Simple {
-        role,
-        content,
-        tool_calls,
-        ..
-      } => Message::Simple {
-        role: role.clone(),
-        content: content.clone(),
-        reasoning_content: None,
-        tool_calls: tool_calls.clone(),
-      },
-      other => other.clone(),
+    .map(|m| {
+      // Clear the one field rather than rebuilding the variant: a rebuild drops
+      // every field it does not name, so adding one (images) would have silently
+      // lost it here. Mutating a clone cannot go stale that way.
+      let mut out = m.clone();
+      if let Message::Simple {
+        reasoning_content, ..
+      } = &mut out
+      {
+        *reasoning_content = None;
+      }
+      out
     })
     .collect()
 }
@@ -241,6 +329,113 @@ pub trait LlmProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+
+  /// The property every recorded fixture depends on: a message without images
+  /// must serialize byte-identically to before multipart existed.
+  #[test]
+  fn a_text_only_message_keeps_a_plain_string_content() {
+    let msgs = vec![Message::new_user_text("hello".into())];
+    let wire = match to_openai_wire(&msgs) {
+      Ok(w) => w,
+      Err(e) => panic!("{e}"),
+    };
+    assert_eq!(wire[0]["content"], serde_json::json!("hello"));
+    // And identical to plain serde, so no fixture can drift.
+    let plain = match serde_json::to_value(&msgs[0]) {
+      Ok(v) => v,
+      Err(e) => panic!("{e}"),
+    };
+    assert_eq!(wire[0], plain);
+  }
+
+  #[test]
+  fn images_become_multipart_content_at_the_wire_boundary() {
+    let img = ImagePart {
+      media_type: "image/png".into(),
+      data_base64: "QUJD".into(),
+    };
+    let msgs = vec![Message::new_user_with_images(
+      "what is this?".into(),
+      vec![img],
+    )];
+    let wire = match to_openai_wire(&msgs) {
+      Ok(w) => w,
+      Err(e) => panic!("{e}"),
+    };
+    let parts = match wire[0]["content"].as_array() {
+      Some(p) => p,
+      None => panic!("content must be an array: {}", wire[0]),
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[1]["type"], "image_url");
+    assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+  }
+
+  /// Some providers reject an empty text part, so it must not be emitted --
+  /// "describe this" with no words is a legitimate request.
+  #[test]
+  fn an_image_with_no_text_emits_no_empty_text_part() {
+    let msgs = vec![Message::new_user_with_images(
+      String::new(),
+      vec![ImagePart {
+        media_type: "image/png".into(),
+        data_base64: "QQ==".into(),
+      }],
+    )];
+    let wire = match to_openai_wire(&msgs) {
+      Ok(w) => w,
+      Err(e) => panic!("{e}"),
+    };
+    let parts = match wire[0]["content"].as_array() {
+      Some(p) => p,
+      None => panic!("content must be an array"),
+    };
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["type"], "image_url");
+  }
+
+  /// `images` is `#[serde(skip)]`, so it must never reach the wire as a field.
+  #[test]
+  fn the_images_field_itself_is_never_serialized() {
+    let msgs = vec![Message::new_user_with_images(
+      "x".into(),
+      vec![ImagePart {
+        media_type: "image/png".into(),
+        data_base64: "QQ==".into(),
+      }],
+    )];
+    let wire = match to_openai_wire(&msgs) {
+      Ok(w) => w,
+      Err(e) => panic!("{e}"),
+    };
+    assert!(wire[0].get("images").is_none(), "{}", wire[0]);
+  }
+
+  /// Rebuilding the variant used to drop every field it did not name; adding
+  /// `images` would have been lost here silently.
+  #[test]
+  fn stripping_reasoning_preserves_images() {
+    let msgs = vec![Message::Simple {
+      role: "user".into(),
+      content: "x".into(),
+      reasoning_content: Some("thinking".into()),
+      tool_calls: None,
+      images: vec![ImagePart {
+        media_type: "image/png".into(),
+        data_base64: "QQ==".into(),
+      }],
+    }];
+    let out = strip_reasoning(&msgs);
+    assert_eq!(out[0].images().len(), 1, "images were dropped");
+    match &out[0] {
+      Message::Simple {
+        reasoning_content, ..
+      } => assert!(reasoning_content.is_none()),
+      other => panic!("unexpected variant: {other:?}"),
+    }
+  }
+
   use super::*;
 
   /// Regression guard for a latent bug that survived until the stage 26
@@ -283,6 +478,7 @@ mod tests {
   fn strip_reasoning_drops_reasoning_keeps_rest() {
     let msgs = vec![
       Message::Simple {
+        images: Vec::new(),
         role: "assistant".into(),
         content: "answer".into(),
         reasoning_content: Some("long chain of thought".into()),
