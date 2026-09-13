@@ -117,6 +117,23 @@ pub fn system_tools() -> Vec<Tool> {
       }),
     ),
     make_tool(
+      "read_image",
+      "Look at an image file (PNG, JPEG, GIF, WebP). Use this when a task \
+       involves a screenshot, diagram, chart or photo in the workspace — you \
+       can see images, so describing one to yourself second-hand is worse than \
+       reading it. `read_file` is for text and will fail on an image.",
+      json!({
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the image (absolute or relative to cwd)"
+          }
+        },
+        "required": ["path"]
+      }),
+    ),
+    make_tool(
       "propose",
       "Draft a change for the user to approve: a new MCP server (`mcp`) or a \
        scheduled task (`task`). Nothing takes effect until the user accepts it. \
@@ -397,7 +414,14 @@ pub fn is_parallel_readonly(tool_name: &str) -> bool {
   // job_list / job_output only read registry state and a log file.
   matches!(
     tool_name,
-    "read_file" | "list_dir" | "glob" | "grep" | "job_list" | "job_output" | "harness_inspect"
+    "read_file"
+      | "read_image"
+      | "list_dir"
+      | "glob"
+      | "grep"
+      | "job_list"
+      | "job_output"
+      | "harness_inspect"
   )
 }
 

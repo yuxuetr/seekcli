@@ -6,6 +6,9 @@
 默认对接 DeepSeek，也能指向任意 OpenAI / Anthropic 兼容端点。
 能力扩展走 **MCP**，不需要改 Rust。
 
+**看得见图**：截图后 `/paste` 直接交给模型（不用存文件），或让 agent 自己
+`read_image` 读工作区里的图；MCP server 返回的截图也会原样传给模型。
+
 ## 安装
 
 ```bash
@@ -329,22 +332,25 @@ allowed_tools:
 
 ### 📦 内置示例 Skills
 
-`examples/skills/` 目录提供了两个**用 bash + curl + 第三方 API** 给
-DeepSeek V4 补强能力的 skill 模板：
+`examples/skills/` 目录提供了一个**用 bash + curl + 第三方 API** 给
+DeepSeek 补强能力的 skill 模板：
+
+> 原先还有一个 `vision` skill，用外部 VLM 描述图片。**阶段四十一之后它被删除了**：
+> `deepseek-flash` 自己能看图，图像也已经能真正进入请求（`/paste`、`read_image`、
+> MCP 透传三条入口）。留着它只会让 agent 白跑一趟外部 VLM，换来一段比原图
+> 信息量更少的文字。
 
 | Skill | 能力 | 依赖环境变量 | 系统依赖 |
 | ----- | ---- | ------------ | -------- |
-| `vision` ⚠️ **已过时** | 调 StepFun VLM 描述剪贴板图 / 任意图片。`deepseek-flash` 现在自己能看图（2026-09-13 实测），但图像还进不了请求（缺口 L4-8），所以它暂时仍是唯一退路 | `STEP_API_KEY` | macOS osascript、`jq`、`base64`、`file` |
 | `doc_parser` | 调 MinerU 把 PDF/Docx/PPTX 解析成 Markdown | `MINERU_API_KEY` | `jq`、`unzip` |
 
 安装到自己的 skill 目录：
 ```bash
-cp -r examples/skills/vision examples/skills/doc_parser ~/.seekcli/skills/
+cp -r examples/skills/doc_parser ~/.seekcli/skills/
 ```
 
 启动后激活：
 ```
-/skill vision           # 然后："看看剪贴板里的图"
 /skill doc_parser       # 然后："总结 ~/Downloads/paper.pdf"
 ```
 

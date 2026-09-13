@@ -59,9 +59,14 @@ impl ToolDispatcher {
   pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
     self
       .execute_with(name, arguments, None, |args| async move {
-        // Built-ins never return images; `From<String>` keeps their signatures
-        // untouched while the pipeline learns to carry them.
-        Self::run(name, &args).await.map(result::ToolOutput::from)
+        match name {
+          // The one built-in that returns images. Handled here rather than in
+          // `run` so the other twelve keep their `Result<String>` signatures.
+          "read_image" => fs::read_image(&args).await,
+          // Everything else: `From<String>` keeps their signatures untouched
+          // while the pipeline learns to carry images.
+          _ => Self::run(name, &args).await.map(result::ToolOutput::from),
+        }
       })
       .await
   }

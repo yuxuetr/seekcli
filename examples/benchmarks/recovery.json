@@ -8,14 +8,20 @@
     {
       "name": "wrong_path_then_locate",
       "prompt": "Read config.yaml from the current directory. If it is not there, find where it actually is and report its path in found.txt.",
-      "files": { "conf/config.yaml": "port: 1\n" },
+      "files": {
+        "conf/config.yaml": "port: 1\n"
+      },
       "eval": "grep -q 'conf/config.yaml' found.txt"
     },
     {
       "name": "failing_command_then_adapt",
       "prompt": "Run ./setup.sh to create output.txt. If the script fails, achieve the same result another way: output.txt must contain exactly: done",
-      "files": { "setup.sh": "#!/bin/sh\necho 'error: toolchain missing' >&2\nexit 1\n" },
-      "setup": ["chmod +x setup.sh"],
+      "files": {
+        "setup.sh": "#!/bin/sh\necho 'error: toolchain missing' >&2\nexit 1\n"
+      },
+      "setup": [
+        "chmod +x setup.sh"
+      ],
       "eval": "grep -qx 'done' output.txt"
     },
     {
@@ -25,6 +31,15 @@
         "app.py": "def a():\n    value = 1\n    return value\n\ndef b():\n    value = 1\n    return value\n"
       },
       "eval": "test \"$(grep -c 'value = 1' app.py)\" = \"1\" && grep -q 'value = 2' app.py"
+    },
+    {
+      "name": "image_is_read_not_guessed",
+      "prompt": "chart.png 的上半部分和下半部分分别是什么颜色？只回答两个颜色。",
+      "setup": [
+        "printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAd0lEQVR4nO3PQQkAMADEsPk3vYnYIxwUKiA959zxvKCB8byggfG8oIHxvKCB8byggfG8oIHxvKCB8byggfG8oIHxvKCB8bzgrzueFzSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa8NkD2xfpWtqoODkAAAAASUVORK5CYII=' | base64 -d > chart.png"
+      ],
+      "eval": "grep -qiE 'blue|蓝' \"$SEEKCLI_ANSWER\" && grep -qiE 'yellow|黄' \"$SEEKCLI_ANSWER\"",
+      "_note": "64x64 PNG: top half blue, bottom half yellow. Seeded as base64 because `files` carries UTF-8 strings and a PNG is not one."
     }
   ]
 }
