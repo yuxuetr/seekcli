@@ -439,6 +439,13 @@ pub(crate) struct HeadlessOutcome {
   pub status: LoopStatus,
   pub iterations: usize,
   pub llm_calls: u64,
+  /// What the run appended to the conversation.
+  ///
+  /// Returned rather than only stashed for tests: trajectory export needs it,
+  /// and it was already being captured — behind `#[cfg(test)]`, which is the
+  /// only reason nothing outside could read it
+  /// (`docs/architecture/L7-observability.md` §4.6.1).
+  pub events: Vec<EventPayload>,
 }
 
 impl App {
@@ -543,15 +550,12 @@ impl App {
       Ok(None) => {}
       Err(e) => eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e),
     }
-    #[cfg(test)]
-    {
-      self.last_events = run.events.clone();
-    }
     Ok(HeadlessOutcome {
       text: run.text,
       status: run.status,
       iterations: run.iterations,
       llm_calls: self.cost.api_calls - calls_before,
+      events: run.events,
     })
   }
 

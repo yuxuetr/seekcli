@@ -15,7 +15,11 @@ impl App {
   /// Benchmark entry point: load a testsuite, run each task in an isolated
   /// testbed (Init → seed → AgentRun → Eval → Score), and print a report.
   /// Fail-to-Pass: a task passes iff its eval command exits 0.
-  pub(crate) async fn run_benchmark(&mut self, suite_path: &Path) -> Result<()> {
+  pub(crate) async fn run_benchmark(
+    &mut self,
+    suite_path: &Path,
+    trajectory_path: Option<&Path>,
+  ) -> Result<()> {
     let suite = TestSuite::load(suite_path)?;
     let home = env::var("HOME").context("HOME not set")?;
     let bench_root = PathBuf::from(home).join(".seekcli").join("bench");
@@ -30,6 +34,8 @@ impl App {
 
     let original_cwd = env::current_dir()?;
     let mut report = Report::default();
+    // Collected only when asked for, so an ordinary run carries no extra cost.
+    let mut trajectories: Vec<crate::observability::trajectory::Record> = Vec::new();
 
     for task in &suite.tasks {
       println!("\n{} {}", "[Bench] task:".cyan(), task.name.bold());
@@ -69,7 +75,7 @@ impl App {
       env::set_current_dir(&original_cwd)?;
       crate::tools::policy::set_mode(crate::tools::policy::Mode::Normal);
 
-      let (llm_calls, answer_path) = match run {
+      let (llm_calls, answer_path, run_events, run_status) = match run {
         Ok(outcome) => {
           // The reply is what several assertions are actually about, and under
           // --read-only it is the only evidence a task can have.
@@ -83,7 +89,12 @@ impl App {
               None
             }
           };
-          (outcome.llm_calls, saved)
+          (
+            outcome.llm_calls,
+            saved,
+            outcome.events,
+            format!("{:?}", outcome.status).to_lowercase(),
+          )
         }
         Err(e) => {
           println!("{} agent error: {}", "[Bench]".red(), e);
@@ -114,6 +125,16 @@ impl App {
         if passed { "PASS".green() } else { "FAIL".red() },
         llm_calls
       );
+      if trajectory_path.is_some() {
+        trajectories.push(crate::observability::trajectory::record(
+          &task.name,
+          &task.prompt,
+          passed,
+          &run_status,
+          llm_calls,
+          &run_events,
+        ));
+      }
       report.push(TaskResult {
         name: task.name.clone(),
         passed,
@@ -125,6 +146,27 @@ impl App {
     }
 
     println!("{}", report.render());
+
+    // After the report, and never instead of it: a failed export must not cost
+    // the user the scores they waited for.
+    if let Some(path) = trajectory_path {
+      match crate::observability::trajectory::to_jsonl(&trajectories)
+        .and_then(|text| std::fs::write(path, text).map_err(Into::into))
+      {
+        Ok(()) => println!(
+          "{} {} trajectory record(s) written to {}",
+          "[Bench]".cyan(),
+          trajectories.len(),
+          path.display()
+        ),
+        Err(e) => println!(
+          "{} could not write {}: {:#}",
+          "[Bench]".yellow(),
+          path.display(),
+          e
+        ),
+      }
+    }
     Ok(())
   }
 }

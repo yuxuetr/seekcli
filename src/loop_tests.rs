@@ -187,7 +187,7 @@ mod tests {
 
     // The recorded trajectory: assistant(read_file) -> tool result ->
     // assistant(write_file) -> tool result -> assistant(final).
-    let events = app.last_run_events();
+    let events = outcome.events.clone();
     let assistants = events
       .iter()
       .filter(|e| matches!(e, EventPayload::AssistantMessage { .. }))

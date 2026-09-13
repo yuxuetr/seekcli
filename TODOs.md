@@ -789,12 +789,31 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 *目标：让 SeekCLI 成为可被外部 RL / 进化流程消费的环境。*
 *来源：L7-8。无依赖。设计：[L7 §4.6](docs/architecture/L7-observability.md#46-trajectory-导出l7-8)*
 
-- [ ] **39.1 `--bench` 导出标准 trajectory**（L7-8）：`(state, action, reward)` 序列，
-      reward 取 Fail-to-Pass 的退出码判定（含反向断言的取反语义）。
-- [ ] **39.2 读 `LoopResult.events`**——它已经存在，只是被 `#[cfg(test)]` 圈住。
-      原计划写的是「走 36.1 的 SessionStore 缝」，调研后发现导出格式不需要换后端。
-- [ ] **39.3 明确不做训练端**：只产出数据，不引入任何训练依赖。
-- [ ] **39.4 格式文档化**：外部消费者需要一份稳定契约，否则导出等于没导出。
+- [x] **39.1 `--bench --trajectory <file>` 导出 JSONL**（L7-8）：每行一个任务，
+      reward 取 Fail-to-Pass 退出码，**已应用 `expect_fail` 取反语义**
+      （消费方不需要知道哪条是反向断言）。
+    - [x] **reward 是终局的，不伪造每步 reward**——在导出层摊派奖励等于把一个
+          建模决定硬编进数据，而 credit assignment 是消费方的事。
+    - [x] 写出 `reward_kind`（恒为 `fail_to_pass`）：将来加别的判定方式时
+          旧数据不会被误读成新语义。
+    - [x] `status` 区分 completed / max_iterations / interrupted——
+          撞上迭代上限的轨迹和自己收尾的不是一回事，不可混训。
+    - [x] 显式开启，不默认往盘上丢文件；导出失败**在报表之后**报告，
+          不让它夺走用户等来的分数。
+- [x] **39.2 读 `HeadlessOutcome.events`**——原先只在 `#[cfg(test)]` 下被捕获，
+      现在是产品 API。顺带删掉 `App` 上的 `last_events` 字段：它存在的理由正是
+      「events 不在产品 API 里」，现在不成立了。
+    - [x] 导出顺带暴露了一处不对称：`chat()` 把 user 消息记进会话，
+          `run_headless`（`--bench` 走的那条）留给调用方，所以 bench 日志从第一条
+          assistant 开始。**在导出层补 step 0 的 observation，不动事件日志的排序**——
+          那是 L4 最吃重的不变量，为了让导出好看去重排它是坏交易。
+- [x] **39.3 明确不做训练端**，也**不声称兼容任何 RL 框架**：声称兼容就欠下一个
+      跟着别人版本走的义务，而没有任何消费方在要求它。
+- [x] **39.4 格式契约**写进 [L7 §4.6.3](docs/architecture/L7-observability.md#463-一条记录--一个任务)。
+- [x] **真实端到端验证**：`SEEKCLI_REPLAY` 回放 fixture 跑完一条 read-only 任务，
+      导出 3 步轨迹 + 终局 reward + status，**无需 API key 与费用**。
+      该次运行顺带证明了 34.1——step 2 的 observation 里是新拒绝消息的原文
+      （fixture 录在改动之前，消息是运行时生成的）。
 
 **验收**：`events.jsonl` 之外产出一份外部可消费的轨迹；L7-8 关闭。
 

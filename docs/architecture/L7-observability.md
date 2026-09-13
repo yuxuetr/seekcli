@@ -30,7 +30,7 @@
 | L7-5 | 无 OTel 导出 | 取舍级 | |
 | ⚠️ L7-6 | 无自描述：模型看不到自己的运行时 | 全 crate 无 inspect 类工具；工具面、生效策略、skill、MCP 状态对模型均不可查 | 被拒后只能盲猜原因 |
 | L7-7 | 评价信号不回灌 | `bench.rs` 与 `skills.rs::accept_proposal` 无调用关系 | 进化无选择压力 |
-| ⚠️ L7-8 | trajectory 不可导出 | `--bench` 只产出聚合分数；`LoopResult.events` 只在 `#[cfg(test)]` 下被捕获 | 外部 RL / 进化流程无法消费 |
+| ~~L7-8~~ | ~~trajectory 不可导出~~ | **阶段三十九已落地**：`--bench --trajectory <file>` 产出 JSONL。真实验证——用 `SEEKCLI_REPLAY` 回放 fixture 跑完一条任务，导出 3 步轨迹、终局 reward、status，无需 API key |
 
 > L7-2 是 L1 / L2 / L4 三处重构的**前置条件**。
 > 没有可回放的测试，把 440 行主循环拆成四个阶段函数是在裸奔。

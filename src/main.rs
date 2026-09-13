@@ -112,12 +112,6 @@ struct App {
   /// Tools contributed by MCP servers. Empty when none are configured, and
   /// then it costs nothing.
   mcp: mcp::McpRegistry,
-  /// Events produced by the most recent headless run. Test-only: the
-  /// invariant test needs to assert on the log a run produced, and threading
-  /// that through the public return type would put test scaffolding in the
-  /// product API.
-  #[cfg(test)]
-  last_events: Vec<session::EventPayload>,
   /// Set to true by the Ctrl-C watcher task. Polled at the top of each
   /// agent loop iteration and during stream consumption to allow graceful
   /// mid-task interruption back to the REPL.
@@ -177,8 +171,6 @@ impl App {
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::from_env(),
       mcp,
-      #[cfg(test)]
-      last_events: Vec::new(),
       interrupt,
     })
   }
@@ -209,14 +201,8 @@ impl App {
       cost: observability::cost::CostTracker::new(),
       tracer: observability::trace::Trace::new(false),
       mcp: mcp::McpRegistry::empty(),
-      last_events: Vec::new(),
       interrupt: Arc::new(AtomicBool::new(false)),
     })
-  }
-
-  #[cfg(test)]
-  pub(crate) fn last_run_events(&self) -> Vec<session::EventPayload> {
-    self.last_events.clone()
   }
 
   async fn run(&mut self) -> Result<()> {
@@ -315,6 +301,14 @@ struct Cli {
   /// Run a benchmark testsuite (JSON) headlessly instead of the REPL.
   #[arg(long, value_name = "TESTSUITE.json")]
   bench: Option<PathBuf>,
+
+  /// With --bench: also write each task's trajectory as JSONL here.
+  ///
+  /// Opt-in rather than automatic: exporting is an act of handing data to
+  /// something outside this repository, and a file nobody asked for on every
+  /// benchmark run is noise. Format: docs/architecture/L7-observability.md §4.6.
+  #[arg(long, value_name = "FILE.jsonl", requires = "bench")]
+  trajectory: Option<PathBuf>,
 
   /// Run a named scheduled task (e.g. "reminders") headlessly instead of the
   /// REPL. Intended for launchd/cron invocation, not interactive use.
@@ -523,7 +517,7 @@ async fn main() -> Result<()> {
     std::process::exit(code);
   }
   if let Some(path) = cli.bench {
-    let outcome = app.run_benchmark(&path).await;
+    let outcome = app.run_benchmark(&path, cli.trajectory.as_deref()).await;
     tools::jobs::kill_all();
     return outcome;
   }

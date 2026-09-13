@@ -4,3 +4,4 @@
 pub mod bench;
 pub mod cost;
 pub mod trace;
+pub mod trajectory;
