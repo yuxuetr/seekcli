@@ -22,6 +22,7 @@ const SLASH_COMMANDS: &[&str] = &[
   "/plan",
   "/skill",
   "/propose",
+  "/paste",
   "/load",
 ];
 

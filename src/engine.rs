@@ -452,12 +452,26 @@ pub(crate) struct HeadlessOutcome {
 
 impl App {
   pub(crate) async fn chat(&mut self, content: &str) -> Result<()> {
+    self.chat_with_images(content, Vec::new()).await
+  }
+
+  /// A turn whose user message carries images.
+  ///
+  /// The images arrive as `ImageRef`s — blobs already on disk — because the log
+  /// is written before the request is built, and "model-visible means logged"
+  /// has to hold even if the turn is interrupted mid-flight
+  /// (`docs/architecture/L4-memory.md` §4.6.2).
+  pub(crate) async fn chat_with_images(
+    &mut self,
+    content: &str,
+    images: Vec<crate::session::ImageRef>,
+  ) -> Result<()> {
     // Clear any stale interrupt flag from a previous turn (e.g. Ctrl-C
     // pressed at the readline prompt also fires the global watcher).
     self.interrupt.store(false, Ordering::SeqCst);
 
     self.current_session.record(EventPayload::UserMessage {
-      images: Vec::new(),
+      images,
       content: content.to_string(),
     });
 

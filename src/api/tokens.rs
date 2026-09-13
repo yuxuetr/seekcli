@@ -26,6 +26,7 @@ pub trait TokenCounter: Send + Sync {
             content,
             reasoning_content,
             tool_calls,
+            images,
             ..
           } => {
             let mut n = self.count_text(content);
@@ -37,7 +38,13 @@ pub trait TokenCounter: Send + Sync {
                 n += self.count_text(&c.function.name) + self.count_text(&c.function.arguments);
               }
             }
-            n
+            // An image's cost has nothing to do with how many characters its
+            // base64 has. Counting the encoded text would be wrong by orders of
+            // magnitude in the *other* direction; ignoring it is wrong by an
+            // order of magnitude too. A flat floor at least stops the estimate
+            // from claiming a screenshot is free
+            // (`docs/architecture/L4-memory.md` §4.6.3).
+            n + images.len() * IMAGE_TOKENS
           }
           Message::ToolResponse { content, .. } => self.count_text(content),
         };
@@ -49,6 +56,15 @@ pub trait TokenCounter: Send + Sync {
       .sum()
   }
 }
+
+/// Conservative floor for one image.
+///
+/// Measured 2026-09-13 against the live API: a 16×16 PNG took the prompt from
+/// 31 to 224 tokens, a 64×64 one to 236. Real screenshots cost more, and the
+/// cost scales with dimensions rather than bytes, so this is a floor and the
+/// estimate stays an estimate — it exists to stop compaction from believing a
+/// conversation full of screenshots is small.
+const IMAGE_TOKENS: usize = 200;
 
 /// Script-aware ratio estimate, zero dependencies.
 pub struct Heuristic;
@@ -79,6 +95,28 @@ impl TokenCounter for Heuristic {
 
 #[cfg(test)]
 mod tests {
+
+  /// The estimate must not report a screenshot as nearly free: compaction
+  /// decides "is this conversation long" from this number.
+  #[test]
+  fn an_image_is_not_counted_as_free() {
+    let text_only = vec![Message::new_user_text("hi".into())];
+    let with_image = vec![Message::new_user_with_images(
+      "hi".into(),
+      vec![crate::api::ImagePart {
+        media_type: "image/png".into(),
+        data_base64: "QQ==".into(),
+      }],
+    )];
+    let bare = Heuristic.count_messages(&text_only);
+    let imaged = Heuristic.count_messages(&with_image);
+    assert!(
+      imaged >= bare + IMAGE_TOKENS,
+      "image added only {} tokens",
+      imaged - bare
+    );
+  }
+
   use super::*;
 
   #[test]

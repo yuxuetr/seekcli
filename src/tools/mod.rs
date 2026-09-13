@@ -8,6 +8,7 @@ use result::{ToolKind, ToolResult};
 pub mod approval;
 pub mod ask;
 pub mod audit;
+pub mod clipboard;
 pub mod edit;
 pub mod fs;
 pub mod inspect;

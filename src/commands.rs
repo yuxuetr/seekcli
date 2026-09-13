@@ -47,6 +47,7 @@ impl App {
     println!("  /propose list           Everything the agent drafted, awaiting your review");
     println!("  /propose accept <kind> <name>  Land it (kinds: skill, mcp, task)");
     println!("  /propose reject <kind> <name>  Discard it");
+    println!("  /paste [说明]           把剪贴板里的图交给模型（截图后直接用，不用存文件）");
     println!("  /skill migrate          Convert legacy <name>.json skills to <name>/SKILL.md");
     println!("  /copy [index]           Copy code block from last response");
     println!("  /clear                  Reset conversation");
@@ -265,6 +266,42 @@ impl App {
           println!("{} ({})", "MCP".bold(), mcp.len());
           for (name, server) in mcp {
             println!("  {}  {}", name, format!("[{}]", server).dimmed());
+          }
+        }
+      }
+      "/paste" => {
+        // Zero path management is the whole point: screenshot, Cmd+Shift+4,
+        // /paste. Anything that asks the user to name a file defeats it.
+        let dir = self.history.blobs_dir(self.current_session.id());
+        match crate::tools::clipboard::grab_image(&dir) {
+          Err(e) => println!("{} {:#}", "Error:".red(), e),
+          Ok(grab) => {
+            let caption = line
+              .split_once(char::is_whitespace)
+              .map(|(_, rest)| rest.trim().to_string())
+              .unwrap_or_default();
+            println!(
+              "{} image attached ({:.1} KB){}",
+              "✦".cyan(),
+              grab.bytes as f64 / 1024.0,
+              if caption.is_empty() {
+                String::new()
+              } else {
+                format!(" — {caption}")
+              }
+            );
+            let images = vec![crate::session::ImageRef {
+              path: grab.path.display().to_string(),
+              media_type: grab.media_type,
+            }];
+            // An empty caption is a legitimate request ("look at this"), so the
+            // turn runs either way rather than demanding words.
+            let prompt = if caption.is_empty() {
+              "看看这张图。".to_string()
+            } else {
+              caption
+            };
+            self.chat_with_images(&prompt, images).await?;
           }
         }
       }
