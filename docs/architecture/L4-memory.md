@@ -186,7 +186,32 @@ UserMessage {
 算低一个量级。**本阶段至少要让它不说谎**——按图数加一个保守常量，
 并在层文档里写明这是估计而非精确值。
 
-#### 4.6.4 anthropic wire 本阶段不做，但不静默
+#### 4.6.4 MCP 图像透传（L2-9）的两个已知事实
+
+**一、这条 wire 接受 `tool` 角色的多段内容。** 2026-09-13 实测：构造
+`user → assistant{tool_calls} → tool{[text, image_url]}` 的往返，模型答出了
+图里的两种颜色（上蓝下黄，猜不出来的图）。所以 L2-9 不被协议阻塞，
+只被我们自己的类型阻塞。
+
+> 注意一个坑：thinking 模式下 assistant 消息必须把 `reasoning_content` 带回，
+> 否则 API 直接拒 `invalid_request_error`。
+
+**二、剩下的是一个设计决定，不是体力活。** `ToolDispatcher::execute_with` 的
+闭包签名是 `Result<String>`，而**所有工具都必须走这一条路**——「没有任何工具
+能绕过策略门 / deadline / 审计」是本仓明确的不变量。
+
+所以图像要从那个闭包里出来，有三条路，各有代价：
+
+| 方案 | 代价 |
+| --- | --- |
+| 闭包改成返回 `Result<(String, Vec<ImagePart>)>` | 每个内置工具的签名都要改，而它们没有一个会返回图像 |
+| `Arc<Mutex<Vec<ImagePart>>>` 侧信道 | 能用，但在一条同步语义的路径上引入共享可变状态，读起来像是有并发 |
+| `ToolResult` 加 `images`，由 `execute_with` 的调用方在返回后填 | 图像来源与守门分离，但要保证填充点唯一，否则就有了第二条路径 |
+
+**不要在时间压力下随手选一个。** 选错会造出这个代码库一直避免的那种
+「绕过唯一路径」的缝，而它一旦存在就很难再收回。
+
+#### 4.6.5 anthropic wire 本阶段不做，但不静默
 
 默认 provider 是 openai wire（实测 DeepSeek 在该 wire 上支持图像）。
 anthropic wire 的图像格式不同（`{"type":"image","source":{"type":"base64",…}}`）。
