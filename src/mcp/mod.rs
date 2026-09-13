@@ -137,6 +137,23 @@ impl McpRegistry {
     });
   }
 
+  /// Configured servers that are not available this session.
+  pub fn failures(&self) -> &[McpFailure] {
+    &self.failures
+  }
+
+  /// `(server, tool count)` for every connected server, for self-description.
+  pub fn server_tool_counts(&self) -> Vec<(String, usize)> {
+    self
+      .clients
+      .keys()
+      .map(|name| {
+        let count = self.tools.iter().filter(|t| &t.server == name).count();
+        (name.clone(), count)
+      })
+      .collect()
+  }
+
   fn register(server: &str, tool: McpTool) -> RegisteredTool {
     let qualified = qualify(server, &tool.name);
     let description = if tool.description.is_empty() {

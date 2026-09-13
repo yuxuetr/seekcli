@@ -49,9 +49,27 @@ impl App {
   async fn dispatch(
     dispatcher: &tools::ToolDispatcher,
     mcp: &crate::mcp::McpRegistry,
+    inspect: Option<&tools::inspect::Snapshot>,
     name: &str,
     arguments: &str,
   ) -> tools::result::ToolResult {
+    // Self-description goes through `execute_with` like any other capability.
+    // It could have been an engine branch next to `invoke_agent`, but those
+    // bypass the dispatcher because they re-enter the loop or mutate engine
+    // state; this one only reads, so there is no reason to give up the "exactly
+    // one path" invariant (`docs/architecture/L7-observability.md` §4.5.3).
+    if name == "harness_inspect" {
+      return dispatcher
+        .execute_with(name, arguments, Some(true), |args| async move {
+          match inspect {
+            Some(snap) => tools::inspect::render(&args, snap),
+            // Only reachable if a caller forgot to assemble the snapshot;
+            // failing loudly beats reporting an empty harness as the truth.
+            None => anyhow::bail!("harness_inspect was dispatched without a snapshot"),
+          }
+        })
+        .await;
+    }
     if crate::mcp::is_mcp_tool(name) {
       // The server's own read-only annotation is the only thing that can
       // exempt a foreign tool from the mode gate.
@@ -67,6 +85,86 @@ impl App {
 }
 
 impl App {
+  /// Assemble the live facts `harness_inspect` reports.
+  ///
+  /// Here rather than in `tools::inspect` because only the engine can reach the
+  /// registries; the rendering stays a pure function over this struct so it can
+  /// be asserted without constructing an `App`.
+  fn inspect_snapshot(&self, effective: &[api::Tool]) -> tools::inspect::Snapshot {
+    let builtin: std::collections::HashSet<String> = tools::registry::system_tools()
+      .into_iter()
+      .map(|t| t.function.name)
+      .collect();
+
+    let tool_entries = effective
+      .iter()
+      .map(|t| {
+        let name = &t.function.name;
+        let source = if let Some(server) = name
+          .strip_prefix("mcp__")
+          .and_then(|rest| rest.split_once("__"))
+          .map(|(server, _)| server)
+        {
+          format!("mcp:{server}")
+        } else if builtin.contains(name) {
+          "built-in".to_string()
+        } else {
+          // Anything else reached the surface through the active skill.
+          "skill".to_string()
+        };
+        tools::inspect::ToolEntry {
+          signature: tools::registry::signature_of(t),
+          source,
+        }
+      })
+      .collect();
+
+    let skills = self
+      .skill_manager
+      .load_skills()
+      .map(|s| s.into_iter().map(|k| k.name).collect())
+      .unwrap_or_default();
+    let proposals = self
+      .skill_manager
+      .list_proposals()
+      .map(|s| s.into_iter().map(|k| k.name).collect())
+      .unwrap_or_default();
+
+    let compactions = self
+      .current_session
+      .events
+      .iter()
+      .filter(|e| matches!(e.payload, crate::session::EventPayload::Compaction { .. }))
+      .count();
+
+    tools::inspect::Snapshot {
+      mode: tools::policy::mode().name(),
+      plan_mode: self.plan_mode,
+      tools: tool_entries,
+      servers: self
+        .mcp
+        .server_tool_counts()
+        .into_iter()
+        .map(|(name, tools)| tools::inspect::ServerEntry { name, tools })
+        .collect(),
+      failures: self
+        .mcp
+        .failures()
+        .iter()
+        .map(|f| tools::inspect::FailureEntry {
+          server: f.server.clone(),
+          reason: f.reason.clone(),
+        })
+        .collect(),
+      active_skill: self.current_skill.as_ref().map(|s| s.name.clone()),
+      skills,
+      proposals,
+      session_id: self.current_session.id().to_string(),
+      events: self.current_session.events.len(),
+      compactions,
+    }
+  }
+
   /// `invoke_agent`: run a typed sub-agent and bring back only its summary.
   ///
   /// Handled in the engine rather than the dispatcher because it re-enters the
@@ -922,6 +1020,14 @@ impl App {
       // Fork-Join: if EVERY call this turn is pure read-only, run them
       // concurrently (the harness "read-concurrent, write-serial" rule). Any
       // write / shell / delegation forces the safe sequential path below.
+      // Assembled once per turn and only when asked for: it walks the skill
+      // directory and the event log, which is wasted work on the turns -- most
+      // of them -- that never inspect anything.
+      let inspect_snapshot = tool_calls
+        .iter()
+        .any(|tc| tc.function.name == "harness_inspect")
+        .then(|| self.inspect_snapshot(&effective_tools));
+
       let parallelizable = tool_calls.len() > 1
         && tool_calls.iter().all(|tc| {
           if crate::mcp::is_mcp_tool(&tc.function.name) {
@@ -940,11 +1046,12 @@ impl App {
         let futs = tool_calls.iter().map(|tc| {
           let disp = &tool_dispatcher;
           let mcp = &self.mcp;
+          let inspect = inspect_snapshot.as_ref();
           let name = tc.function.name.clone();
           let args = tc.function.arguments.clone();
           let id = tc.id.clone();
           async move {
-            let outcome = Self::dispatch(disp, mcp, &name, &args).await;
+            let outcome = Self::dispatch(disp, mcp, inspect, &name, &args).await;
             let failed = outcome.kind.is_failure();
             let text = if failed {
               agent::recovery::augment(&name, outcome.render())
@@ -992,6 +1099,7 @@ impl App {
             let outcome = Self::dispatch(
               &tool_dispatcher,
               &self.mcp,
+              inspect_snapshot.as_ref(),
               &tc.function.name,
               &tc.function.arguments,
             )
@@ -1087,6 +1195,71 @@ impl App {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The whole path, not just the renderer: a real `App` builds the snapshot
+  /// from its live registries, and the call goes through `execute_with` so the
+  /// gate, the deadline and the audit apply. Only the model's decision to call
+  /// it is absent, and that needs a recorded fixture.
+  ///
+  /// The guard is held across the awaits on purpose: the snapshot describes the
+  /// policy mode, so it must not change under the call. Safe because only tests
+  /// take this lock and the test runtime cannot deadlock on it.
+  #[allow(clippy::await_holding_lock)]
+  #[tokio::test]
+  async fn harness_inspect_runs_through_the_one_guarded_path() {
+    let _guard = crate::testsync::lock();
+    let app = match App::for_test(Box::new(crate::api::record::Replaying::new(
+      std::path::PathBuf::from("tests/fixtures/nonexistent"),
+    ))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {e}"),
+    };
+
+    let surface = tools::registry::system_tools();
+    let snap = app.inspect_snapshot(&surface);
+    let dispatcher = tools::ToolDispatcher::new();
+
+    let out = App::dispatch(
+      &dispatcher,
+      &app.mcp,
+      Some(&snap),
+      "harness_inspect",
+      r#"{"what":"tools"}"#,
+    )
+    .await;
+    assert_eq!(out.kind, tools::result::ToolKind::Ok, "{}", out.render());
+    // The surface describes itself, including the tool doing the describing.
+    assert!(out.render().contains("harness_inspect"), "{}", out.render());
+    assert!(out.render().contains("built-in"), "{}", out.render());
+
+    // A bad section is a failure with the valid names, not a panic.
+    let bad = App::dispatch(
+      &dispatcher,
+      &app.mcp,
+      Some(&snap),
+      "harness_inspect",
+      r#"{"what":"nope"}"#,
+    )
+    .await;
+    assert_eq!(bad.kind, tools::result::ToolKind::Failed);
+    assert!(bad.render().contains("policy"), "{}", bad.render());
+  }
+
+  /// Dispatching it without a snapshot must fail loudly rather than report an
+  /// empty harness as the truth.
+  #[tokio::test]
+  async fn harness_inspect_without_a_snapshot_fails_loudly() {
+    let dispatcher = tools::ToolDispatcher::new();
+    let out = App::dispatch(
+      &dispatcher,
+      &crate::mcp::McpRegistry::empty(),
+      None,
+      "harness_inspect",
+      "{}",
+    )
+    .await;
+    assert_eq!(out.kind, tools::result::ToolKind::Failed);
+  }
 
   #[test]
   fn strip_fake_tool_syntax_truncates_at_marker() {

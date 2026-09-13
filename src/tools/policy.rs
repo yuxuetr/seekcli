@@ -150,6 +150,29 @@ const MUTATING_SUBCOMMANDS: &[(&str, &[&str])] = &[
   ),
 ];
 
+/// The reporting allowlist, for self-description.
+///
+/// Handed out rather than copied into a prose description elsewhere: a second
+/// rendering of these rules would drift, and when it drifts the model believes
+/// the wrong one — worse than offering no self-description at all
+/// (`docs/architecture/L7-observability.md` §4.5.2).
+pub fn read_only_commands() -> &'static [&'static str] {
+  READ_ONLY_COMMANDS
+}
+
+/// The mutating sub-commands of otherwise-reporting programs, for
+/// self-description. Same single-source rule as [`read_only_commands`].
+pub fn mutating_subcommands() -> &'static [(&'static str, &'static [&'static str])] {
+  MUTATING_SUBCOMMANDS
+}
+
+impl Mode {
+  /// The mode's name, for self-description.
+  pub fn name(self) -> &'static str {
+    self.label()
+  }
+}
+
 /// Redirects write regardless of which command precedes them, so their
 /// presence disqualifies a command from being called read-only.
 fn has_redirect(cmd: &str) -> bool {

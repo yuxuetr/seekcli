@@ -117,6 +117,23 @@ pub fn system_tools() -> Vec<Tool> {
       }),
     ),
     make_tool(
+      "harness_inspect",
+      "Inspect your own runtime: the tool surface, the policy rules actually in \
+       force, skills, MCP server status, and session counters. Use it when a \
+       call was refused and you need to know what IS allowed, when a capability \
+       you expected is missing, or before drafting a skill. Read-only.",
+      json!({
+        "type": "object",
+        "properties": {
+          "what": {
+            "type": "string",
+            "enum": ["tools", "policy", "skills", "mcp", "session"],
+            "description": "Which section to return. Omit for all of them."
+          }
+        }
+      }),
+    ),
+    make_tool(
       "run_shell",
       "Execute a shell command via `sh -c`. Captures both stdout and stderr. \
        In a later release, dangerous commands (rm -rf, sudo, curl|sh, etc.) will prompt for user confirmation. \
@@ -267,7 +284,7 @@ pub fn system_tools() -> Vec<Tool> {
 /// A full schema dump is the obvious thing and the wrong one: it is long, and
 /// the mistake being corrected is almost always the name or a missing
 /// argument, both of which a signature shows at a glance.
-fn signature_of(tool: &Tool) -> String {
+pub fn signature_of(tool: &Tool) -> String {
   let params = &tool.function.parameters;
   let required: Vec<&str> = params
     .get("required")
@@ -354,7 +371,7 @@ pub fn is_parallel_readonly(tool_name: &str) -> bool {
   // job_list / job_output only read registry state and a log file.
   matches!(
     tool_name,
-    "read_file" | "list_dir" | "glob" | "grep" | "job_list" | "job_output"
+    "read_file" | "list_dir" | "glob" | "grep" | "job_list" | "job_output" | "harness_inspect"
   )
 }
 

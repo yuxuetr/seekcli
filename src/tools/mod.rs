@@ -10,6 +10,7 @@ pub mod ask;
 pub mod audit;
 pub mod edit;
 pub mod fs;
+pub mod inspect;
 pub mod jobs;
 pub mod meta;
 pub mod offload;
