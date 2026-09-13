@@ -83,7 +83,7 @@ pub fn mode() -> Mode {
 ///
 /// `run_shell` is here because a command's effects cannot be known without
 /// parsing it. In a restricted mode it is not refused outright — see
-/// `shell_is_read_only` — but it is never waved through.
+/// `read_only_obstacle` — but it is never waved through.
 /// Whether a tool can change something outside the process.
 ///
 /// Takes the foreign tool's own declaration rather than offering a
@@ -156,27 +156,77 @@ fn has_redirect(cmd: &str) -> bool {
   cmd.contains('>')
 }
 
-/// Whether every sub-command is a pure report.
-pub fn shell_is_read_only(cmd: &str) -> bool {
+/// Why a command is not a pure report.
+///
+/// `shell_is_read_only` used to answer only yes/no, and the refusal message
+/// could therefore say nothing more than "not available". Naming the obstacle
+/// is what lets the model switch to a reporting command instead of concluding
+/// the whole tool is gone (`docs/architecture/L1-engine.md` §4.6.3).
+#[derive(Debug, Clone, PartialEq)]
+enum NotReadOnly {
+  /// A redirect writes whatever program precedes it.
+  Redirect,
+  NoCommand,
+  /// Unparsable quoting, or no program word to judge.
+  Unjudgeable(String),
+  UnknownProgram {
+    part: String,
+    program: String,
+  },
+  MutatingSubcommand {
+    program: String,
+    sub: String,
+  },
+}
+
+impl NotReadOnly {
+  /// One sentence naming what disqualified the command.
+  fn explain(&self) -> String {
+    match self {
+      Self::Redirect => {
+        "it redirects output (`>`), which writes whatever program precedes it".to_string()
+      }
+      Self::NoCommand => "no command was given".to_string(),
+      Self::Unjudgeable(part) => {
+        format!("`{part}` cannot be judged (unparsable quoting, or no program word)")
+      }
+      Self::UnknownProgram { part, program } => format!(
+        "`{program}` is not a known reporting command, so `{part}` cannot be assumed read-only"
+      ),
+      Self::MutatingSubcommand { program, sub } => {
+        format!("`{program} {sub}` changes state, unlike other `{program}` sub-commands")
+      }
+    }
+  }
+}
+
+/// The first reason `cmd` is not a pure report, or `None` when it is one.
+///
+/// Evaluation order is identical to the predicate it backs, so the verdict is
+/// unchanged — only the explanation is new.
+fn read_only_obstacle(cmd: &str) -> Option<NotReadOnly> {
   if has_redirect(cmd) {
-    return false;
+    return Some(NotReadOnly::Redirect);
   }
   let parts = split_subcommands(cmd);
   if parts.is_empty() {
-    return false;
+    return Some(NotReadOnly::NoCommand);
   }
-  parts.iter().all(|part| {
+  for part in &parts {
     let argv = match shlex::split(part) {
       Some(v) => v,
       // Unparsable quoting: refuse rather than guess.
-      None => return false,
+      None => return Some(NotReadOnly::Unjudgeable(part.clone())),
     };
     let Some(program) = argv.first() else {
-      return false;
+      return Some(NotReadOnly::Unjudgeable(part.clone()));
     };
     let program = program.rsplit('/').next().unwrap_or(program);
     if !READ_ONLY_COMMANDS.contains(&program) {
-      return false;
+      return Some(NotReadOnly::UnknownProgram {
+        part: part.clone(),
+        program: program.to_string(),
+      });
     }
     // `git status` reports; `git push` does not.
     if let Some((_, subs)) = MUTATING_SUBCOMMANDS.iter().find(|(p, _)| *p == program) {
@@ -184,11 +234,14 @@ pub fn shell_is_read_only(cmd: &str) -> bool {
       if let Some(sub) = first_arg
         && subs.contains(&sub.as_str())
       {
-        return false;
+        return Some(NotReadOnly::MutatingSubcommand {
+          program: program.to_string(),
+          sub: sub.clone(),
+        });
       }
     }
-    true
-  })
+  }
+  None
 }
 
 /// Split a command line into the individual commands it runs.
@@ -284,10 +337,10 @@ pub fn classify_command(cmd: &str) -> Decision {
   let mut strictest = Decision::Allow;
   for part in &parts {
     match approval::classify(part) {
-      Decision::Deny(r) => return Decision::Deny(r),
+      Decision::Deny(r) => return Decision::Deny(attribute(&r, part, parts.len())),
       Decision::Ask(r) => {
         if matches!(strictest, Decision::Allow) {
-          strictest = Decision::Ask(r);
+          strictest = Decision::Ask(attribute(&r, part, parts.len()));
         }
       }
       Decision::Allow => {}
@@ -356,6 +409,53 @@ fn expand_home(path: &str) -> String {
   }
 }
 
+/// Why a tool is wholly unavailable, plus what remains available.
+///
+/// Naming the alternatives matters as much as the refusal: a model told only
+/// "not available" tends to stop investigating, while one told which tools
+/// still work continues with them.
+fn unavailable_tool_reason(tool: &str, mode: Mode) -> String {
+  format!(
+    "`{}` is not available in {} mode, and no approval can enable it. \
+     Still available: read_file, list_dir, glob, grep, and `run_shell` for \
+     reporting commands. Investigate and report instead of changing anything; \
+     do not retry this call.",
+    tool,
+    mode.label()
+  )
+}
+
+/// Why one shell command was refused, when the tool itself still works.
+///
+/// The message this replaced said `run_shell` was "not available", which is
+/// false — reporting commands pass. The model therefore abandoned shell
+/// entirely instead of narrowing to a command that would have run
+/// (`docs/architecture/L1-engine.md` §4.6.3).
+fn restricted_shell_reason(mode: Mode, obstacle: &NotReadOnly) -> String {
+  format!(
+    "`run_shell` works in {} mode, but only for commands that just report. \
+     This one was refused because {}. Retry with a reporting command instead \
+     (ls, cat, head, grep, find, git status, git diff, ...); do not retry this \
+     command unchanged.",
+    mode.label(),
+    obstacle.explain()
+  )
+}
+
+/// Name the sub-command that decided the verdict.
+///
+/// Only when the line has more than one: for a single command the reason
+/// already refers to the whole thing, and repeating it is noise. Without this
+/// the model saw `ls; rm -rf /` refused for "recursive delete" with no way to
+/// tell which half to drop, so its cheapest next move was to re-send the
+/// whole line.
+fn attribute(reason: &str, part: &str, count: usize) -> String {
+  if count < 2 {
+    return reason.to_string();
+  }
+  format!("{reason} — triggered by `{part}`")
+}
+
 /// The gate. Every tool call goes through here before it executes.
 /// The gate. `declared_read_only` carries a foreign tool's own annotation;
 /// `None` means "we did not author this and it made no claim", which is
@@ -365,18 +465,15 @@ pub fn check_with(tool: &str, args: &Value, declared_read_only: Option<bool>) ->
 
   // 1. Mode gate.
   if current.is_restricted() && is_mutating_with(tool, declared_read_only) {
-    let shell_ok = tool == "run_shell"
-      && args
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(shell_is_read_only);
-    if !shell_ok {
-      return Verdict::Deny(format!(
-        "`{}` is not available in {} mode. Investigate and report instead of \
-         changing anything; do not retry this call.",
-        tool,
-        current.label()
-      ));
+    if tool == "run_shell" {
+      // An absent `command` is still a refusal, exactly as before: an empty
+      // string has no sub-commands, so it is not a report either.
+      let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+      if let Some(obstacle) = read_only_obstacle(cmd) {
+        return Verdict::Deny(restricted_shell_reason(current, &obstacle));
+      }
+    } else {
+      return Verdict::Deny(unavailable_tool_reason(tool, current));
     }
   }
 
@@ -413,6 +510,14 @@ pub fn check_with(tool: &str, args: &Value, declared_read_only: Option<bool>) ->
 mod tests {
   use super::*;
   use serde_json::json;
+
+  /// The yes/no view of `read_only_obstacle`, which is what the mode gate
+  /// ultimately asks. Kept test-local: the shipped gate needs the obstacle's
+  /// payload to explain itself, so a callerless predicate in the binary would
+  /// be dead weight.
+  fn shell_is_read_only(cmd: &str) -> bool {
+    read_only_obstacle(cmd).is_none()
+  }
 
   #[test]
   fn subcommands_are_split_on_every_separator() {
@@ -472,6 +577,104 @@ mod tests {
     assert!(!shell_is_read_only("mystery-tool --go"));
     // One bad sub-command taints the line.
     assert!(!shell_is_read_only("ls; rm f"));
+  }
+
+  /// The defect this stage fixes: the refusal claimed `run_shell` was
+  /// unavailable while the very next assertion below shows it is not, so the
+  /// model abandoned shell instead of narrowing to a reporting command.
+  #[test]
+  fn a_restricted_shell_refusal_names_the_obstacle_not_a_missing_tool() {
+    let _guard = crate::testsync::lock();
+    set_mode(Mode::ReadOnly);
+
+    let Verdict::Deny(reason) = check_with("run_shell", &json!({"command": "git push"}), None)
+    else {
+      set_mode(Mode::Normal);
+      panic!("git push must be denied in read-only mode");
+    };
+    set_mode(Mode::Normal);
+
+    // It must not claim the tool is gone -- it demonstrably is not.
+    assert!(
+      !reason.contains("not available"),
+      "must not claim run_shell is unavailable: {reason}"
+    );
+    // It must name what disqualified this command,
+    assert!(
+      reason.contains("git push"),
+      "must name the obstacle: {reason}"
+    );
+    // and what to do instead.
+    assert!(
+      reason.contains("git status"),
+      "must offer a reporting alternative: {reason}"
+    );
+  }
+
+  #[test]
+  fn a_wholly_unavailable_tool_says_what_still_works() {
+    let _guard = crate::testsync::lock();
+    set_mode(Mode::ReadOnly);
+    let verdict = check_with("write_file", &json!({"path": "x"}), None);
+    set_mode(Mode::Normal);
+
+    let Verdict::Deny(reason) = verdict else {
+      panic!("write_file must be denied in read-only mode");
+    };
+    // Unlike run_shell, this one really is unavailable -- and approval cannot
+    // change that, so the model should not go looking for a prompt.
+    assert!(reason.contains("no approval can enable it"), "{reason}");
+    assert!(
+      reason.contains("read_file"),
+      "must name what remains: {reason}"
+    );
+  }
+
+  #[test]
+  fn a_refused_line_names_which_subcommand_decided_it() {
+    // Without attribution the model's cheapest next move is to re-send the
+    // whole line, bringing the offending half back with it.
+    let reason = match classify_command("ls; sudo reboot") {
+      Decision::Ask(r) | Decision::Deny(r) => r,
+      Decision::Allow => panic!("sudo must decide the verdict"),
+    };
+    assert!(reason.contains("sudo reboot"), "{reason}");
+
+    // A single command needs no attribution: the reason already refers to it.
+    let single = match classify_command("sudo reboot") {
+      Decision::Ask(r) | Decision::Deny(r) => r,
+      Decision::Allow => panic!("sudo must decide the verdict"),
+    };
+    assert!(!single.contains("triggered by"), "{single}");
+  }
+
+  #[test]
+  fn each_obstacle_explains_itself_distinctly() {
+    // A redirect is disqualifying whatever precedes it, and says so rather
+    // than blaming the program.
+    let redirect = read_only_obstacle("echo hi > f").map(|o| o.explain());
+    assert!(
+      redirect.as_deref().is_some_and(|e| e.contains("redirect")),
+      "{redirect:?}"
+    );
+
+    // A mutating sub-command blames the sub-command, not `git` itself --
+    // otherwise the model concludes git is off-limits.
+    let sub = read_only_obstacle("git commit -m x").map(|o| o.explain());
+    assert!(
+      sub.as_deref().is_some_and(|e| e.contains("git commit")),
+      "{sub:?}"
+    );
+
+    let unknown = read_only_obstacle("mystery-tool --go").map(|o| o.explain());
+    assert!(
+      unknown
+        .as_deref()
+        .is_some_and(|e| e.contains("mystery-tool")),
+      "{unknown:?}"
+    );
+
+    assert_eq!(read_only_obstacle("git status"), None);
   }
 
   #[test]
