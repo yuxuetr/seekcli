@@ -138,7 +138,7 @@ impl ToolDispatcher {
       "job_kill" => jobs::job_kill(args).await,
       "create_skill" => meta::create_skill(args).await,
       "ask_user_question" => ask::ask_user_question(args).await,
-      _ => anyhow::bail!("Unknown tool: {}", name),
+      _ => anyhow::bail!("{}", registry::unknown_tool_message(name)),
     }
   }
 }

@@ -262,6 +262,86 @@ pub fn system_tools() -> Vec<Tool> {
   ]
 }
 
+/// `name(required, [optional])` from a tool's JSON-Schema parameters.
+///
+/// A full schema dump is the obvious thing and the wrong one: it is long, and
+/// the mistake being corrected is almost always the name or a missing
+/// argument, both of which a signature shows at a glance.
+fn signature_of(tool: &Tool) -> String {
+  let params = &tool.function.parameters;
+  let required: Vec<&str> = params
+    .get("required")
+    .and_then(Value::as_array)
+    .map(|a| a.iter().filter_map(Value::as_str).collect())
+    .unwrap_or_default();
+
+  let mut shown: Vec<String> = required.iter().map(|r| (*r).to_string()).collect();
+  if let Some(props) = params.get("properties").and_then(Value::as_object) {
+    for key in props.keys() {
+      if !required.contains(&key.as_str()) {
+        shown.push(format!("[{key}]"));
+      }
+    }
+  }
+  format!("{}({})", tool.function.name, shown.join(", "))
+}
+
+/// Levenshtein distance, two rows.
+///
+/// Written out rather than pulled in as a dependency: one short function on an
+/// error path does not justify a crate, and `cargo deny` has fewer things to
+/// have an opinion about.
+fn edit_distance(a: &str, b: &str) -> usize {
+  let b_chars: Vec<char> = b.chars().collect();
+  let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+  let mut cur = vec![0usize; b_chars.len() + 1];
+
+  for (i, ac) in a.chars().enumerate() {
+    cur[0] = i + 1;
+    for (j, bc) in b_chars.iter().enumerate() {
+      let substitution = prev[j] + usize::from(ac != *bc);
+      cur[j + 1] = substitution.min(prev[j + 1] + 1).min(cur[j] + 1);
+    }
+    std::mem::swap(&mut prev, &mut cur);
+  }
+  prev[b_chars.len()]
+}
+
+/// Why a tool name does not resolve, naming the nearest real one.
+///
+/// "Unknown tool: x" alone left the model to guess again from the same schema
+/// list it had already misread. A suggestion has a floor, though: one that
+/// shares almost nothing is worse than none, because it sends the model down a
+/// wrong path with false confidence (`docs/architecture/L1-engine.md` §4.6.6).
+pub fn unknown_tool_message(name: &str) -> String {
+  let tools = system_tools();
+  let nearest = tools
+    .iter()
+    .map(|t| (edit_distance(name, &t.function.name), t))
+    .min_by_key(|(d, _)| *d)
+    // Accept a correction only while it is plausibly a typo of that name.
+    .filter(|(d, t)| d * 3 <= t.function.name.len().max(name.len()));
+
+  match nearest {
+    Some((_, tool)) => format!(
+      "Unknown tool `{}`. The closest real tool is `{}`. Call that instead; \
+       do not retry this name.",
+      name,
+      signature_of(tool)
+    ),
+    None => format!(
+      "Unknown tool `{}`. Available tools: {}. Call one of those; do not retry \
+       this name.",
+      name,
+      tools
+        .iter()
+        .map(|t| t.function.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+    ),
+  }
+}
+
 /// Whether a tool is safe to run concurrently with its siblings in the same
 /// turn. Only pure read-only tools qualify.
 ///
@@ -334,5 +414,58 @@ mod tests {
     assert!(!is_parallel_readonly("load_skill"));
     // Asking blocks on a human; running several at once would interleave prompts.
     assert!(!is_parallel_readonly("ask_user_question"));
+  }
+
+  #[test]
+  fn a_signature_shows_required_arguments_then_optional_ones() {
+    let tools = system_tools();
+    let find = |n: &str| {
+      tools
+        .iter()
+        .find(|t| t.function.name == n)
+        .map(signature_of)
+    };
+    assert_eq!(
+      find("edit_file").as_deref(),
+      Some("edit_file(path, old_text, new_text)")
+    );
+    // `background` is optional, and saying so is the point: the model's error
+    // is usually a missing required argument, not an omitted optional one.
+    assert_eq!(
+      find("run_shell").as_deref(),
+      Some("run_shell(command, [background])")
+    );
+  }
+
+  #[test]
+  fn a_typo_is_corrected_to_the_nearest_real_tool() {
+    let msg = unknown_tool_message("read_fil");
+    assert!(msg.contains("read_file(path)"), "{msg}");
+    assert!(msg.contains("do not retry"), "{msg}");
+  }
+
+  #[test]
+  fn a_name_resembling_nothing_gets_the_list_rather_than_a_wrong_guess() {
+    // A suggestion that shares almost nothing is worse than none: it sends the
+    // model down a wrong path with false confidence.
+    let msg = unknown_tool_message("xyzzy");
+    assert!(!msg.contains("closest"), "{msg}");
+    assert!(msg.contains("read_file"), "must list what exists: {msg}");
+    assert!(msg.contains("run_shell"), "{msg}");
+
+    // An MCP-shaped name resembles no built-in, so it must not be "corrected"
+    // into one -- it reaches this path only when it was never registered.
+    let mcp = unknown_tool_message("mcp__github__create_issue");
+    assert!(!mcp.contains("closest"), "{mcp}");
+  }
+
+  #[test]
+  fn edit_distance_is_symmetric_and_zero_on_equality() {
+    assert_eq!(edit_distance("grep", "grep"), 0);
+    assert_eq!(edit_distance("grep", "grp"), 1);
+    assert_eq!(edit_distance("abc", "xyz"), 3);
+    assert_eq!(edit_distance("", "abc"), 3);
+    assert_eq!(edit_distance("abc", ""), 3);
+    assert_eq!(edit_distance("glob", "grep"), edit_distance("grep", "glob"));
   }
 }
