@@ -30,6 +30,7 @@
 | ~~L0-2~~ | ~~无重试 / 退避~~ | **阶段二十二已落地** |
 | ~~L0-3~~ | ~~无请求超时 / 流空闲超时~~ | **阶段二十二已落地** |
 | ~~L0-4~~ | ~~无 token 计数~~ | **阶段二十六 26.2 已落地**（`api/tokens.rs`） |
+| ⚠️ L0-5 | 默认模型名过期；「DeepSeek 是纯文本模型」这条前提已失效 | `config.rs:341` 默认 `deepseek-v4-flash`（实测为别名）；`skills/vision/SKILL.md` 开篇断言模型不能看图，而实测它能 |
 
 ## 4. 目标设计
 
@@ -109,6 +110,51 @@ pub trait TokenCounter { fn count(&self, messages: &[Message]) -> usize; }
 - 压缩阈值（L4）改用 token 而非字节：600_000 **字节** 换成 150_000 **token**。
   旧口径下同一段对话，用中文写会在真实预算约三分之一处就触发压缩。
 - 真实 tokenizer 留作后续替换，接口先立住。
+
+### 4.5 模型能力是实测的，不是写死的（L0-5）
+
+#### 4.5.1 问题形状
+
+前四个 L0 缺口都是「我们没写某个机制」。这一个不是：**代码没变，基底变了。**
+模型获得视觉能力，于是项目里写死的前提由真变假。
+
+这类缺口会**随时间自己出现**，不需要任何人提需求——所以它的修法不只是改几个字符串，
+而是留下一条「下次怎么确认」的路径。
+
+#### 4.5.2 实测方法（复查时照跑）
+
+任何「某模型能不能做某事」的判断都必须这样取得，不能凭记忆或文档：
+
+```sh
+# 1. 这个端点到底有哪些模型
+curl -sS https://api.deepseek.com/v1/models \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY"
+
+# 2. 一个名字是真模型还是别名：看响应的 model 字段回什么
+curl -sS https://api.deepseek.com/v1/chat/completions \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"<要查的名字>","messages":[{"role":"user","content":"hi"}],"max_tokens":5}'
+
+# 3. 视觉能力：必须用模型猜不出来的图，否则它从上下文就能蒙对
+#    （实测用的是 64×64 左蓝右黄，答 "Blue on the left, yellow on the right."）
+```
+
+**第 3 步的陷阱值得记住**：第一次用纯红 16×16 测，模型回「likely red?」——
+那可能是从「single color square」这个描述里猜的，不是看见的。
+换成猜不出来的双色分割才是有效实验。
+
+2026-09-13 的结果：`/v1/models` 只报 `deepseek-flash` 与 `deepseek-v4-pro`；
+`deepseek-v4-flash` 是别名；视觉为真；16×16 的图令 prompt 从 31 token 涨到 224。
+
+#### 4.5.3 本层只做纠正，不做能力
+
+让图像真的进入请求属于 [L4-8 多段内容](L4-memory.md)，是架构级的，另排。
+本层只负责**不再陈述假话**：默认模型名、`vision` skill 的前提、
+`mcp/protocol.rs` 里把阻塞点归因给模型的注释。
+
+最后一条尤其重要：那句注释写的是「cannot be shown to a text-only model」，
+而真正的阻塞点是**我们的 `Message` 还承载不了多段内容**。
+理由指错地方，下一个读者就会以为这是模型的限制而绕开它。
 
 ## 5. 验收标准
 
