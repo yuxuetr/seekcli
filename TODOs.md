@@ -787,7 +787,7 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 ### 🟣 阶段三十九：L7 trajectory 导出
 
 *目标：让 SeekCLI 成为可被外部 RL / 进化流程消费的环境。*
-*来源：L7-8。无依赖。设计：待补（`docs/architecture/L7-observability.md`）*
+*来源：L7-8。无依赖。设计：[L7 §4.6](docs/architecture/L7-observability.md#46-trajectory-导出l7-8)*
 
 - [ ] **39.1 `--bench` 导出标准 trajectory**（L7-8）：`(state, action, reward)` 序列，
       reward 取 Fail-to-Pass 的退出码判定（含反向断言的取反语义）。

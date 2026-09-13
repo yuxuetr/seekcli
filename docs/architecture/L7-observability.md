@@ -30,7 +30,7 @@
 | L7-5 | 无 OTel 导出 | 取舍级 | |
 | ⚠️ L7-6 | 无自描述：模型看不到自己的运行时 | 全 crate 无 inspect 类工具；工具面、生效策略、skill、MCP 状态对模型均不可查 | 被拒后只能盲猜原因 |
 | L7-7 | 评价信号不回灌 | `bench.rs` 与 `skills.rs::accept_proposal` 无调用关系 | 进化无选择压力 |
-| L7-8 | trajectory 不可导出 | `--bench` 只产出聚合分数 | 外部 RL / 进化流程无法消费 |
+| ⚠️ L7-8 | trajectory 不可导出 | `--bench` 只产出聚合分数；`LoopResult.events` 只在 `#[cfg(test)]` 下被捕获 | 外部 RL / 进化流程无法消费 |
 
 > L7-2 是 L1 / L2 / L4 三处重构的**前置条件**。
 > 没有可回放的测试，把 440 行主循环拆成四个阶段函数是在裸奔。
@@ -152,6 +152,79 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
   自行查出哪些命令可用，而不是盲试。
 - `policy` 分区的内容与 `policy.rs` 常量同源——改常量则输出随之变化，有单测守。
 - 归入 `is_parallel_readonly`：它是纯读，没有理由阻塞并发批次。
+
+### 4.6 trajectory 导出（L7-8）
+
+> **定位**：SeekCLI 是 RL / 进化实验的**环境与评测器**，不是训练器
+> （[三评 §5](../evaluation/2026-09-12-self-evolution-baseline.md#5-关于强化学习)）。
+> 本节只产出数据，不引入任何训练依赖。
+
+#### 4.6.1 已经有的三样
+
+RL 训练一个 agent 需要三样东西，本仓各已具备：
+
+| 要的 | 已有 | 位置 |
+| --- | --- | --- |
+| 可重置环境 | 每任务起隔离 testbed | `bench.rs::prepare_testbed` |
+| 可判定 reward | Fail-to-Pass 退出码，含反向断言 | `bench.rs::run_eval` |
+| 可回放 trajectory | 事件日志 + LLM 录制/回放 | `LoopResult.events` / `api/record.rs` |
+
+缺的只是**把第三样交出去**：`run.events` 一直存在，但只在 `#[cfg(test)]` 下被
+捕获，外部流程拿不到。
+
+#### 4.6.2 reward 是终局的，不是每步的
+
+Fail-to-Pass 只在任务结束时给一个判定，所以**不要伪造每步 reward**。
+格式如实反映这一点：reward 挂在任务上，`terminal` 标记最后一步。
+
+谁要做 credit assignment 谁自己做——在导出层摊派奖励等于把一个建模决定
+硬编进数据，而那是消费方的事。
+
+#### 4.6.3 一条记录 = 一个任务
+
+JSONL，每行一个任务：
+
+```json
+{
+  "task": "missing_file_then_create",
+  "prompt": "Read notes.md. If it does not exist, create it containing exactly: hello",
+  "reward": 1,
+  "reward_kind": "fail_to_pass",
+  "status": "completed",
+  "llm_calls": 3,
+  "steps": [
+    {
+      "index": 0,
+      "observation": "…what the model saw entering this step…",
+      "action": { "text": "…", "tool_calls": [{ "name": "read_file", "arguments": "{…}" }] }
+    }
+  ]
+}
+```
+
+- **`reward`**：`1` 通过 / `0` 未通过，**已经应用 `expect_fail` 的取反语义**——
+  消费方不需要知道某条任务是正向还是反向断言。
+- **`reward_kind`**：现在恒为 `fail_to_pass`。写出来是为了将来加别的判定方式时，
+  旧数据不会被误读成新语义。
+- **`status`**：`completed` / `max_iterations` / `interrupted`——
+  一个撞上迭代上限的轨迹和一个自己收尾的轨迹不是一回事，不可混训。
+- **一步 = 一次 assistant 消息**，其后的 tool 结果成为下一步的 observation。
+
+#### 4.6.4 显式开启，不默默写文件
+
+`--bench <suite> --trajectory <path>`。导出是给外部消费的动作，
+默认每次 bench 都往盘上丢文件是噪声。
+
+与 [§4.6.7 的 `$SEEKCLI_ANSWER`](#467-验收与两层断言的分界) 是同一条通道的两端：
+那个把回答交给 eval 命令，这个把整条轨迹交给仓库外面。
+
+#### 4.6.5 明确不做
+
+- **不做训练端**：另一套技术栈（Python / 分布式 / GPU），塞进 Rust CLI
+  违反 [design-principles §5](design-principles.md) 三问。
+- **不声称兼容任何 RL 框架**：这是一份**有文档的本地格式**。
+  声称兼容就欠下一个跟着别人版本走的义务，而没有任何消费方在要求它。
+- **不在导出层做 credit assignment**（见 §4.6.2）。
 
 ## 5. 明确不做
 
