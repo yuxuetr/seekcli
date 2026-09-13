@@ -622,13 +622,13 @@ CI 门禁棘轮从 45 上调到 60。
 ### 🟣 阶段三十四：L1 教学式错误
 
 *目标：每一次拒绝都变成模型能据此行动的下一步，而不是一句「不允许」。*
-*来源：L1-6。设计：待补（`docs/architecture/L1-engine.md`）*
+*来源：L1-6。设计：[L1 §4.6](docs/architecture/L1-engine.md#46-教学式错误l1-6)*
 
 样板已经存在——`src/tools/mod.rs` `execute_with` 的 `bad_args` 分支注释写着
 「Surface it explicitly so Error Recovery can hand the model an actionable hint」。
 本阶段是把这个已经做对一次的模板推广到另外三处。
 
-- [ ] **34.1 策略门拒绝带上下文**：`src/tools/policy.rs` 的 `Verdict::Deny(reason)`
+- [ ] **34.1 策略门拒绝带上下文**（L1-6）：`src/tools/policy.rs` 的 `Verdict::Deny(reason)`
       补「当前 mode 允许什么」与「建议的替代调用」。
     - [ ] 不改判定逻辑，只改拒绝消息的信息量——**判定与措辞必须分开改**，
           否则一次改动同时动了安全语义和文案，回归时说不清是哪边坏的。

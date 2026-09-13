@@ -36,6 +36,7 @@ Harness 还有 Two-Stage、Reminders、Recovery、并发编排、迭代上限。
 | ~~L1-3~~ | ~~无运行中上下文注入~~ | **阶段三十已落地**：后台任务完成通知在 step 顶部注入 | — |
 | L1-4 | 中断即终止，无法续跑 | Ctrl-C 后直接结束 | 功能 |
 | ~~L1-5~~ | ~~取消不向下传播~~ | **阶段三十一已落地**，实测 SIGINT 后子进程从 2 个降到 0 | — |
+| ⚠️ L1-6 | 拒绝路径不可行动 | `policy.rs::check_with` 的 mode 门对 `run_shell` 给出**与事实不符**的消息；命令门丢掉了「哪个子命令定的罪」 | 功能 |
 
 ## 4. 目标设计
 
@@ -115,6 +116,100 @@ impl App { pub fn inject(&mut self, note: String) }  // 挂到下一次 prepare_
 ```
 
 用途：后台 job 完成通知（L2）、L8 digest 提醒、文件变更。
+
+### 4.6 教学式错误（L1-6）
+
+> **原则**：把知识写进**拒绝路径本身**，而不是写进 system prompt。
+> 前者按需出现、精确指向这一次的上下文；后者每轮都付 token 且容易被忽略。
+
+#### 4.6.1 为什么必须改 `policy.rs` 而不是 `recovery.rs`
+
+`ToolKind::Denied.is_failure()` **刻意**返回 `false`——
+「拒绝是一个决定，不是一次故障；把它当故障会让模型绕着策略重新规划，
+而策略的存在就是为了阻止这件事」（`tools/result.rs`）。
+
+因此 Error Recovery 对拒绝**不会触发**，`recovery.rs::hint_for` 还额外把
+`[USER DENIED]` / `[PATH DENIED]` 显式排除。结论：
+
+> **拒绝的教学内容只能长在拒绝文本里。** 这是本节改 `policy.rs` 而不是
+> 扩 `recovery.rs` 的结构性原因，不是实现偏好。
+
+两者的职责分界必须保持：**`recovery.rs` 管故障，`policy.rs` 管拒绝，互不复制。**
+
+#### 4.6.2 已经做对的，不要重做
+
+| 路径 | 现状 | 样板价值 |
+| --- | --- | --- |
+| 路径门 | `path_security::ensure_within_cwd` 已给出工作区根 + 解析后路径 + 下一步建议 | **本节的参照标准** |
+| 参数错误 | `tools/mod.rs::execute_with` 的 `bad_args` 分支，注释写明「Surface it explicitly so Error Recovery can hand the model an actionable hint」 | 同上 |
+| 工具故障 | `recovery.rs` 按工具 + 错误形状给 `[Recovery]` SOP | 职责已分清 |
+
+#### 4.6.3 mode 门的消息与事实不符（最高价值的一条）
+
+`check_with` 第 1 步对任何被拒的 mutating 工具统一回：
+
+```text
+`run_shell` is not available in read-only mode.
+```
+
+但 `run_shell` 在 read-only 下**是可用的**——同一个测试既断言
+`run_shell{command:"rm f"}` → Deny，又断言 `run_shell{command:"git status"}` → Allow。
+
+> **模型被告知「这个工具没了」，而事实是「这一条命令不行」。**
+> 它会整体放弃 shell，而不是换一条报告型命令——这是消息层面的正确性缺陷，
+> 不只是措辞不够详细。
+
+目标形态：区分两种拒绝。
+
+```text
+# 工具整体不可用（write_file / edit_file / create_skill）
+`write_file` is not available in read-only mode. …do not retry this call.
+
+# 工具可用但这条命令不是只读（run_shell）
+`run_shell` is available in read-only mode, but only for reporting commands.
+Refused because: `rm f` is not a read-only command.
+Reporting commands remain available (ls / cat / grep / git status / …).
+```
+
+**约束**：判定逻辑零变化。本节只改拒绝消息的信息量——
+判定与措辞必须分两步改，否则一次改动同时动了安全语义和文案，
+回归时说不清是哪一边坏的。
+
+#### 4.6.4 命令门丢掉了定罪的子命令
+
+`classify_command` 在第一个 Deny 处返回并**丢弃是哪个 part**：
+
+```rust
+Decision::Deny(r) => return Decision::Deny(r),   // part 没有被带出来
+```
+
+`ls; rm -rf /` 被拒时模型只看到「recursive delete on system or home path」，
+不知道是哪一段触发的——而它下一步最可能做的就是把整行重写一遍，
+把真正的问题原样带回来。目标形态是把定罪的子命令带进理由，并区分
+**Deny（无条件，审批也不能解）** 与 **Ask（人可以批准）**。
+
+#### 4.6.5 `[MODE DENIED]` 不在系统提示的 do-not-retry 清单里
+
+`agent/prompt.rs` 的 Safety 段只点了 `[USER DENIED]` 与 `[PATH DENIED]`，
+而 `tools/mod.rs` 产出的第三种前缀 `[MODE DENIED]` 不在其中。
+拒绝文本自己带了「do not retry」，但系统提示层面缺这一条。
+**这是四处里唯一应当改 system prompt 的一处**——因为它说的是前缀的通用语义，
+不是某一次拒绝的上下文。
+
+#### 4.6.6 外来能力缺失不可见
+
+`mcp/mod.rs` 的 server 启动失败是「跳过 + 一行可见告警」，符合
+[设计原则 §4](design-principles.md#4-错误处理) 的「降级但绝不静默」——
+但那行告警给的是**用户**，模型完全不知道少了哪些工具、为什么少。
+失败原因进上下文后，模型有机会自己定位（例如命令不存在、路径写错）。
+
+同理，未知工具名 / 参数不符 schema 时应附**最接近的可用工具名**及其 schema 片段。
+
+#### 4.6.7 验收
+
+- 三条反向 eval 断言：拒绝消息必须**包含可行动信息**，而非只断言「被拒绝了」。
+- `read-only` 下模型被拒一次后，**下一步应当换一条报告型命令**而不是放弃 shell。
+- 判定逻辑的既有单测全部不变——这是「只改措辞」的机械证据。
 
 ## 5. 验收标准
 
