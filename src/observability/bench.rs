@@ -104,11 +104,27 @@ impl Task {
 
   /// Run the verification command in `testbed`. Returns (passed, combined
   /// stdout+stderr). Pass = exit 0.
-  pub fn run_eval(&self, testbed: &Path) -> Result<(bool, String)> {
-    let out = std::process::Command::new("sh")
-      .arg("-c")
-      .arg(&self.eval)
-      .current_dir(testbed)
+  ///
+  /// `answer` is the agent's final reply, exposed to the eval command as
+  /// `$SEEKCLI_ANSWER`. Without it a task can only assert on files the agent
+  /// wrote, which rules out the whole class of cases where the interesting
+  /// outcome *is* what the agent said — and rules them out completely under
+  /// `--read-only`, where it is not allowed to write anything at all
+  /// (`docs/architecture/L1-engine.md` §4.6.7).
+  ///
+  /// It lives outside the testbed on purpose: a task asserting the agent
+  /// created no files does so with `ls -A`, which would see a file planted
+  /// here.
+  pub fn run_eval(&self, testbed: &Path, answer: Option<&Path>) -> Result<(bool, String)> {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg(&self.eval).current_dir(testbed);
+    // Always set, so a task referring to it never silently tests the empty
+    // string against a stale value inherited from the environment.
+    cmd.env(
+      "SEEKCLI_ANSWER",
+      answer.map(Path::to_path_buf).unwrap_or_default(),
+    );
+    let out = cmd
       .output()
       .with_context(|| format!("running eval `{}`", self.eval))?;
     let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -295,13 +311,13 @@ mod tests {
       expect_fail: true,
       flags: Vec::new(),
     };
-    match guard.run_eval(&dir) {
+    match guard.run_eval(&dir, None) {
       Ok((passed, _)) => assert!(passed, "absent file means the guard held"),
       Err(e) => panic!("eval failed: {}", e),
     }
 
     let _ = std::fs::write(dir.join("forbidden.txt"), "leaked");
-    match guard.run_eval(&dir) {
+    match guard.run_eval(&dir, None) {
       Ok((passed, _)) => assert!(!passed, "the file exists, so the guard was breached"),
       Err(e) => panic!("eval failed: {}", e),
     }
@@ -320,13 +336,48 @@ mod tests {
       flags: Vec::new(),
     };
     let bed = pass.prepare_testbed(&root).unwrap();
-    assert!(pass.run_eval(&bed).unwrap().0);
+    assert!(pass.run_eval(&bed, None).unwrap().0);
 
     let fail = Task {
       eval: "false".to_string(),
       ..pass.clone()
     };
-    assert!(!fail.run_eval(&bed).unwrap().0);
+    assert!(!fail.run_eval(&bed, None).unwrap().0);
+    std::fs::remove_dir_all(&root).ok();
+  }
+
+  /// The agent's reply has to be assertable. Without it a read-only task can
+  /// assert nothing at all: the agent is not allowed to write the evidence.
+  #[test]
+  fn the_agent_answer_is_exposed_to_the_eval_command() {
+    let root = std::env::temp_dir().join(format!("seekcli_bench_{}", uuid::Uuid::new_v4()));
+    let task = Task {
+      name: "answer".to_string(),
+      prompt: String::new(),
+      files: BTreeMap::new(),
+      setup: vec![],
+      eval: "grep -q 42 \"$SEEKCLI_ANSWER\"".to_string(),
+      expect_fail: false,
+      flags: Vec::new(),
+    };
+    let bed = match task.prepare_testbed(&root) {
+      Ok(b) => b,
+      Err(e) => panic!("testbed: {e}"),
+    };
+    let answer = root.join("answer.txt");
+    let _ = std::fs::write(&answer, "the count is 42\n");
+
+    match task.run_eval(&bed, Some(&answer)) {
+      Ok((passed, _)) => assert!(passed, "the eval must see the reply"),
+      Err(e) => panic!("eval failed: {e}"),
+    }
+
+    // Unset rather than inherited: a task referring to it must not silently
+    // pass against a stale value from the environment.
+    match task.run_eval(&bed, None) {
+      Ok((passed, _)) => assert!(!passed, "no answer means the assertion cannot hold"),
+      Err(e) => panic!("eval failed: {e}"),
+    }
     std::fs::remove_dir_all(&root).ok();
   }
 

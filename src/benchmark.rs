@@ -69,8 +69,22 @@ impl App {
       env::set_current_dir(&original_cwd)?;
       crate::tools::policy::set_mode(crate::tools::policy::Mode::Normal);
 
-      let llm_calls = match run {
-        Ok(outcome) => outcome.llm_calls,
+      let (llm_calls, answer_path) = match run {
+        Ok(outcome) => {
+          // The reply is what several assertions are actually about, and under
+          // --read-only it is the only evidence a task can have.
+          let path = bench_root.join(format!("{}.answer", task.name));
+          let saved = match std::fs::write(&path, &outcome.text) {
+            Ok(()) => Some(path),
+            // Not fatal: only tasks that reference $SEEKCLI_ANSWER care, and
+            // they will fail on their own terms with the reason visible here.
+            Err(e) => {
+              println!("{} could not save the answer: {}", "[Bench]".yellow(), e);
+              None
+            }
+          };
+          (outcome.llm_calls, saved)
+        }
         Err(e) => {
           println!("{} agent error: {}", "[Bench]".red(), e);
           report.push(TaskResult {
@@ -86,7 +100,9 @@ impl App {
       };
 
       // Eval + score.
-      let (passed, output) = task.run_eval(&testbed).unwrap_or((false, String::new()));
+      let (passed, output) = task
+        .run_eval(&testbed, answer_path.as_deref())
+        .unwrap_or((false, String::new()));
       let note = if passed {
         String::new()
       } else {
