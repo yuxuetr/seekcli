@@ -59,7 +59,9 @@ impl ToolDispatcher {
   pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
     self
       .execute_with(name, arguments, None, |args| async move {
-        Self::run(name, &args).await
+        // Built-ins never return images; `From<String>` keeps their signatures
+        // untouched while the pipeline learns to carry them.
+        Self::run(name, &args).await.map(result::ToolOutput::from)
       })
       .await
   }
@@ -79,7 +81,7 @@ impl ToolDispatcher {
   ) -> ToolResult
   where
     F: FnOnce(Value) -> Fut,
-    Fut: std::future::Future<Output = Result<String>>,
+    Fut: std::future::Future<Output = Result<result::ToolOutput>>,
   {
     // A malformed arguments payload used to be silently coerced to `Null`,
     // which then surfaced as a confusing "missing argument" error. Surface it

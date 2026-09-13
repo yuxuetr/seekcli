@@ -58,6 +58,11 @@ pub enum EventPayload {
   ToolResult {
     call_id: String,
     content: String,
+    /// Images the tool returned, as blob references. Same rule as
+    /// `UserMessage::images`: `#[serde(default)]` keeps older logs readable and
+    /// bytes stay out of the log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<ImageRef>,
   },
   SystemPrompt {
     kind: PromptKind,
@@ -208,6 +213,16 @@ fn rebuild_user_message(content: &str, images: &[ImageRef]) -> Message {
   if images.is_empty() {
     return Message::new_user_text(content.to_string());
   }
+  let (text, loaded) = load_images(content, images);
+  Message::new_user_with_images(text, loaded)
+}
+
+/// Load referenced blobs, degrading visibly for any that are gone.
+///
+/// Shared by the user and tool arms so the degradation rule has exactly one
+/// implementation — two copies would drift, and the one that drifted would be
+/// the one that silently lied about an image being present.
+fn load_images(content: &str, images: &[ImageRef]) -> (String, Vec<crate::api::ImagePart>) {
   let mut text = content.to_string();
   let mut loaded = Vec::new();
   for image in images {
@@ -227,7 +242,7 @@ fn rebuild_user_message(content: &str, images: &[ImageRef]) -> Message {
       }
     }
   }
-  Message::new_user_with_images(text, loaded)
+  (text, loaded)
 }
 
 /// Standard base64, written out rather than pulled in as a dependency.
@@ -235,7 +250,7 @@ fn rebuild_user_message(content: &str, images: &[ImageRef]) -> Message {
 /// One short encoder on a path that already reads a file does not justify a
 /// crate, and `cargo deny` has one fewer thing to have an opinion about — the
 /// same call as the hand-written edit distance in `tools/registry.rs`.
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
   const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
   for chunk in bytes.chunks(3) {
@@ -309,11 +324,14 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
           Some(tool_calls.clone())
         },
       }),
-      EventPayload::ToolResult { call_id, content } => out.push(Message::ToolResponse {
-        role: "tool".to_string(),
-        content: content.clone(),
-        tool_call_id: call_id.clone(),
-      }),
+      EventPayload::ToolResult {
+        call_id,
+        content,
+        images,
+      } => {
+        let (text, loaded) = load_images(content, images);
+        out.push(Message::new_tool_response(call_id.clone(), text, loaded));
+      }
       EventPayload::SystemPrompt { content, .. } => out.push(Message::Simple {
         images: Vec::new(),
         role: "system".to_string(),
@@ -439,6 +457,10 @@ pub fn event_for(message: &Message) -> Option<EventPayload> {
     } => Some(EventPayload::ToolResult {
       call_id: tool_call_id.clone(),
       content: content.clone(),
+      // Same reason as the user arm: this direction converts a transient
+      // message whose bytes have no blob yet. The dispatcher persists tool
+      // images and records the event directly.
+      images: Vec::new(),
     }),
   }
 }
@@ -594,6 +616,7 @@ mod tests {
       }],
     });
     s.record(EventPayload::ToolResult {
+      images: Vec::new(),
       call_id: "c1".into(),
       content: "contents".into(),
     });

@@ -40,7 +40,7 @@
 | L2-6 | 无持久 PTY | 取舍级 | 明确不做，见 §5 |
 | ~~L2-7~~ | ~~无 `ask_user_question`~~ | — | **阶段二十七已落地** |
 | L2-8 | 无 `todo_write` | 取舍级 | 已用 PLAN.md / TODO.md 文件约定替代 |
-| L2-9 | MCP 返回的图像内容被丢弃 | `mcp/protocol.rs:242` 输出 `[image content omitted]`；**被 L4-8 阻塞**，不是本层能独立解决的 |
+| ~~L2-9~~ | ~~MCP 返回的图像内容被丢弃~~ | **阶段四十一已落地**：`flatten_content` 返回图像，经 `ToolOutput` 穿过同一道守门路径。真实验证——自建 MCP server 返回 64×64 上红下黑的图，模型答对颜色（禁止读源码），blob 落盘为真 PNG，日志只存引用 |
 
 ## 4. 目标设计
 

@@ -55,10 +55,36 @@ impl ToolKind {
   }
 }
 
+/// What a tool produced, before classification.
+///
+/// Exists so the guarded pipeline can carry images without every built-in tool
+/// changing signature: they keep returning `Result<String>` and convert through
+/// `From`. The alternatives considered — widening every tool's return type, a
+/// shared-mutable side channel, or letting the caller fill images in after the
+/// fact — each either touched tools that will never return an image or put a
+/// second way into the one guarded path
+/// (`docs/architecture/L4-memory.md` §4.6.4).
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutput {
+  pub text: String,
+  pub images: Vec<crate::api::ImagePart>,
+}
+
+impl From<String> for ToolOutput {
+  fn from(text: String) -> Self {
+    Self {
+      text,
+      images: Vec::new(),
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolResult {
   pub kind: ToolKind,
   pub content: String,
+  /// Images the tool produced. Empty for every built-in.
+  pub images: Vec<crate::api::ImagePart>,
 }
 
 impl ToolResult {
@@ -66,6 +92,7 @@ impl ToolResult {
     Self {
       kind: ToolKind::Ok,
       content: content.into(),
+      images: Vec::new(),
     }
   }
 
@@ -73,6 +100,7 @@ impl ToolResult {
     Self {
       kind: ToolKind::Denied,
       content: content.into(),
+      images: Vec::new(),
     }
   }
 
@@ -80,6 +108,7 @@ impl ToolResult {
     Self {
       kind: ToolKind::Failed,
       content: content.into(),
+      images: Vec::new(),
     }
   }
 
@@ -87,6 +116,7 @@ impl ToolResult {
     Self {
       kind: ToolKind::BadArgs,
       content: content.into(),
+      images: Vec::new(),
     }
   }
 
@@ -94,6 +124,7 @@ impl ToolResult {
     Self {
       kind: ToolKind::TimedOut,
       content: content.into(),
+      images: Vec::new(),
     }
   }
 
@@ -102,32 +133,33 @@ impl ToolResult {
   /// Existing tools already encode denial in their text; classifying by
   /// prefix here — in exactly one place — is what lets them migrate without
   /// each being rewritten, while the rest of the codebase stops guessing.
-  pub fn from_legacy(outcome: anyhow::Result<String>) -> Self {
+  pub fn from_legacy(outcome: anyhow::Result<ToolOutput>) -> Self {
     match outcome {
-      Ok(text) => {
-        if text.starts_with("[USER DENIED]")
-          || text.starts_with("[PATH DENIED]")
-          || text.starts_with("[MODE DENIED]")
-        {
-          Self {
-            kind: ToolKind::Denied,
-            content: text,
-          }
-        } else if text.starts_with("[BAD ARGS]") {
-          Self {
-            kind: ToolKind::BadArgs,
-            content: text,
-          }
-        } else if text.starts_with("[ERROR]") || text.starts_with("[BAD PATTERN]") {
-          Self {
-            kind: ToolKind::Failed,
-            content: text,
-          }
-        } else {
-          Self::ok(text)
-        }
+      Ok(ToolOutput { text, images }) => {
+        let mut result = Self::classify_text(text);
+        result.images = images;
+        result
       }
       Err(e) => Self::failed(format!("{e:#}")),
+    }
+  }
+
+  /// Classify a tool's text by the prefix it already carries.
+  ///
+  /// Existing tools encode denial in their text; doing this in exactly one
+  /// place is what let them migrate without each being rewritten.
+  fn classify_text(text: String) -> Self {
+    if text.starts_with("[USER DENIED]")
+      || text.starts_with("[PATH DENIED]")
+      || text.starts_with("[MODE DENIED]")
+    {
+      Self::denied(text)
+    } else if text.starts_with("[BAD ARGS]") {
+      Self::bad_args(text)
+    } else if text.starts_with("[ERROR]") || text.starts_with("[BAD PATTERN]") {
+      Self::failed(text)
+    } else {
+      Self::ok(text)
     }
   }
 
@@ -151,6 +183,36 @@ impl fmt::Display for ToolResult {
 
 #[cfg(test)]
 mod tests {
+
+  /// Text-only tools keep their `Result<String>` signature; the conversion is
+  /// what let the pipeline learn images without touching any of them.
+  #[test]
+  fn a_plain_string_converts_to_an_imageless_output() {
+    let out: ToolOutput = "hello".to_string().into();
+    assert_eq!(out.text, "hello");
+    assert!(out.images.is_empty());
+  }
+
+  #[test]
+  fn images_survive_classification() {
+    let out = ToolOutput {
+      text: "captured".into(),
+      images: vec![crate::api::ImagePart {
+        media_type: "image/png".into(),
+        data_base64: "QQ==".into(),
+      }],
+    };
+    let r = ToolResult::from_legacy(Ok(out));
+    assert_eq!(r.kind, ToolKind::Ok);
+    assert_eq!(r.images.len(), 1, "images were dropped by classification");
+  }
+
+  /// A denial must not carry images: the tool never ran.
+  #[test]
+  fn a_denial_has_no_images() {
+    assert!(ToolResult::denied("[MODE DENIED] no").images.is_empty());
+  }
+
   use super::*;
 
   #[test]
@@ -188,7 +250,7 @@ mod tests {
       ("ordinary output", ToolKind::Ok),
     ];
     for (text, expected) in cases {
-      let r = ToolResult::from_legacy(Ok(text.to_string()));
+      let r = ToolResult::from_legacy(Ok(text.to_string().into()));
       assert_eq!(r.kind, expected, "misclassified: {}", text);
     }
   }

@@ -468,6 +468,7 @@ mod tests {
         }]),
       },
       Message::ToolResponse {
+        images: Vec::new(),
         role: "tool".into(),
         content: "FILE BODY".into(),
         tool_call_id: "t1".into(),
@@ -490,11 +491,13 @@ mod tests {
   fn consecutive_tool_results_merge_into_one_user_turn() {
     let msgs = vec![
       Message::ToolResponse {
+        images: Vec::new(),
         role: "tool".into(),
         content: "r1".into(),
         tool_call_id: "a".into(),
       },
       Message::ToolResponse {
+        images: Vec::new(),
         role: "tool".into(),
         content: "r2".into(),
         tool_call_id: "b".into(),

@@ -127,7 +127,12 @@ impl McpClient {
   }
 
   /// Invoke a tool and flatten the content blocks into text.
-  pub async fn call_tool(&self, tool: &str, args: &Value) -> Result<String> {
+  /// Run a remote tool, returning its text and any images it produced.
+  pub async fn call_tool(
+    &self,
+    tool: &str,
+    args: &Value,
+  ) -> Result<(String, Vec<crate::api::ImagePart>)> {
     let result = self
       .request("tools/call", json!({ "name": tool, "arguments": args }))
       .await?;
@@ -139,11 +144,11 @@ impl McpClient {
       .get("isError")
       .and_then(Value::as_bool)
       .unwrap_or(false);
-    let text = flatten_content(&result);
+    let (text, images) = flatten_content(&result);
     if is_error {
       anyhow::bail!("{}", text);
     }
-    Ok(text)
+    Ok((text, images))
   }
 
   async fn request(&self, method: &str, params: Value) -> Result<Value> {
@@ -226,12 +231,20 @@ pub struct McpTool {
   pub read_only: bool,
 }
 
-/// MCP returns a list of typed content blocks; the model wants text.
-pub fn flatten_content(result: &Value) -> String {
+/// MCP returns a list of typed content blocks. Text is joined; images come back
+/// separately so they reach the model as real image content rather than as a
+/// note saying one existed.
+///
+/// Until stage 41 every non-text block became `[<type> content omitted]`,
+/// because our `Message` carried a single string. The model could always read
+/// images — `deepseek-flash` does vision, verified 2026-09-13 — the limit was
+/// ours (`docs/architecture/L0-llm-substrate.md` §4.5.2).
+pub fn flatten_content(result: &Value) -> (String, Vec<crate::api::ImagePart>) {
   let Some(blocks) = result.get("content").and_then(Value::as_array) else {
-    return String::new();
+    return (String::new(), Vec::new());
   };
   let mut parts = Vec::new();
+  let mut images = Vec::new();
   for block in blocks {
     match block.get("type").and_then(Value::as_str) {
       Some("text") => {
@@ -239,19 +252,32 @@ pub fn flatten_content(result: &Value) -> String {
           parts.push(t.to_string());
         }
       }
-      // Dropped because *our* `Message` carries one string, not because the
-      // model cannot read them: `deepseek-flash` does vision (verified
-      // 2026-09-13, `docs/architecture/L0-llm-substrate.md` §4.5.2). The
-      // blocker is multipart content — L4-8 — and pointing the comment at the
-      // model instead would send the next reader looking in the wrong place.
-      //
-      // Naming them beats dropping them silently, which would look like the
-      // tool returned nothing.
+      Some("image") => {
+        let data = block
+          .get("data")
+          .and_then(Value::as_str)
+          .unwrap_or_default();
+        let media_type = block
+          .get("mimeType")
+          .and_then(Value::as_str)
+          .unwrap_or("image/png");
+        if data.is_empty() {
+          // Naming it beats dropping it silently, which would look like the
+          // tool returned nothing at all.
+          parts.push("[image content was empty]".to_string());
+        } else {
+          images.push(crate::api::ImagePart {
+            media_type: media_type.to_string(),
+            data_base64: data.to_string(),
+          });
+        }
+      }
+      // Embedded resources still have no representation here.
       Some(other) => parts.push(format!("[{} content omitted]", other)),
       None => {}
     }
   }
-  parts.join("\n")
+  (parts.join("\n"), images)
 }
 
 #[cfg(test)]
@@ -264,24 +290,49 @@ mod tests {
       { "type": "text", "text": "line one" },
       { "type": "text", "text": "line two" }
     ]});
-    assert_eq!(flatten_content(&result), "line one\nline two");
+    let (text, images) = flatten_content(&result);
+    assert_eq!(text, "line one\nline two");
+    assert!(images.is_empty());
+  }
+
+  /// The capability this stage restores: an image block reaches the model as an
+  /// image, not as a note saying one existed.
+  #[test]
+  fn image_blocks_come_back_as_images() {
+    let result = json!({ "content": [
+      { "type": "text", "text": "here it is" },
+      { "type": "image", "data": "QUJD", "mimeType": "image/png" }
+    ]});
+    let (text, images) = flatten_content(&result);
+    assert_eq!(text, "here it is");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].media_type, "image/png");
+    assert_eq!(images[0].data_base64, "QUJD");
   }
 
   #[test]
-  fn non_text_blocks_are_named_not_dropped() {
+  fn an_image_with_no_data_is_named_rather_than_silently_lost() {
+    let result = json!({ "content": [ { "type": "image", "data": "" } ]});
+    let (text, images) = flatten_content(&result);
+    assert!(images.is_empty(), "empty data must not become an image");
+    assert!(text.contains("empty"), "got: {text}");
+  }
+
+  #[test]
+  fn other_non_text_blocks_are_still_named_not_dropped() {
     // Dropping them silently would look like the tool returned nothing.
     let result = json!({ "content": [
       { "type": "text", "text": "here" },
-      { "type": "image", "data": "..." }
+      { "type": "resource", "uri": "file:///x" }
     ]});
-    let out = flatten_content(&result);
-    assert!(out.contains("here"));
-    assert!(out.contains("[image content omitted]"), "got: {}", out);
+    let (text, _) = flatten_content(&result);
+    assert!(text.contains("here"));
+    assert!(text.contains("[resource content omitted]"), "got: {text}");
   }
 
   #[test]
   fn a_result_with_no_content_is_empty_not_an_error() {
-    assert_eq!(flatten_content(&json!({})), "");
-    assert_eq!(flatten_content(&json!({ "content": [] })), "");
+    assert_eq!(flatten_content(&json!({})).0, "");
+    assert_eq!(flatten_content(&json!({ "content": [] })).0, "");
   }
 }

@@ -237,7 +237,11 @@ impl McpRegistry {
     )
   }
 
-  pub async fn call(&self, qualified: &str, args: &Value) -> anyhow::Result<String> {
+  pub async fn call(
+    &self,
+    qualified: &str,
+    args: &Value,
+  ) -> anyhow::Result<crate::tools::result::ToolOutput> {
     let tool = self
       .tools
       .iter()
@@ -247,7 +251,8 @@ impl McpRegistry {
       .clients
       .get(&tool.server)
       .ok_or_else(|| anyhow::anyhow!("MCP server `{}` is not connected", tool.server))?;
-    client.call_tool(&tool.remote_name, args).await
+    let (text, images) = client.call_tool(&tool.remote_name, args).await?;
+    Ok(crate::tools::result::ToolOutput { text, images })
   }
 
   /// `(qualified name, server)` pairs, for `/tools`.

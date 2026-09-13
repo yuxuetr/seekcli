@@ -127,6 +127,12 @@ pub enum Message {
     role: String,
     content: String,
     tool_call_id: String,
+    /// Images a tool returned. Verified 2026-09-13 that this wire accepts
+    /// multipart content on a `tool` message, so an MCP screenshot reaches the
+    /// model instead of being described to it
+    /// (`docs/architecture/L4-memory.md` §4.6.4).
+    #[serde(skip)]
+    images: Vec<ImagePart>,
   },
   Simple {
     role: String,
@@ -179,11 +185,20 @@ impl Message {
     }
   }
 
+  /// A tool response carrying images alongside its text.
+  pub fn new_tool_response(tool_call_id: String, text: String, images: Vec<ImagePart>) -> Self {
+    Message::ToolResponse {
+      role: "tool".to_string(),
+      content: text,
+      tool_call_id,
+      images,
+    }
+  }
+
   /// Images attached to this message, if any.
   pub fn images(&self) -> &[ImagePart] {
     match self {
-      Message::Simple { images, .. } => images,
-      Message::ToolResponse { .. } => &[],
+      Message::Simple { images, .. } | Message::ToolResponse { images, .. } => images,
     }
   }
 }
@@ -309,6 +324,49 @@ pub fn strip_reasoning(messages: &[Message]) -> Vec<Message> {
     .collect()
 }
 
+/// Decode standard base64 — the inverse of `session::base64_encode`.
+///
+/// Written out for the same reason as the encoder: one short function does not
+/// justify a crate. It rejects rather than guesses, because a silently mangled
+/// image is worse than a named failure.
+pub fn base64_decode(text: &str) -> Result<Vec<u8>> {
+  fn value(c: u8) -> Option<u32> {
+    match c {
+      b'A'..=b'Z' => Some((c - b'A') as u32),
+      b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+      b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+      b'+' => Some(62),
+      b'/' => Some(63),
+      _ => None,
+    }
+  }
+  let clean: Vec<u8> = text
+    .bytes()
+    .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+    .collect();
+  let mut out = Vec::with_capacity(clean.len() / 4 * 3);
+  for chunk in clean.chunks(4) {
+    if chunk.len() == 1 {
+      anyhow::bail!("base64 input ends with an orphan character");
+    }
+    let mut acc = 0u32;
+    for (i, byte) in chunk.iter().enumerate() {
+      let Some(v) = value(*byte) else {
+        anyhow::bail!("invalid base64 character `{}`", *byte as char);
+      };
+      acc |= v << (18 - 6 * i);
+    }
+    out.push((acc >> 16) as u8);
+    if chunk.len() > 2 {
+      out.push((acc >> 8) as u8);
+    }
+    if chunk.len() > 3 {
+      out.push(acc as u8);
+    }
+  }
+  Ok(out)
+}
+
 /// A streamed item or a hard error.
 pub type StreamResult = Pin<Box<dyn Stream<Item = Result<StreamItem>> + Send>>;
 
@@ -329,6 +387,39 @@ pub trait LlmProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+
+  /// The decoder must be the exact inverse of `session::base64_encode`: an MCP
+  /// screenshot goes base64 -> bytes -> blob -> bytes -> base64 on its way to
+  /// the model, and any asymmetry corrupts the image silently.
+  #[test]
+  fn base64_round_trips_through_both_halves() {
+    for case in [
+      &b""[..],
+      b"f",
+      b"fo",
+      b"foo",
+      b"foobar",
+      &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a][..],
+      &[0xff, 0x00, 0x80, 0x7f][..],
+    ] {
+      let encoded = crate::session::base64_encode(case);
+      let decoded = match base64_decode(&encoded) {
+        Ok(d) => d,
+        Err(e) => panic!("{encoded}: {e}"),
+      };
+      assert_eq!(decoded, case, "round trip changed the bytes");
+    }
+  }
+
+  #[test]
+  fn invalid_base64_is_refused_rather_than_guessed() {
+    // A mangled image the model cannot read is worse than a named failure.
+    assert!(base64_decode("!!!!").is_err());
+    assert!(
+      base64_decode("QQ").is_ok(),
+      "padding-free input is still valid"
+    );
+  }
 
   /// The property every recorded fixture depends on: a message without images
   /// must serialize byte-identically to before multipart existed.
@@ -446,6 +537,7 @@ mod tests {
   #[test]
   fn a_tool_message_round_trips_with_its_call_id() {
     let original = Message::ToolResponse {
+      images: Vec::new(),
       role: "tool".into(),
       content: "result".into(),
       tool_call_id: "call_123".into(),
@@ -492,6 +584,7 @@ mod tests {
         }]),
       },
       Message::ToolResponse {
+        images: Vec::new(),
         role: "tool".into(),
         content: "result".into(),
         tool_call_id: "t1".into(),

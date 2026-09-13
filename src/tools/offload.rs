@@ -108,6 +108,30 @@ fn blob_dir() -> anyhow::Result<PathBuf> {
   Ok(PathBuf::from(home).join(".seekcli").join("tmp"))
 }
 
+/// Write an image into the session's blob directory, returning its reference.
+///
+/// Tool-returned images go through here so the event log stores a path rather
+/// than hundreds of KB of base64 — the same rule `/paste` follows. The blob
+/// belongs to the conversation, so the 30-day sweep reclaims it with the rest
+/// (`docs/architecture/L4-memory.md` §4.6.2).
+pub fn persist_image(image: &crate::api::ImagePart) -> anyhow::Result<crate::session::ImageRef> {
+  let dir = blob_dir()?;
+  std::fs::create_dir_all(&dir)?;
+  let extension = image
+    .media_type
+    .rsplit('/')
+    .next()
+    .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
+    .unwrap_or("bin");
+  let path = dir.join(format!("tool-{}.{}", uuid::Uuid::new_v4(), extension));
+  let bytes = crate::api::base64_decode(&image.data_base64)?;
+  std::fs::write(&path, bytes)?;
+  Ok(crate::session::ImageRef {
+    path: path.display().to_string(),
+    media_type: image.media_type.clone(),
+  })
+}
+
 /// Delete blobs untouched for longer than `max_age`.
 ///
 /// Content-addressed names mean identical output is written once, so the only

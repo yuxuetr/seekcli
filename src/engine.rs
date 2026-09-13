@@ -62,7 +62,7 @@ impl App {
       return dispatcher
         .execute_with(name, arguments, Some(true), |args| async move {
           match inspect {
-            Some(snap) => tools::inspect::render(&args, snap),
+            Some(snap) => tools::inspect::render(&args, snap).map(tools::result::ToolOutput::from),
             // Only reachable if a caller forgot to assemble the snapshot;
             // failing loudly beats reporting an empty harness as the truth.
             None => anyhow::bail!("harness_inspect was dispatched without a snapshot"),
@@ -85,6 +85,49 @@ impl App {
 }
 
 impl App {
+  /// Append a tool response to both the working set and the log.
+  ///
+  /// **The only place tool images are persisted.** Blobs are written before the
+  /// event is recorded, so "model-visible means logged" holds even if the turn
+  /// is interrupted right after. A blob that cannot be written degrades to a
+  /// visible line rather than a silently image-less result — the model would
+  /// otherwise be told a screenshot arrived when none did
+  /// (`docs/architecture/L4-memory.md` §4.6.2).
+  fn push_tool_response(
+    messages: &mut Vec<Message>,
+    events: &mut Vec<EventPayload>,
+    call_id: String,
+    mut content: String,
+    images: Vec<api::ImagePart>,
+  ) {
+    let mut refs = Vec::new();
+    let mut kept = Vec::new();
+    for image in images {
+      match tools::offload::persist_image(&image) {
+        Ok(reference) => {
+          refs.push(reference);
+          kept.push(image);
+        }
+        Err(e) => {
+          if !content.is_empty() {
+            content.push('\n');
+          }
+          content.push_str(&format!("[an image could not be stored: {e:#}]"));
+        }
+      }
+    }
+    messages.push(Message::new_tool_response(
+      call_id.clone(),
+      content.clone(),
+      kept,
+    ));
+    events.push(EventPayload::ToolResult {
+      call_id,
+      content,
+      images: refs,
+    });
+  }
+
   /// Assemble the live facts `harness_inspect` reports.
   ///
   /// Here rather than in `tools::inspect` because only the engine can reach the
@@ -1092,23 +1135,15 @@ impl App {
             } else {
               outcome.render()
             };
-            (id, text, failed)
+            (id, text, failed, outcome.images)
           }
         });
         let results = futures_util::future::join_all(futs).await;
-        for (id, content, failed) in results {
+        for (id, content, failed, images) in results {
           // Classified by the pipeline, not re-derived from the text. A
           // refusal is deliberately not a failure -- see ToolKind::is_failure.
           turn_had_failure |= failed;
-          log_push(
-            &mut messages,
-            &mut events,
-            Message::ToolResponse {
-              role: "tool".to_string(),
-              content,
-              tool_call_id: id,
-            },
-          );
+          Self::push_tool_response(&mut messages, &mut events, id, content, images);
         }
       } else {
         // Side-effect system messages (e.g. from load_skill) must be appended
@@ -1118,6 +1153,7 @@ impl App {
         let mut deferred_system_msgs: Vec<Message> = Vec::new();
         for tc in tool_calls {
           let mut dispatched_failure = false;
+          let mut dispatched_images = Vec::new();
           let result_str = if tc.function.name == "invoke_agent" {
             self
               .delegate_to_subagent(&tc.function.arguments, &effective_tools, depth, exec_span)
@@ -1139,6 +1175,7 @@ impl App {
             )
             .await;
             dispatched_failure = outcome.kind.is_failure();
+            dispatched_images = outcome.images.clone();
             // Context-aware Error Recovery: append an actionable hint on a
             // real failure, so the model follows a debug SOP instead of
             // blindly retrying. A denial gets no hint -- there is nothing to
@@ -1154,14 +1191,12 @@ impl App {
           // they are engine-level, never reach the dispatcher, and their
           // failure markers are produced right here.
           turn_had_failure |= dispatched_failure || Self::result_is_failure(&result_str);
-          log_push(
+          Self::push_tool_response(
             &mut messages,
             &mut events,
-            Message::ToolResponse {
-              role: "tool".to_string(),
-              content: result_str,
-              tool_call_id: tc.id,
-            },
+            tc.id,
+            result_str,
+            dispatched_images,
           );
         }
         // Now safe to append deferred system messages (skill activations etc).
@@ -1329,6 +1364,7 @@ mod tests {
   #[test]
   fn plan_bridge_appends_assistant_then_user() {
     let mut messages = vec![Message::ToolResponse {
+      images: Vec::new(),
       role: "tool".to_string(),
       content: "some result".to_string(),
       tool_call_id: "t1".to_string(),

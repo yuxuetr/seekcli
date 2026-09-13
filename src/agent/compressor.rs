@@ -320,6 +320,7 @@ mod tests {
 
   fn make_tool(content: &str) -> Message {
     Message::ToolResponse {
+      images: Vec::new(),
       role: "tool".to_string(),
       content: content.to_string(),
       tool_call_id: "call_1".to_string(),

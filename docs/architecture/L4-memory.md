@@ -211,6 +211,27 @@ UserMessage {
 **不要在时间压力下随手选一个。** 选错会造出这个代码库一直避免的那种
 「绕过唯一路径」的缝，而它一旦存在就很难再收回。
 
+##### 落地：三个都没选，第四个更干净
+
+停一轮之后找到的：**改闭包的输出类型，而不是改每个工具的签名。**
+
+```rust
+pub struct ToolOutput { pub text: String, pub images: Vec<ImagePart> }
+impl From<String> for ToolOutput { … }      // 文本工具照旧返回 Result<String>
+```
+
+`execute_with` 的闭包收 `Result<ToolOutput>`，内置工具在调用点 `.map(ToolOutput::from)`
+一次转换即可，**自身签名一行不改**；MCP 分支直接给出带图的 `ToolOutput`。
+没有共享可变状态，没有第二条路径，守门仍然只有一处。
+
+三个原方案各自的代价都被绕开了，而它们本身也因此**不必再评估**——
+记在这里是为了说明「停一轮」换来了什么。
+
+**持久化点也只有一处**：`App::push_tool_response`。blob 先落盘、再记事件，
+所以这一轮即使中途被打断，「模型可见 = 已记录」依然成立。写 blob 失败时在
+文本里留一行可见说明，而不是悄悄返回一个没有图的结果——后者会让模型以为
+截图到了。
+
 #### 4.6.5 anthropic wire 本阶段不做，但不静默
 
 默认 provider 是 openai wire（实测 DeepSeek 在该 wire 上支持图像）。

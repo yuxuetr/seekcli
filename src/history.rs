@@ -464,6 +464,7 @@ mod tests {
         tool_calls: None,
       },
       Message::ToolResponse {
+        images: Vec::new(),
         role: "tool".into(),
         content: "t".into(),
         tool_call_id: "c1".into(),

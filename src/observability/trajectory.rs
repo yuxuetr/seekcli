@@ -195,6 +195,7 @@ mod tests {
         tool_calls: vec![call("read_file", r#"{"path":"notes.md"}"#)],
       },
       EventPayload::ToolResult {
+        images: Vec::new(),
         call_id: "c1".into(),
         content: "no such file".into(),
       },
