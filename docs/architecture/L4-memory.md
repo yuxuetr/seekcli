@@ -129,6 +129,63 @@ pub enum EventPayload {
 - 路径改为 `~/.seekcli/sessions/<id>/blobs/<sha256>.txt`，**随会话归属**。
 - 启动时清理 30 天未访问的 blob；同内容天然去重（内容寻址）。
 
+### 4.6 多段内容（L4-8）
+
+> **前置**：[design-principles §1.1](design-principles.md#11-能力与用户输入的分界) 已划清
+> 「能力」与「用户输入」的界，否则 `/paste` 会被当成违反 §1 而删掉。
+
+#### 4.6.1 约束：不能扫到 75 个构造点
+
+`Message::Simple.content` 是 `String`，全 crate 有 75 处构造 `Message`、123 处写
+`content:`。把它改成 `enum Content { Text, Parts }` 会扫到全部——代价与风险都不对。
+
+**`Message` 不是 wire 类型**，这一点已有先例：`anthropic.rs::build_body` 早就在做
+转换（把 system 拉到顶层、合并连续 tool 结果）。openai 侧也已有 `strip_reasoning`
+这一步。所以：
+
+- `Message::Simple` 加一个 `#[serde(skip)]` 的 `images` 字段，**默认空，
+  75 处构造点一行不改**。
+- **在 wire 边界拼多段内容**，openai 侧一处、anthropic 侧一处。
+
+#### 4.6.2 图像不内联进事件日志
+
+```rust
+UserMessage {
+  content: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  images: Vec<ImageRef>,          // 只存引用
+}
+```
+
+两个后果，都是要的：
+
+1. **`#[serde(default)]` 让旧日志原样可读**，不需要版本号与迁移链
+   （对比阶段二十六那次是真的换了格式，必须迁移）。
+2. **一次截图不会让 `events.jsonl` 膨胀数百 KB**。blob 归属机制已经存在
+   （`tools/offload.rs`，按 session 分目录，30 天清扫）。
+
+`derive_messages` 重建时读 blob。**blob 不在了要显式降级**——按
+[设计原则 §4](design-principles.md#4-错误处理)「降级优于中断，但绝不静默」：
+在该位置留一行「图像已过期（30 天清扫）」的文字占位，而不是静默丢掉、
+也不是让 `/resume` 失败。
+
+> **这是「模型可见 = 已记录」的一次边界情形**：日志记的是引用而非字节，
+> 所以严格说「可重建」依赖 blob 仍在。写明这一点比假装它无条件成立好。
+
+#### 4.6.3 token 计数会严重低估
+
+`api/tokens.rs` 的启发式按文本长度估。实测：16×16 的图令 prompt 从 31 token
+涨到 224，64×64 涨到 236。图像的 token 与字符数无关，继续按文本估会把成本
+算低一个量级。**本阶段至少要让它不说谎**——按图数加一个保守常量，
+并在层文档里写明这是估计而非精确值。
+
+#### 4.6.4 anthropic wire 本阶段不做，但不静默
+
+默认 provider 是 openai wire（实测 DeepSeek 在该 wire 上支持图像）。
+anthropic wire 的图像格式不同（`{"type":"image","source":{"type":"base64",…}}`）。
+本阶段只做 openai 侧；anthropic 侧遇到带图消息**显式报错**而不是悄悄丢掉——
+悄悄丢会让用户以为模型看过那张图。
+
 ## 5. 明确不做
 
 | 项 | 理由 |

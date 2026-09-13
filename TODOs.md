@@ -894,13 +894,12 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 ### 🟤 阶段四十一：L4 多段内容（架构级）
 
 *目标：让图像能进入请求，并且能从事件日志重建。*
-*来源：L4-8 → 解锁 L2-9 / L6-6。设计：待补（`docs/architecture/L4-memory.md`）*
+*来源：L4-8 → 解锁 L2-9 / L6-6。设计：[L4 §4.6](docs/architecture/L4-memory.md#46-多段内容l4-8)*
 
-> ⚠️ **开工前置两件**：
-> 1. L4 / L0 层文档补多段内容的目标设计。
-> 2. **修订 design-principles §1**，补上「用户输入 ≠ 能力注入」的区分——
->    否则 `/paste` 会被后来者当违规删掉。依据见
->    [基底变更 §3](docs/evaluation/2026-09-13-substrate-shift.md#3-一处需要先澄清的原则冲突)。
+> ✅ **开工前置已完成**：
+> 1. [L4 §4.6](docs/architecture/L4-memory.md#46-多段内容l4-8) 多段内容设计。
+> 2. [design-principles §1.1](docs/architecture/design-principles.md#11-能力与用户输入的分界)
+>    已划清「能力」与「用户输入」的界。
 
 - [ ] **41.1 `Message` 承载多段内容**（L4-8）：`content: String` → 文本 + 图像。
     - [ ] 向后兼容：纯文本消息的序列化形状**不得改变**，否则既有 fixture 全废。
