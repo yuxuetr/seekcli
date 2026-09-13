@@ -30,6 +30,7 @@
 | L5-3 | 无插件 / profile 组合机制 | 取舍级，见 §5 |
 | L5-4 | 无 hooks | 取舍级 |
 | L5-5 | 无 workflow 编排 | 取舍级 |
+| ⚠️ L5-6 | 提案闸门只服务 skill | 功能级——`tools/meta.rs::create_skill` 是唯一的提案入口，MCP 配置 / 定时任务无法走同一道人工审核 |
 
 ## 4. 目标设计
 
@@ -82,6 +83,61 @@ enabled = true
 
 **不做**：`send_message` / `interrupt_agent` / Agent Teams。
 那需要一整套 mailbox + roster 状态机，与「纯 ReAct + 类型化 SubAgent 已足够」的原则冲突。
+
+### 4.3 提案闸门通用化（L5-6）
+
+> 三评把「选择压力 + 闸门」列为自进化七条件的第 6 条，并判定这是 SeekCLI
+> **强于 dsh** 的两处之一——dsh 的四档持久没有升档闸门，保留一个实验要人重写成
+> 正式插件。SeekCLI 的 `proposals/` → `accept`/`reject` 已经是真闸门，
+> 缺的只是「能走这道闸门的资产只有一种」。
+
+#### 4.3.1 闸门必须和生产者一起做
+
+只泛化闸门而不给新类型一个**生产者**，等于又一个没有用户的抽象——
+正是把阶段三十六推后的同一个理由（[design-principles §5.1](design-principles.md#51-三问背后的判据)）。
+
+因此本层同时交付两侧：
+
+- **生产者**：一个 `propose` 工具，模型用它起草任意类型的提案。
+- **闸门**：`/propose list | accept | reject`，`/skill` 保留为别名。
+
+触发链也已经存在了：阶段三十五的 `harness_inspect{what:"mcp"}` 让模型看得见
+「某个 server 不可用 / 某个能力缺失」，`propose` 是它接下来唯一该做的动作。
+**这是「MCP 就是我们的插件格式」这句话第一次真的闭环。**
+
+#### 4.3.2 布局
+
+```text
+~/.seekcli/proposals/<type>/<name>…      ← 新家，按类型分目录
+~/.seekcli/skills/proposals/             ← 旧家，首见时搬过去（可见一行输出）
+```
+
+搬迁风险低：提案本来就是待审的临时物，且是目录 rename。
+
+#### 4.3.3 每类的落地动作与校验
+
+**接受一个坏提案比拒绝一个好提案贵得多**，所以每类都必须能在接受前机械校验。
+
+| 类型 | 落地动作 | 接受前校验 |
+| --- | --- | --- |
+| `skill` | `proposals/skill/<n>` → `skills/<n>` | 目录内有可解析的 `SKILL.md`；重名拒绝 |
+| `mcp` | 向 `config.toml` **追加**一段 `[[mcp]]` | 反序列化成 `McpServerConfig`；server 名不重复 |
+| `task` | 写出 `tasks/<n>/TASK.md` | frontmatter 可解析且正文非空（复用 `split_frontmatter`） |
+
+`mcp` 用**纯追加**而不是改写：`toml 0.8` 是 serde 式的，round-trip 会把用户
+config.toml 里的注释全部抹掉，而「首次运行生成一份带注释的配置」是本项目
+对用户的承诺。TOML 的 array-of-table 允许 `[[mcp]]` 重复出现在文件任何位置，
+所以追加既安全又易于人工复核。
+
+#### 4.3.4 `policy` 类型本轮不做——理由
+
+原计划的第四类是策略规则（allow / deny 模式）。它落地需要**就地修改**
+已存在的 `[security]` 表，而 TOML 不允许同名表重复出现，所以追加法不成立。
+做对它需要 `toml_edit`（新依赖）或把安全配置拆成一个可合并的独立文件——
+那是一个**配置架构决定**，不属于提案闸门的范围。
+
+`skill` / `mcp` / `task` 三类按本节完整交付；布局与命令已按「加一类就是加一个
+分支」设计好，将来补 `policy` 不需要重构。
 
 ## 5. 明确不做
 

@@ -738,13 +738,20 @@ dsh 的教训写在它的 Agent Note 里：模型猜方法签名、猜返回值�
 ### 🟣 阶段三十七：L5 提案闸门通用化
 
 *目标：把已经做对的人工闸门从「只服务 skill」推广到全部可进化资产。*
-*来源：L5-6。设计：待补（`docs/architecture/L5-composition.md`）*
+*来源：L5-6。设计：[L5 §4.3](docs/architecture/L5-composition.md#43-提案闸门通用化l5-6)*
 
 七条件第 6 条（选择压力）是 SeekCLI **强于 dsh** 的两处之一——
 dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶段扩大这个优势面。
 
-- [ ] **37.1 提案类型泛化**：`proposals/` 下按类型分目录，`skill` 之外新增
-      `mcp`（server 配置）、`policy`（策略规则）、`task`（TASK.md）。
+- [ ] **37.1 提案类型泛化**（L5-6）：`~/.seekcli/proposals/<type>/`，`skill` 之外新增
+      `mcp`（server 配置）、`task`（TASK.md）。旧家 `skills/proposals/` 首见时搬过去。
+    - [ ] **同时交付生产者**：一个 `propose` 工具。只泛化闸门而不给新类型生产者，
+          等于又一个没有用户的抽象——与把 36 推后是同一条理由。
+    - [ ] 触发链已就位：`harness_inspect{what:"mcp"}` 让模型看得见能力缺失。
+    - [ ] ⚠️ **`policy` 类型本轮不做**：落地需就地改写已存在的 `[security]` 表，
+          而 `toml 0.8` round-trip 会抹掉用户 config.toml 的注释（「生成一份带注释的
+          配置」是对用户的承诺）。做对它需要 `toml_edit` 新依赖或拆分安全配置文件，
+          那是配置架构决定，不属于闸门范围。详见设计 §4.3.4。
 - [ ] **37.2 `/skill accept|reject` 泛化为 `/propose list|accept|reject`**，
       保留 `/skill` 旧入口为别名——**不破坏既有肌肉记忆**。
 - [ ] **37.3 每类提案有自己的落地校验**：policy 提案接受前必须能解析，
