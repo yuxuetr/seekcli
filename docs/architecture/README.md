@@ -171,4 +171,23 @@ SubAgent 必须类型化；Skill 必须策展；长会话必须有压缩。
 - **不借鉴**：插件框架（Cordis）、profile/bundle 组合、Web UI、多语言 SDK、i18n。
   这些的复杂度收益比在单人 Rust CLI 上不成立。
 
+### 5.1 不借鉴 Cordis 的精确理由
+
+早期的理由写作「太复杂」，这不是一条可判定的判据。读过 vendored 源码
+（`vendor/cordis/src/`，2693 行核心）后可以说得更准：
+
+> **Cordis 的核心不是「插件」或「服务注册表」，是 `Fiber`——一个带可逆副作用的
+> 生命周期状态机（754 行，占核心 28%）。它本质上是在 GC 语言里手工重建
+> RAII + 作用域生命周期，而 Rust 编译器免费提供这个。**
+
+三条核心机制的对位：
+
+| Cordis 机制 | SeekCLI 的答案 |
+| --- | --- |
+| Effect 可逆（注册必带 disposer，卸载等 quiescence） | **已天然拥有**：`Drop` + 所有权 + 作用域。Cordis 需要运行时检查拦截的「清理期注册逃出卸载快照」，Rust 里编不过 |
+| 响应式依赖（`inject` 是订阅，依赖消失则退回 PENDING） | 能做，但需真有第二个实现才值得（判据见 [design-principles §5.1](design-principles.md#51-三问背后的判据)） |
+| 运行期加载新代码 | **Rust 拿不到**（ABI 不稳定、卸载几乎必然 UB）；等价需求由 MCP 的**进程边界**满足——kill 即完整 quiescence |
+
+完整论证见 [2026-09-12 三评 §4](../evaluation/2026-09-12-self-evolution-baseline.md#4-dsh-的架构核心读源码而非读文档的结论)。
+
 判断标准见 [design-principles.md](design-principles.md)。
