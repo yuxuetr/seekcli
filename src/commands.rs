@@ -6,7 +6,6 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use std::io::Write;
 
 use crate::session::{EventPayload, PromptKind};
 use crate::{App, Skill, ThinkingMode, observability};
@@ -572,6 +571,11 @@ impl App {
     let code = &self.last_code_blocks[idx - 1];
     #[cfg(target_os = "macos")]
     {
+      // Scoped to this block: `write_all` is the only use, and at module level
+      // the import is dead on every other platform -- which `-D warnings`
+      // turns into a build failure nobody sees until CI runs on Linux.
+      use std::io::Write;
+
       let mut child = std::process::Command::new("pbcopy")
         .stdin(std::process::Stdio::piped())
         .spawn()?;
