@@ -10,8 +10,9 @@ pub async fn create_skill(args: &Value) -> Result<String> {
   )?;
 
   let home = std::env::var("HOME").context("Could not find HOME directory")?;
-  let skills_root = PathBuf::from(home).join(".seekcli").join("skills");
-  let proposals_dir = skills_root.join("proposals");
+  let seekcli_home = PathBuf::from(home).join(".seekcli");
+  let skills_root = seekcli_home.join("skills");
+  let proposals_dir = seekcli_home.join("proposals").join("skill");
 
   let safe_name = sanitize_name(&skill.name);
 
@@ -62,5 +63,40 @@ pub async fn create_skill(args: &Value) -> Result<String> {
        /skill reject {}   (discard)\n\
      Do not assume the skill is loaded; tell the user a proposal awaits review.",
     skill.name, proposal_dir, skill.name, skill.name
+  ))
+}
+
+/// `propose`: draft a change the user must approve before it takes effect.
+///
+/// The producer half of the gate. Shipping the gate without it would leave the
+/// new kinds with no way to be created — the abstraction-without-a-user trap
+/// (`docs/architecture/L5-composition.md` §4.3.1).
+pub async fn propose(args: &Value) -> Result<String> {
+  let kind_name = args
+    .get("kind")
+    .and_then(Value::as_str)
+    .context("missing 'kind'")?;
+  let Some(kind) = crate::proposals::Kind::parse(kind_name) else {
+    anyhow::bail!(
+      "unknown kind `{}`. Valid kinds: {}.",
+      kind_name,
+      crate::proposals::kind_names()
+    );
+  };
+  let name = args
+    .get("name")
+    .and_then(Value::as_str)
+    .context("missing 'name'")?;
+  let content = args
+    .get("content")
+    .and_then(Value::as_str)
+    .context("missing 'content'")?;
+
+  let store = crate::proposals::ProposalStore::new()?;
+  let path = store.draft(kind, name, content)?;
+  Ok(format!(
+    "Drafted {kind} proposal `{name}` at {}. It does nothing until the user runs \
+     `/propose accept {kind} {name}`; tell them it is waiting and what it would change.",
+    path.display()
   ))
 }

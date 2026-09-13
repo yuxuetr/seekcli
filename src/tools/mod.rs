@@ -138,6 +138,7 @@ impl ToolDispatcher {
       "job_output" => jobs::job_output(args).await,
       "job_kill" => jobs::job_kill(args).await,
       "create_skill" => meta::create_skill(args).await,
+      "propose" => meta::propose(args).await,
       "ask_user_question" => ask::ask_user_question(args).await,
       _ => anyhow::bail!("{}", registry::unknown_tool_message(name)),
     }
@@ -151,6 +152,22 @@ mod tests {
   // Holding the guard across the await is the point: the global policy mode
   // must stay set for the whole call. Safe here because only tests take this
   // lock and the test runtime cannot deadlock on it.
+  /// The tool's own refusal path, through the real pipeline.
+  ///
+  /// Deliberately the branch that bails before touching the filesystem: the
+  /// store's behaviour is covered against an injected home in
+  /// `proposals::tests`, and `ProposalStore::at` exists so those tests need no
+  /// `HOME` mutation — which edition 2024 made `unsafe` anyway.
+  #[tokio::test]
+  async fn proposing_an_unknown_kind_names_the_valid_ones() {
+    let out = ToolDispatcher::new()
+      .execute("propose", r#"{"kind":"plugin","name":"x","content":"y"}"#)
+      .await;
+    assert_eq!(out.kind, ToolKind::Failed, "{}", out.render());
+    assert!(out.render().contains("mcp"), "{}", out.render());
+    assert!(out.render().contains("task"), "{}", out.render());
+  }
+
   #[allow(clippy::await_holding_lock)]
   #[tokio::test]
   async fn restricted_mode_denial_is_reported_to_the_model_not_raised_as_an_error() {

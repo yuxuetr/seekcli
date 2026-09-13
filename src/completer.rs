@@ -21,11 +21,15 @@ const SLASH_COMMANDS: &[&str] = &[
   "/thinking",
   "/plan",
   "/skill",
+  "/propose",
   "/load",
 ];
 
 /// Subcommands for `/skill` that aren't skill names.
 const SKILL_SUBCOMMANDS: &[&str] = &["list", "proposals", "migrate", "accept", "reject"];
+/// `/propose` takes a verb, then a kind, then a name.
+const PROPOSE_SUBCOMMANDS: &[&str] = &["list", "accept", "reject"];
+const PROPOSAL_KINDS: &[&str] = &["skill", "mcp", "task"];
 
 const MODEL_VARIANTS: &[&str] = &["flash", "pro"];
 const THINKING_MODES: &[&str] = &["n", "h", "m"];
@@ -39,6 +43,29 @@ pub(crate) struct CmdCompleter {
 impl CmdCompleter {
   fn active_skill_names(&self) -> Vec<String> {
     list_skill_names(&self.skills_dir, true)
+  }
+
+  /// Names awaiting review for one kind. Re-scanned per Tab press, like every
+  /// other listing here, so a proposal drafted this turn completes immediately.
+  fn pending_names(&self, kind: &str) -> Vec<String> {
+    let Some(home) = self.proposals_dir.parent().and_then(Path::parent) else {
+      return Vec::new();
+    };
+    let dir = home.join("proposals").join(kind);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+      return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+      .flatten()
+      .filter_map(|e| {
+        e.path()
+          .file_stem()
+          .and_then(|s| s.to_str())
+          .map(str::to_string)
+      })
+      .collect();
+    out.sort();
+    out
   }
 
   fn proposal_names(&self) -> Vec<String> {
@@ -103,6 +130,49 @@ impl Completer for CmdCompleter {
     _ctx: &rustyline::Context<'_>,
   ) -> rustyline::Result<(usize, Vec<Pair>)> {
     let prefix = &line[..pos.min(line.len())];
+
+    // /propose <verb> <kind> <name>
+    if let Some(rest) = prefix.strip_prefix("/propose ") {
+      let after_space = pos - rest.len();
+      for verb in ["accept ", "reject "] {
+        if let Some(tail) = rest.strip_prefix(verb) {
+          let start = after_space + verb.len();
+          // Still on the kind token: offer kinds. Past it: offer names.
+          return match tail.split_once(' ') {
+            None => Ok((
+              start,
+              pairs(
+                PROPOSAL_KINDS
+                  .iter()
+                  .copied()
+                  .filter(|k| k.starts_with(tail)),
+              ),
+            )),
+            Some((kind, name_prefix)) => {
+              let start = start + kind.len() + 1;
+              Ok((
+                start,
+                pairs(
+                  self
+                    .pending_names(kind)
+                    .into_iter()
+                    .filter(|n| n.starts_with(name_prefix)),
+                ),
+              ))
+            }
+          };
+        }
+      }
+      return Ok((
+        after_space,
+        pairs(
+          PROPOSE_SUBCOMMANDS
+            .iter()
+            .copied()
+            .filter(|s| s.starts_with(rest)),
+        ),
+      ));
+    }
 
     // /skill <subcommand or name>
     if let Some(rest) = prefix.strip_prefix("/skill ") {

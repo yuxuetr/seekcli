@@ -146,7 +146,8 @@ fn skills(snap: &Snapshot) -> String {
     }
   ));
   // Proposals are listed because the model writes them: seeing one already
-  // pending is what stops it from drafting the same skill twice.
+  // pending is what stops it from drafting the same thing twice. Every kind, so
+  // a pending MCP server shows up here too.
   out.push_str(&format!(
     "awaiting the user's review: {}\n",
     if snap.proposals.is_empty() {

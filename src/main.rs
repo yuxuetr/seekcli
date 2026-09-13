@@ -19,6 +19,7 @@ mod engine;
 mod history;
 mod mcp;
 mod observability;
+mod proposals;
 mod session;
 mod skills;
 mod subagents;

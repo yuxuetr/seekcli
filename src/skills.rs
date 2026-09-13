@@ -46,7 +46,12 @@ impl SkillManager {
   pub fn new() -> Result<Self> {
     let home = std::env::var("HOME").context("Could not find HOME directory")?;
     let skills_dir = PathBuf::from(&home).join(".seekcli").join("skills");
-    let proposals_dir = skills_dir.join("proposals");
+    // Shared with every other proposable asset since stage 37; `ProposalStore`
+    // owns the directory and adopts anything left in the old location.
+    let proposals_dir = PathBuf::from(&home)
+      .join(".seekcli")
+      .join("proposals")
+      .join("skill");
     if !skills_dir.exists() {
       fs::create_dir_all(&skills_dir)?;
     }
@@ -79,56 +84,9 @@ impl SkillManager {
     Self::read_skill_dir(&self.proposals_dir, false)
   }
 
-  pub fn accept_proposal(&self, name: &str) -> Result<()> {
-    let safe = sanitize_name(name);
-    let src_dir = self.proposals_dir.join(&safe);
-    let src_json = self.proposals_dir.join(format!("{}.json", safe));
-    let dst_dir = self.skills_dir.join(&safe);
-    let dst_json = self.skills_dir.join(format!("{}.json", safe));
-
-    if dst_dir.exists() || dst_json.exists() {
-      anyhow::bail!(
-        "A skill named '{}' already exists. Reject the proposal or rename it first.",
-        name
-      );
-    }
-
-    if src_dir.is_dir() {
-      fs::rename(&src_dir, &dst_dir).with_context(|| {
-        format!(
-          "Failed to promote proposal '{}' (dir) to active skill",
-          name
-        )
-      })?;
-    } else if src_json.exists() {
-      fs::rename(&src_json, &dst_json).with_context(|| {
-        format!(
-          "Failed to promote proposal '{}' (json) to active skill",
-          name
-        )
-      })?;
-    } else {
-      anyhow::bail!("Proposal '{}' not found", name);
-    }
-    Ok(())
-  }
-
-  pub fn reject_proposal(&self, name: &str) -> Result<()> {
-    let safe = sanitize_name(name);
-    let src_dir = self.proposals_dir.join(&safe);
-    let src_json = self.proposals_dir.join(format!("{}.json", safe));
-
-    if src_dir.is_dir() {
-      fs::remove_dir_all(&src_dir)
-        .with_context(|| format!("Failed to delete proposal directory '{}'", name))?;
-    } else if src_json.exists() {
-      fs::remove_file(&src_json)
-        .with_context(|| format!("Failed to delete proposal file '{}'", name))?;
-    } else {
-      anyhow::bail!("Proposal '{}' not found", name);
-    }
-    Ok(())
-  }
+  // `accept_proposal` / `reject_proposal` moved to `crate::proposals`: the
+  // gate now serves every proposable asset, and two implementations over the
+  // same directory would drift (`docs/architecture/L5-composition.md` §4.3).
 
   /// Convert every legacy `<name>.json` skill in `skills_dir` to a
   /// `<name>/SKILL.md` directory. The original `.json` is renamed to

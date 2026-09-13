@@ -102,7 +102,7 @@ pub fn is_mutating_with(tool: &str, declared_read_only: Option<bool>) -> bool {
   }
   matches!(
     tool,
-    "write_file" | "edit_file" | "run_shell" | "create_skill"
+    "write_file" | "edit_file" | "run_shell" | "create_skill" | "propose"
   )
 }
 

@@ -117,6 +117,32 @@ pub fn system_tools() -> Vec<Tool> {
       }),
     ),
     make_tool(
+      "propose",
+      "Draft a change for the user to approve: a new MCP server (`mcp`) or a \
+       scheduled task (`task`). Nothing takes effect until the user accepts it. \
+       Use this when a capability you need is missing — check \
+       harness_inspect{what:\"mcp\"} first. For a new skill use create_skill instead.",
+      json!({
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["mcp", "task"],
+            "description": "What the proposal would become"
+          },
+          "name": { "type": "string", "description": "Short identifier, e.g. filesystem" },
+          "description": { "type": "string", "description": "One line: why this is worth adding" },
+          "content": {
+            "type": "string",
+            "description": "For `mcp`: the TOML body of one [[mcp]] entry without the \
+              name line, e.g. `command = \"npx\"` plus `args = [...]`. For `task`: the \
+              whole TASK.md, YAML frontmatter then the prompt body."
+          }
+        },
+        "required": ["kind", "name", "description", "content"]
+      }),
+    ),
+    make_tool(
       "harness_inspect",
       "Inspect your own runtime: the tool surface, the policy rules actually in \
        force, skills, MCP server status, and session counters. Use it when a \

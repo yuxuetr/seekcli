@@ -30,7 +30,7 @@
 | L5-3 | 无插件 / profile 组合机制 | 取舍级，见 §5 |
 | L5-4 | 无 hooks | 取舍级 |
 | L5-5 | 无 workflow 编排 | 取舍级 |
-| ⚠️ L5-6 | 提案闸门只服务 skill | 功能级——`tools/meta.rs::create_skill` 是唯一的提案入口，MCP 配置 / 定时任务无法走同一道人工审核 |
+| ~~L5-6~~ | ~~提案闸门只服务 skill~~ | **阶段三十七已落地**：`proposals/{skill,mcp,task}` + `propose` 工具 + `/propose` 闸门。真实验证——起草 → `/propose accept mcp files` → config.toml 追加且原注释一字未动 → 重启后该 server 真的被加载并尝试连接 |
 
 ## 4. 目标设计
 

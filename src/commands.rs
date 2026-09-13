@@ -12,6 +12,27 @@ use crate::session::{EventPayload, PromptKind};
 use crate::{App, Skill, ThinkingMode, observability};
 
 impl App {
+  /// Accept a proposal, then re-read anything the acceptance changed.
+  ///
+  /// A landed skill is visible immediately; a landed MCP server is not, because
+  /// servers are connected once at startup so the tool set cannot change under
+  /// prompt caching mid-session. The note says so rather than leaving the user
+  /// to wonder why the new tools are absent.
+  fn gate_accept(&self, kind: crate::proposals::Kind, name: &str) -> anyhow::Result<String> {
+    crate::proposals::ProposalStore::new()?.accept(kind, name)
+  }
+
+  fn gate_reject(&self, kind: crate::proposals::Kind, name: &str) -> anyhow::Result<String> {
+    crate::proposals::ProposalStore::new()?.reject(kind, name)
+  }
+
+  fn report_gate(outcome: anyhow::Result<String>) {
+    match outcome {
+      Ok(note) => println!("{} {}", "Success:".green(), note),
+      Err(e) => println!("{} {:#}", "Error:".red(), e),
+    }
+  }
+
   fn print_help(&self) {
     println!("{}", "\nAvailable Commands:".bold().yellow());
     println!("  /model [flash|pro]      Switch DeepSeek model");
@@ -23,6 +44,9 @@ impl App {
     println!("  /skill proposals        List pending skill proposals from the agent");
     println!("  /skill accept <name>    Promote a proposal to active skill");
     println!("  /skill reject <name>    Discard a skill proposal");
+    println!("  /propose list           Everything the agent drafted, awaiting your review");
+    println!("  /propose accept <kind> <name>  Land it (kinds: skill, mcp, task)");
+    println!("  /propose reject <kind> <name>  Discard it");
     println!("  /skill migrate          Convert legacy <name>.json skills to <name>/SKILL.md");
     println!("  /copy [index]           Copy code block from last response");
     println!("  /clear                  Reset conversation");
@@ -102,23 +126,15 @@ impl App {
             }
           }
         }
+        // Kept as the name muscle memory reaches for; both route to the one
+        // gate in `crate::proposals` so there is no second implementation.
         Some("accept") => match parts.get(2) {
           None => println!("{} Usage: /skill accept <name>", "Info:".blue()),
-          Some(name) => match self.skill_manager.accept_proposal(name) {
-            Ok(()) => println!(
-              "{} Promoted '{}' to active skill.",
-              "Success:".green(),
-              name
-            ),
-            Err(e) => println!("{} {}", "Error:".red(), e),
-          },
+          Some(name) => Self::report_gate(self.gate_accept(crate::proposals::Kind::Skill, name)),
         },
         Some("reject") => match parts.get(2) {
           None => println!("{} Usage: /skill reject <name>", "Info:".blue()),
-          Some(name) => match self.skill_manager.reject_proposal(name) {
-            Ok(()) => println!("{} Discarded proposal '{}'.", "Success:".green(), name),
-            Err(e) => println!("{} {}", "Error:".red(), e),
-          },
+          Some(name) => Self::report_gate(self.gate_reject(crate::proposals::Kind::Skill, name)),
         },
         Some("migrate") => match self.skill_manager.migrate_legacy() {
           Err(e) => println!("{} migrate failed: {}", "Error:".red(), e),
@@ -250,6 +266,57 @@ impl App {
           for (name, server) in mcp {
             println!("  {}  {}", name, format!("[{}]", server).dimmed());
           }
+        }
+      }
+      "/propose" => {
+        use crate::proposals::Kind;
+        match (
+          parts.get(1).copied(),
+          parts.get(2).copied(),
+          parts.get(3).copied(),
+        ) {
+          (None, ..) | (Some("list"), ..) => {
+            let store = crate::proposals::ProposalStore::new()?;
+            let pending = store.list();
+            if pending.is_empty() {
+              println!("{} Nothing awaiting review.", "Info:".blue());
+            } else {
+              println!(
+                "Awaiting your review (run {} or {}):",
+                "/propose accept <kind> <name>".green(),
+                "/propose reject <kind> <name>".yellow()
+              );
+              for p in pending {
+                let note = match p.validate() {
+                  Ok(()) => "ok".green(),
+                  // Surfaced here rather than at accept time: a proposal that
+                  // cannot land is worth knowing about while reviewing.
+                  Err(e) => format!("cannot land: {e}").red(),
+                };
+                println!(
+                  "- {} {} — {}",
+                  p.kind.to_string().cyan(),
+                  p.name.bold(),
+                  note
+                );
+              }
+            }
+          }
+          (Some(verb @ ("accept" | "reject")), Some(kind), Some(name)) => match Kind::parse(kind) {
+            None => println!(
+              "{} unknown kind '{}'. Valid kinds: {}.",
+              "Error:".red(),
+              kind,
+              crate::proposals::kind_names()
+            ),
+            Some(kind) if verb == "accept" => Self::report_gate(self.gate_accept(kind, name)),
+            Some(kind) => Self::report_gate(self.gate_reject(kind, name)),
+          },
+          _ => println!(
+            "{} Usage: /propose list | /propose accept <kind> <name> | /propose reject <kind> <name>   (kinds: {})",
+            "Info:".blue(),
+            crate::proposals::kind_names()
+          ),
         }
       }
       "/history" => {

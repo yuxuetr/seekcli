@@ -743,20 +743,34 @@ dsh 的教训写在它的 Agent Note 里：模型猜方法签名、猜返回值�
 七条件第 6 条（选择压力）是 SeekCLI **强于 dsh** 的两处之一——
 dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶段扩大这个优势面。
 
-- [ ] **37.1 提案类型泛化**（L5-6）：`~/.seekcli/proposals/<type>/`，`skill` 之外新增
-      `mcp`（server 配置）、`task`（TASK.md）。旧家 `skills/proposals/` 首见时搬过去。
-    - [ ] **同时交付生产者**：一个 `propose` 工具。只泛化闸门而不给新类型生产者，
+- [x] **37.1 提案类型泛化**（L5-6）：`~/.seekcli/proposals/<type>/`，`skill` 之外新增
+      `mcp`（server 配置）、`task`（TASK.md）。旧家 `skills/proposals/` 首见时搬过去
+      （目录 rename + 一行可见输出；提案本来就是待审的临时物，风险低）。
+    - [x] **同时交付生产者**：`propose` 工具。只泛化闸门而不给新类型生产者，
           等于又一个没有用户的抽象——与把 36 推后是同一条理由。
-    - [ ] 触发链已就位：`harness_inspect{what:"mcp"}` 让模型看得见能力缺失。
-    - [ ] ⚠️ **`policy` 类型本轮不做**：落地需就地改写已存在的 `[security]` 表，
+    - [x] 触发链已就位：`harness_inspect{what:"mcp"}` 让模型看得见能力缺失，
+          `harness_inspect{what:"skills"}` 现在列出**全部类型**的待审提案，
+          所以模型不会把上一轮提过的再提一遍。
+    - [x] `propose` 刻意**不接 skill**：把 create_skill 的结构化字段压成一个
+          `content` 字符串，等于逼模型手写 SKILL.md frontmatter，是人机工效的退步。
+          两个生产者，一道闸门。
+    - [x] ⚠️ **`policy` 类型本轮不做**：落地需就地改写已存在的 `[security]` 表，
           而 `toml 0.8` round-trip 会抹掉用户 config.toml 的注释（「生成一份带注释的
           配置」是对用户的承诺）。做对它需要 `toml_edit` 新依赖或拆分安全配置文件，
           那是配置架构决定，不属于闸门范围。详见设计 §4.3.4。
-- [ ] **37.2 `/skill accept|reject` 泛化为 `/propose list|accept|reject`**，
-      保留 `/skill` 旧入口为别名——**不破坏既有肌肉记忆**。
-- [ ] **37.3 每类提案有自己的落地校验**：policy 提案接受前必须能解析，
-      mcp 提案接受前必须能启动一次。**接受一个坏提案比拒绝一个好提案贵得多。**
-- [ ] **37.4 补全 completer**：`src/completer.rs` 已按 Tab 重扫目录，跟着泛化。
+- [x] **37.2 `/propose list|accept|reject <kind> <name>`**，`/skill accept|reject`
+      保留为别名——**不破坏既有肌肉记忆**；两者都转发到同一个 `ProposalStore`，
+      `SkillManager::{accept,reject}_proposal` 已删除，**不留第二个实现**。
+    - [x] `/propose list` 顺手对每条跑一次校验并标出「ok」或「cannot land: …」——
+          不能落地这件事值得在审阅时就知道，而不是按下 accept 才发现。
+- [x] **37.3 每类提案有自己的落地校验**：**接受一个坏提案比拒绝一个好提案贵得多**。
+      skill → `SKILL.md` frontmatter 可解析；mcp → **反序列化成 `McpServerConfig`**
+      （校验用的就是将来加载它的那段代码）；task → frontmatter 可解析且正文非空。
+    - [x] mcp 落地用**纯追加**而非改写，单测断言原文件注释一字不动且整体仍可解析。
+    - [x] 起草时就校验一次：当轮能被模型自己改掉的错，不必等到用户审阅。
+          草稿**保留**在盘上，让模型迭代而不是从头再来。
+- [x] **37.4 补全 completer**：`/propose <verb> <kind> <name>` 三级补全，
+      名字按 Tab 重扫对应类型目录。
 
 **验收**：写一个 MCP server 配置提案 → `accept` → 重启后工具面真的多出来，全程不改 Rust。
 

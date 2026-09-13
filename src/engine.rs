@@ -124,10 +124,16 @@ impl App {
       .load_skills()
       .map(|s| s.into_iter().map(|k| k.name).collect())
       .unwrap_or_default();
-    let proposals = self
-      .skill_manager
-      .list_proposals()
-      .map(|s| s.into_iter().map(|k| k.name).collect())
+    // Every kind, not just skills: the model needs to see that the MCP server
+    // it proposed last turn is still awaiting review, or it proposes it again.
+    let proposals = crate::proposals::ProposalStore::new()
+      .map(|store| {
+        store
+          .list()
+          .iter()
+          .map(|p| format!("{} {}", p.kind, p.name))
+          .collect()
+      })
       .unwrap_or_default();
 
     let compactions = self
