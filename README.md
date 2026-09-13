@@ -334,7 +334,7 @@ DeepSeek V4 补强能力的 skill 模板：
 
 | Skill | 能力 | 依赖环境变量 | 系统依赖 |
 | ----- | ---- | ------------ | -------- |
-| `vision` | 调 StepFun VLM 描述剪贴板图 / 任意图片 | `STEP_API_KEY` | macOS osascript、`jq`、`base64`、`file` |
+| `vision` ⚠️ **已过时** | 调 StepFun VLM 描述剪贴板图 / 任意图片。`deepseek-flash` 现在自己能看图（2026-09-13 实测），但图像还进不了请求（缺口 L4-8），所以它暂时仍是唯一退路 | `STEP_API_KEY` | macOS osascript、`jq`、`base64`、`file` |
 | `doc_parser` | 调 MinerU 把 PDF/Docx/PPTX 解析成 Markdown | `MINERU_API_KEY` | `jq`、`unzip` |
 
 安装到自己的 skill 目录：

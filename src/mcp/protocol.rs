@@ -239,7 +239,12 @@ pub fn flatten_content(result: &Value) -> String {
           parts.push(t.to_string());
         }
       }
-      // Images and embedded resources cannot be shown to a text-only model.
+      // Dropped because *our* `Message` carries one string, not because the
+      // model cannot read them: `deepseek-flash` does vision (verified
+      // 2026-09-13, `docs/architecture/L0-llm-substrate.md` §4.5.2). The
+      // blocker is multipart content — L4-8 — and pointing the comment at the
+      // model instead would send the next reader looking in the wrong place.
+      //
       // Naming them beats dropping them silently, which would look like the
       // tool returned nothing.
       Some(other) => parts.push(format!("[{} content omitted]", other)),

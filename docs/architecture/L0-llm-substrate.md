@@ -30,7 +30,7 @@
 | ~~L0-2~~ | ~~无重试 / 退避~~ | **阶段二十二已落地** |
 | ~~L0-3~~ | ~~无请求超时 / 流空闲超时~~ | **阶段二十二已落地** |
 | ~~L0-4~~ | ~~无 token 计数~~ | **阶段二十六 26.2 已落地**（`api/tokens.rs`） |
-| ⚠️ L0-5 | 默认模型名过期；「DeepSeek 是纯文本模型」这条前提已失效 | `config.rs:341` 默认 `deepseek-v4-flash`（实测为别名）；`skills/vision/SKILL.md` 开篇断言模型不能看图，而实测它能 |
+| ~~L0-5~~ | ~~默认模型名过期；「DeepSeek 是纯文本模型」这条前提已失效~~ | **阶段四十已落地**：默认改 `deepseek-flash`（实跑新生成的配置验证）；`examples/skills/vision` 与 README 标为过时；`mcp/protocol.rs` 的归因从「模型是纯文本」改为「我们的 Message 承载不了多段内容」 |
 
 ## 4. 目标设计
 
@@ -47,7 +47,7 @@ name     = "deepseek-flash"
 wire     = "openai"                 # openai | anthropic
 base_url = "https://api.deepseek.com"
 api_key  = "env:DEEPSEEK_API_KEY"   # env:VAR | file:PATH
-model    = "deepseek-v4-flash"
+model    = "deepseek-flash"
 ```
 
 - `api_key` 用 `env:` / `file:` 前缀，为将来接 keychain 留位置，**不引入新依赖**。

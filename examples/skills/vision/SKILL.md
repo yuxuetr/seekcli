@@ -1,13 +1,28 @@
 ---
 name: vision
-description: 通过外部 VLM (StepFun) 给 DeepSeek V4 补充图像理解能力
+description: "[已过时] 曾用外部 VLM (StepFun) 补图像理解；deepseek-flash 现在自己能看图"
 version: "1"
 ---
 
-# Vision Skill
+# Vision Skill（已过时）
 
-DeepSeek V4 是纯文本模型，本身不能"看"图像。激活本 skill 后，遇到需要
-理解图像的任务时，按以下流程执行：
+> ⚠️ **这个 skill 的前提已经不成立了。**
+>
+> 它原本的开篇是「DeepSeek V4 是纯文本模型，本身不能"看"图像」。
+> 2026-09-13 实测：`deepseek-flash` **自己就能看图**——一张 64×64 左蓝右黄的
+> PNG，它答 `Blue on the left, yellow on the right.`
+> 验证方法见 [L0 §4.5.2](../../../docs/architecture/L0-llm-substrate.md)。
+>
+> **所以激活它只会让 agent 白跑一趟外部 VLM**，多花一次 StepFun 调用、
+> 多等一个来回，换来一段比原图信息量更少的文字描述。
+>
+> 让图像真的进入请求需要多段内容支持（缺口 L4-8，架构级，见
+> [路线图阶段四十一](../../../TODOs.md)）。**在那之前图像还进不了上下文**，
+> 所以这个 skill 仍是当下唯一可用的退路——保留它是为此，不是因为它还正确。
+>
+> 阶段四十一落地后应当删除本目录。
+
+激活本 skill 后，遇到需要理解图像的任务时，按以下流程执行：
 
 ## 工作流
 

@@ -854,7 +854,7 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 
 ---
 
-### 🟤 阶段四十：L0 纠正已变假的前提
+### ✅ 阶段四十：L0 纠正已变假的前提
 
 *目标：让项目不再对 agent 和用户陈述假话。*
 *来源：L0-5。设计：[L0 §4.5](docs/architecture/L0-llm-substrate.md#45-模型能力是实测的不是写死的l0-5)*
@@ -862,24 +862,32 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 不动任何 schema，纯粹清理。**不等阶段四十一**：一条会误导 agent 的陈述，
 留着的成本是每天都在付的，而纠正它不需要等任何架构决定。
 
-- [ ] **40.1 默认模型名改为 `deepseek-flash`**（L0-5）：`/v1/models` 只报
+- [x] **40.1 默认模型名改为 `deepseek-flash`**（L0-5）：`/v1/models` 只报
       `deepseek-flash` 与 `deepseek-v4-pro`；`deepseek-v4-flash` 仍是别名，
       所以这不是故障修复，是**不要在默认配置里写一个过期名字**。
-- [ ] **40.2 `vision` skill 标记为过时**：它开篇写「DeepSeek V4 是纯文本模型，
+    - [x] 真实验证：干净 HOME 跑 `-p`，新生成的 config.toml 写的是
+          `flash_model = "deepseek-flash"`，调用成功。
+- [x] **40.2 `vision` skill 标记为过时**：它开篇写「DeepSeek V4 是纯文本模型，
       本身不能"看"图像」——前提已假。整个 skill（`clip_to_png.sh` +
       `vlm_describe.sh` + StepFun）是为一个不存在的限制做的绕行，
       **现在让 agent 白跑一趟外部 VLM**。
-    - [ ] 不直接删：它在用户的 `~/.seekcli/skills/` 下，删用户的文件不是我的权限。
-          改为在 SKILL.md 顶部写明已过时与原因，并在 `/skill list` 里可见。
-- [ ] **40.3 `mcp/protocol.rs` 的理由改对**：注释写的是「cannot be shown to a
+    - [x] **改的是仓库里那份**（`examples/skills/vision/`）+ README 的表格行。
+          原计划写的是「改用户 `~/.seekcli/` 下那份」——查过才发现仓库自己就发这个
+          skill，README 还教人 `cp -r` 安装。**改源头比改用户的副本对**，
+          用户那份是他们的数据，不动。
+    - [x] 没有直接删：图像真进上下文要等 L4-8，在那之前它仍是唯一退路。
+          SKILL.md 里写明「保留它是为此，不是因为它还正确」，并注明
+          阶段四十一落地后应当删除。
+- [x] **40.3 `mcp/protocol.rs` 的理由改对**：注释写的是「cannot be shown to a
       text-only model」，真实原因现在是**我们的 `Message` 还承载不了多段内容**。
       行为不变（仍 `[image content omitted]`），但**理由必须指向真正的阻塞点**，
-      否则下一个读者会以为是模型的限制而不去碰它。指向 L4-8。
-- [ ] **40.4 实测脚本留痕**：把验证模型能力的那几条 curl 记进 L0 层文档，
-      让「某模型能不能做某事」下次仍然是实测而不是记忆。
+      否则下一个读者会以为是模型的限制而不去碰它。已指向 L4-8。
+- [x] **40.4 实测脚本留痕**：三条 curl 记进 [L0 §4.5.2](docs/architecture/L0-llm-substrate.md#452-实测方法复查时照跑)，
+      连同那个陷阱——纯红小图会让模型从「single color square」猜中，
+      必须用猜不出来的双色分割才是有效实验。
 
-**验收**：`cargo test` 全绿；`/skill list` 能看到 vision 已过时；
-`grep -rn "text-only" src/` 不再出现把模型当限制来源的表述。
+**验收**：✅ 242 测试全绿；`grep -rn "text-only" src/` 已无命中；
+仓库发的 vision skill 与 README 都标了过时与原因。
 
 ---
 

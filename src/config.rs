@@ -338,7 +338,7 @@ impl Default for Config {
   fn default() -> Self {
     Self {
       brain: BrainConfig {
-        flash_model: "deepseek-v4-flash".to_string(),
+        flash_model: "deepseek-flash".to_string(),
         pro_model: "deepseek-v4-pro".to_string(),
         provider: default_provider(),
       },
