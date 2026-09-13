@@ -678,12 +678,12 @@ A 口径的 recovery 质量可由 eval 前后对比证明。
 ### 🟣 阶段三十五：L7 自描述（`harness_inspect`）
 
 *目标：模型能查询自己的运行时，而不是靠盲试推断边界。*
-*来源：L7-6。设计：待补（`docs/architecture/L7-observability.md`）*
+*来源：L7-6。设计：[L7 §4.5](docs/architecture/L7-observability.md#45-自描述-harness_inspectl7-6)*
 
 dsh 的教训写在它的 Agent Note 里：模型猜方法签名、猜返回值形状要花很多步盲试。
 **自描述的收益先于自修改兑现**——即使永远不做自修改，这一条也值。
 
-- [ ] **35.1 只读工具 `harness_inspect`**，一个 `what` 参数分区返回：
+- [ ] **35.1 只读工具 `harness_inspect`**（L7-6），一个 `what` 参数分区返回：
     - [ ] `tools`：当前工具面 + schema（含 MCP 来源标注）
     - [ ] `policy`：当前 mode 与**生效中的路径 / 命令规则**
     - [ ] `skills`：活跃 skill 与待审提案
@@ -748,7 +748,7 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 > 单人本地 CLI 的 eval **可以在接受提案的那一刻当场跑完**——
 > 体量劣势反过来变成结构优势。
 
-- [ ] **38.1 `/propose accept` 前跑相关 eval 套件**，输出 before/after 对照。
+- [ ] **38.1 `/propose accept` 前跑相关 eval 套件**（L7-7），输出 before/after 对照。
 - [ ] **38.2 提案可声明关联套件**；未声明则跑默认冒烟集。
       **默认必须是「跑一点」而不是「不跑」**——默认不跑等于这个功能不存在。
 - [ ] **38.3 回归即拒绝**：任一 Fail-to-Pass 任务由通过变失败则拒绝接受，
@@ -765,7 +765,7 @@ dsh 的四档持久没有升档闸门，完全交回人工开发流程。本阶�
 *目标：让 SeekCLI 成为可被外部 RL / 进化流程消费的环境。*
 *来源：L7-8。依赖：三十六。设计：待补（`docs/architecture/L7-observability.md`）*
 
-- [ ] **39.1 `--bench` 导出标准 trajectory**：`(state, action, reward)` 序列，
+- [ ] **39.1 `--bench` 导出标准 trajectory**（L7-8）：`(state, action, reward)` 序列，
       reward 取 Fail-to-Pass 的退出码判定（含反向断言的取反语义）。
 - [ ] **39.2 走 36.1 的 `SessionStore` 缝**——这是验证那条缝开对了的第一个真实用户。
 - [ ] **39.3 明确不做训练端**：只产出数据，不引入任何训练依赖。

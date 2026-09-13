@@ -28,6 +28,9 @@
 | L7-3 | 无快照回归 | 无 | 提示词 / 流程变更无差异可看 |
 | ~~L7-4~~ | ~~覆盖率门禁形同虚设~~ | **阶段二十 20.5 已落地**，棘轮 45 → 60 | — |
 | L7-5 | 无 OTel 导出 | 取舍级 | |
+| ⚠️ L7-6 | 无自描述：模型看不到自己的运行时 | 全 crate 无 inspect 类工具；工具面、生效策略、skill、MCP 状态对模型均不可查 | 被拒后只能盲猜原因 |
+| L7-7 | 评价信号不回灌 | `bench.rs` 与 `skills.rs::accept_proposal` 无调用关系 | 进化无选择压力 |
+| L7-8 | trajectory 不可导出 | `--bench` 只产出聚合分数 | 外部 RL / 进化流程无法消费 |
 
 > L7-2 是 L1 / L2 / L4 三处重构的**前置条件**。
 > 没有可回放的测试，把 440 行主循环拆成四个阶段函数是在裸奔。
@@ -106,6 +109,49 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
 - ⚠️ 顺带修掉一个真实缺陷：**headless 下 tracing 完全不工作**。`run_headless` 从不调用
   `start_run` / `flush`，于是 `-p` / `--bench` / `--run-task` 一条 trace 都不产生——
   而那恰恰是没人盯着终端、最需要 trace 的模式。
+
+### 4.5 自描述 `harness_inspect`（L7-6）
+
+> **原则**：自描述的收益先于自修改兑现。dsh 的 Agent Note 点明过代价——
+> 模型猜方法签名、猜返回值形状要花很多步盲试。即使永远不做自修改，这条也值。
+
+#### 4.5.1 一个只读工具，五个分区
+
+| `what` | 内容 | 数据来源 |
+| --- | --- | --- |
+| `tools` | 当前工具面：名字 + 调用签名 + 来源（内置 / MCP / skill） | 循环里的 `effective_tools` |
+| `policy` | 当前 mode + **生效中的**只读命令表、会变更状态的子命令表、无条件拒绝类别 | `tools/policy.rs` 的常量本身 |
+| `skills` | 活跃 skill 与待审提案 | `SkillManager` |
+| `mcp` | 各 server 状态与**失败原因** | 34.2 落地的 `McpRegistry.failures` |
+| `session` | 事件数、压缩次数、token 估算 | 会话事件日志 |
+
+#### 4.5.2 不得成为第二份会漂移的事实来源
+
+`policy` 分区必须从 `policy.rs` 的**同一份常量**渲染，不得另写一段描述。
+手写描述会漂移，而漂移时模型信的是错的那一份——
+那比不提供自描述更糟，和 §4.6.6 建议下限是同一条道理。
+
+为此 `policy.rs` 暴露只读访问器而不是把常量复制一份。
+
+#### 4.5.3 为什么走 `execute_with` 而不是引擎分支
+
+`invoke_agent` / `load_skill` 绕过 `ToolDispatcher`，理由是前者重入循环、
+后者改引擎状态（[L1 §4.1](L1-engine.md)）。**`harness_inspect` 不属于这一类**：
+它只读，没有重入，没有状态变更。
+
+因此它走 `execute_with`——和 MCP 工具同一条路——保住「没有任何工具能绕过
+策略门、deadline 与审计」这个不变量。代价是引擎要先把它需要的 App 状态
+装成一个纯数据 `Snapshot` 再交给渲染函数。
+
+这个分层顺带让渲染**纯函数可测**，与 `bench.rs`「owns the pure, testable pieces」
+同一手法：不需要构造 `App` 就能断言输出。
+
+#### 4.5.4 验收
+
+- 模型在 `--read-only` 下被拒一次后，能用 `harness_inspect{what:"policy"}`
+  自行查出哪些命令可用，而不是盲试。
+- `policy` 分区的内容与 `policy.rs` 常量同源——改常量则输出随之变化，有单测守。
+- 归入 `is_parallel_readonly`：它是纯读，没有理由阻塞并发批次。
 
 ## 5. 明确不做
 
