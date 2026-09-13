@@ -1,6 +1,6 @@
 [package]
 name = "seekcli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "A local CLI coding agent: DeepSeek + tools + a harness (ReAct loop, policy gate, session event log, MCP)."
