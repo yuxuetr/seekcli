@@ -610,9 +610,29 @@ CI 门禁棘轮从 45 上调到 60。
 >
 > 修复见 `1ac1eea`（import 收进它需要的那个块）。全仓仅此一处平台门控代码。
 >
-> ⏳ **仍待执行**：让 `v0.2.0` 指向修复后的提交（需删除并重推远端 tag——
-> 破坏性操作，留给仓库所有者决定），或改打 `v0.2.1`。
-> 在此之前 README 里「从 Releases 下载二进制」这条路仍不存在。
+> 经仓库所有者同意，`v0.2.0` 已移到修复后的提交并重推，Release **创建成功**——
+> 但**只出了三个平台**：`aarch64-unknown-linux-gnu` 挂在 `openssl-sys` 上。
+>
+> 同一个病根第二次发作。workflow 为这个 target 装了 `gcc-aarch64-linux-gnu`，
+> 那是**链接器**；`openssl-sys` 要的是 aarch64 的 **libssl 这个 C 库**，从来没装过。
+> 也就是说这一格从加进矩阵那天起就不可能成功，只是此前 `check` 先红、
+> `release` 根本没机会跑，于是没人发现。
+>
+> 顺带暴露出一个没人注意到的发布问题：native-tls **动态链接构建机的 libssl**，
+> 所以已经发出去的 x86_64 Linux 产物，在 libssl 版本不同的发行版上起不来——
+> 「发布了二进制」和「那个二进制能在别人机器上跑」是两件事。
+>
+> 改用 rustls 一次解决两者（`0d0b985`）。保留 `macos-system-configuration`
+> （macOS 系统代理靠它）并用 `native-roots` 而非 webpki-roots（继续读 OS 根证书，
+> 自签 CA 的代理才不会失效）。后端是 ring，交叉编译只需 cc。
+> 交叉产物现在只依赖 libc / libdl / libm / libpthread。
+>
+> **验证方式补课**：本地用 `zig cc` 当交叉编译器真跑通了 aarch64 release 构建
+> 并检查了产物的动态依赖，又用真实 API 调用确认 rustls 握手可用——
+> 换 TLS 后端属于「编译不会失败也不会 panic」的改动，只看编译过不算验证。
+>
+> ⏳ **仍待执行**：让 `v0.2.0` 再指向 `0d0b985` 之后的提交，四平台才齐。
+> 注意此时远端**已存在一个三平台的 Release**，重发要先处理它。
 >
 > 注意 `Cargo.toml` 的 `rust-version = "1.85"` 是按 edition 2024 估的下界，
 > 若要严格保证，需要用该版本工具链实测一次。
