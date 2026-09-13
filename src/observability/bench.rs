@@ -136,6 +136,60 @@ impl Task {
   }
 }
 
+/// What the regression gate decided about a proposed skill.
+///
+/// A pure function of two runs, so "a proposal that breaks things must be
+/// refused" is unit-testable rather than something that costs a live run every
+/// time it is checked (`docs/architecture/L7-observability.md` §4.7.4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Regression {
+  /// Nothing that passed before fails now.
+  Clean,
+  /// These tasks passed without the skill and fail with it.
+  Broke(Vec<String>),
+}
+
+impl Regression {
+  /// Compare a baseline run against the same suite with the skill active.
+  ///
+  /// Deliberately one-directional: a task that **starts** passing is not
+  /// evidence the skill is good — the suite is generic and the skill is not —
+  /// so it neither helps nor hurts the verdict. Only losing ground counts
+  /// (`docs/architecture/L7-observability.md` §4.7.2).
+  pub fn compare(before: &Report, after: &Report) -> Self {
+    let passed_before: std::collections::HashSet<&str> = before
+      .results
+      .iter()
+      .filter(|r| r.passed)
+      .map(|r| r.name.as_str())
+      .collect();
+    let broke: Vec<String> = after
+      .results
+      .iter()
+      .filter(|r| !r.passed && passed_before.contains(r.name.as_str()))
+      .map(|r| r.name.clone())
+      .collect();
+    if broke.is_empty() {
+      Self::Clean
+    } else {
+      Self::Broke(broke)
+    }
+  }
+
+  /// The sentence the user (and, on refusal, the model) reads.
+  pub fn explain(&self) -> String {
+    match self {
+      Self::Clean => "no task that passed before fails with it".to_string(),
+      Self::Broke(names) => format!(
+        "it breaks {} task(s) that passed without it: {}. Fix the skill's \
+         instructions, or accept it anyway with --skip-eval",
+        names.len(),
+        names.join(", ")
+      ),
+    }
+  }
+}
+
 /// Outcome of a single task run.
 #[derive(Debug, Clone)]
 pub struct TaskResult {
@@ -211,6 +265,69 @@ impl Report {
 
 #[cfg(test)]
 mod tests {
+
+  fn report(rows: &[(&str, bool)]) -> Report {
+    let mut r = Report::default();
+    for (name, passed) in rows {
+      r.push(TaskResult {
+        name: (*name).to_string(),
+        passed: *passed,
+        duration_ms: 0,
+        llm_calls: 0,
+        cny: 0.0,
+        note: String::new(),
+      });
+    }
+    r
+  }
+
+  #[test]
+  fn a_skill_that_breaks_nothing_is_clean() {
+    let before = report(&[("a", true), ("b", true)]);
+    let after = report(&[("a", true), ("b", true)]);
+    assert_eq!(Regression::compare(&before, &after), Regression::Clean);
+  }
+
+  /// The case the gate exists for: a badly written skill prompt degrades the
+  /// agent on work it could already do.
+  #[test]
+  fn losing_ground_names_exactly_which_tasks() {
+    let before = report(&[("a", true), ("b", true), ("c", false)]);
+    let after = report(&[("a", true), ("b", false), ("c", false)]);
+    match Regression::compare(&before, &after) {
+      Regression::Broke(names) => assert_eq!(names, vec!["b".to_string()]),
+      other => panic!("expected a regression, got {other:?}"),
+    }
+  }
+
+  /// A task that was already failing must not be blamed on the skill.
+  #[test]
+  fn a_task_that_was_already_failing_is_not_a_regression() {
+    let before = report(&[("a", false)]);
+    let after = report(&[("a", false)]);
+    assert_eq!(Regression::compare(&before, &after), Regression::Clean);
+  }
+
+  /// Newly passing tasks are not evidence: the suite is generic, the skill is
+  /// not. Counting them would let a skill "buy" a regression with an unrelated
+  /// win.
+  #[test]
+  fn a_newly_passing_task_does_not_offset_a_broken_one() {
+    let before = report(&[("a", true), ("b", false)]);
+    let after = report(&[("a", false), ("b", true)]);
+    match Regression::compare(&before, &after) {
+      Regression::Broke(names) => assert_eq!(names, vec!["a".to_string()]),
+      other => panic!("a win must not cancel a loss: {other:?}"),
+    }
+  }
+
+  #[test]
+  fn the_refusal_names_the_tasks_and_the_way_out() {
+    let text = Regression::Broke(vec!["fix_bug".into()]).explain();
+    assert!(text.contains("fix_bug"), "{text}");
+    assert!(text.contains("--skip-eval"), "{text}");
+  }
+
   use super::*;
 
   fn suite_json() -> &'static str {

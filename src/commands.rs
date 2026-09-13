@@ -18,8 +18,92 @@ impl App {
   /// servers are connected once at startup so the tool set cannot change under
   /// prompt caching mid-session. The note says so rather than leaving the user
   /// to wonder why the new tools are absent.
-  fn gate_accept(&self, kind: crate::proposals::Kind, name: &str) -> anyhow::Result<String> {
+  async fn gate_accept(
+    &mut self,
+    kind: crate::proposals::Kind,
+    name: &str,
+    skip_eval: bool,
+  ) -> anyhow::Result<String> {
+    if let Some(refusal) = self.regression_check(kind, name, skip_eval).await? {
+      anyhow::bail!("{refusal}");
+    }
     crate::proposals::ProposalStore::new()?.accept(kind, name)
+  }
+
+  /// Run the smoke suite with and without a proposed skill; refuse on a loss.
+  ///
+  /// Returns `Some(reason)` when the proposal must not land. Only `skill`
+  /// proposals are checked: an `mcp` server is not connected until restart and
+  /// a `task` is a prompt for the scheduler, so evaluating either would spend
+  /// the user's money measuring nothing (`docs/architecture/L7-observability.md`
+  /// §4.7.1). Saying so beats skipping silently, which reads as "it passed".
+  async fn regression_check(
+    &mut self,
+    kind: crate::proposals::Kind,
+    name: &str,
+    skip_eval: bool,
+  ) -> anyhow::Result<Option<String>> {
+    use crate::proposals::Kind;
+    if kind != Kind::Skill {
+      println!(
+        "{} no eval gate for a {} proposal: an mcp server is not connected until restart, and a task runs on a schedule, so a suite here would measure nothing.",
+        "Note:".blue(),
+        kind
+      );
+      return Ok(None);
+    }
+    if skip_eval {
+      // An escape hatch that hides what it skipped is not an escape hatch.
+      println!(
+        "{} skipping the regression check — `{}` lands unmeasured.",
+        "Warning:".yellow(),
+        name
+      );
+      return Ok(None);
+    }
+
+    let store = crate::proposals::ProposalStore::new()?;
+    let skill = match store.read_skill(name) {
+      Ok(s) => s,
+      // Cannot read it: the accept below will fail with the real reason, and
+      // guessing a verdict here would be worse than deferring to it.
+      Err(_) => return Ok(None),
+    };
+
+    let suite =
+      std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/benchmarks/basic.json");
+    if !suite.exists() {
+      println!(
+        "{} smoke suite not found at {} — accepting unmeasured.",
+        "Warning:".yellow(),
+        suite.display()
+      );
+      return Ok(None);
+    }
+
+    // Stated before it runs: this costs real calls and real minutes.
+    println!(
+      "{} checking `{}` against the smoke suite (two runs, so ~2x the suite in LLM calls)…",
+      "✦".cyan(),
+      name
+    );
+    let before = self.score_suite(&suite, None, None).await?;
+    let after = self.score_suite(&suite, None, Some(&skill)).await?;
+
+    let verdict = observability::bench::Regression::compare(&before, &after);
+    println!(
+      "{} baseline {}/{} → with `{}` {}/{}",
+      "✦".cyan(),
+      before.passed(),
+      before.total(),
+      name,
+      after.passed(),
+      after.total()
+    );
+    Ok(match verdict {
+      observability::bench::Regression::Clean => None,
+      broke => Some(format!("`{name}` was not accepted: {}", broke.explain())),
+    })
   }
 
   fn gate_reject(&self, kind: crate::proposals::Kind, name: &str) -> anyhow::Result<String> {
@@ -131,7 +215,12 @@ impl App {
         // gate in `crate::proposals` so there is no second implementation.
         Some("accept") => match parts.get(2) {
           None => println!("{} Usage: /skill accept <name>", "Info:".blue()),
-          Some(name) => Self::report_gate(self.gate_accept(crate::proposals::Kind::Skill, name)),
+          Some(name) => {
+            let outcome = self
+              .gate_accept(crate::proposals::Kind::Skill, name, false)
+              .await;
+            Self::report_gate(outcome);
+          }
         },
         Some("reject") => match parts.get(2) {
           None => println!("{} Usage: /skill reject <name>", "Info:".blue()),
@@ -346,7 +435,12 @@ impl App {
               kind,
               crate::proposals::kind_names()
             ),
-            Some(kind) if verb == "accept" => Self::report_gate(self.gate_accept(kind, name)),
+            Some(kind) if verb == "accept" => {
+              // A hatch that hides what it skipped is not a hatch.
+              let skip = parts.contains(&"--skip-eval");
+              let outcome = self.gate_accept(kind, name, skip).await;
+              Self::report_gate(outcome);
+            }
             Some(kind) => Self::report_gate(self.gate_reject(kind, name)),
           },
           _ => println!(

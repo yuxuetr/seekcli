@@ -20,6 +20,22 @@ impl App {
     suite_path: &Path,
     trajectory_path: Option<&Path>,
   ) -> Result<()> {
+    let report = self.score_suite(suite_path, trajectory_path, None).await?;
+    println!("{}", report.render());
+    Ok(())
+  }
+
+  /// Run every task and return the scores.
+  ///
+  /// `skill`, when present, is activated for every task — that is how the
+  /// regression gate measures a proposed skill against the same suite twice
+  /// (`docs/architecture/L7-observability.md` §4.7).
+  pub(crate) async fn score_suite(
+    &mut self,
+    suite_path: &Path,
+    trajectory_path: Option<&Path>,
+    skill: Option<&crate::Skill>,
+  ) -> Result<Report> {
     let suite = TestSuite::load(suite_path)?;
     let home = env::var("HOME").context("HOME not set")?;
     let bench_root = PathBuf::from(home).join(".seekcli").join("bench");
@@ -71,7 +87,7 @@ impl App {
 
       // AgentRun: tools resolve against process cwd, so sandbox by chdir.
       env::set_current_dir(&testbed)?;
-      let run = self.run_headless(&task.prompt, None).await;
+      let run = self.run_headless(&task.prompt, skill).await;
       env::set_current_dir(&original_cwd)?;
       crate::tools::policy::set_mode(crate::tools::policy::Mode::Normal);
 
@@ -145,9 +161,7 @@ impl App {
       });
     }
 
-    println!("{}", report.render());
-
-    // After the report, and never instead of it: a failed export must not cost
+    // After scoring, and never instead of it: a failed export must not cost
     // the user the scores they waited for.
     if let Some(path) = trajectory_path {
       match crate::observability::trajectory::to_jsonl(&trajectories)
@@ -167,6 +181,6 @@ impl App {
         ),
       }
     }
-    Ok(())
+    Ok(report)
   }
 }

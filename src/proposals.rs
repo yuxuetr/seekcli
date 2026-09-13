@@ -224,6 +224,25 @@ impl ProposalStore {
     }
   }
 
+  /// Load a pending skill proposal, so it can be evaluated before it lands.
+  pub fn read_skill(&self, name: &str) -> Result<crate::Skill> {
+    let pending = self.find(Kind::Skill, name)?;
+    let md = pending.path.join("SKILL.md");
+    let text = fs::read_to_string(&md).with_context(|| format!("cannot read {}", md.display()))?;
+    let (front, body) = crate::skills::split_frontmatter(&text, "SKILL.md")?;
+    let description = front
+      .lines()
+      .find_map(|l| l.trim().strip_prefix("description:"))
+      .map(|d| d.trim().trim_matches('"').to_string())
+      .unwrap_or_default();
+    Ok(crate::Skill {
+      name: pending.name,
+      description,
+      system_prompt: body,
+      tools: None,
+    })
+  }
+
   /// Everything awaiting review, every kind.
   pub fn list(&self) -> Vec<Pending> {
     let mut out = Vec::new();

@@ -29,7 +29,7 @@
 | ~~L7-4~~ | ~~覆盖率门禁形同虚设~~ | **阶段二十 20.5 已落地**，棘轮 45 → 60 | — |
 | L7-5 | 无 OTel 导出 | 取舍级 | |
 | ~~L7-6~~ | ~~无自描述：模型看不到自己的运行时~~ | **阶段三十五已落地**：`harness_inspect` 五分区。真实验证——录 `inspect-after-denial` fixture，模型被拒后调用 `harness_inspect{what:"policy"}` 并报出 `policy.rs` 的真实白名单；回放断言挂在轨迹上而非措辞上 |
-| L7-7 | 评价信号不回灌 | `bench.rs` 与 `skills.rs::accept_proposal` 无调用关系 | 进化无选择压力 |
+| ~~L7-7~~ | ~~评价信号不回灌~~ | **阶段三十八已落地**：`/propose accept skill` 前跑冒烟集两遍（带/不带该 skill），回归即拒绝并点名任务。真实验证——故意写坏的 skill 3/3 → 1/3 被挡下，无害的 3/3 → 3/3 通过 |
 | ~~L7-8~~ | ~~trajectory 不可导出~~ | **阶段三十九已落地**：`--bench --trajectory <file>` 产出 JSONL。真实验证——用 `SEEKCLI_REPLAY` 回放 fixture 跑完一条任务，导出 3 步轨迹、终局 reward、status，无需 API key |
 
 > L7-2 是 L1 / L2 / L4 三处重构的**前置条件**。
