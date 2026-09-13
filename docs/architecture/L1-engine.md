@@ -36,7 +36,7 @@ Harness 还有 Two-Stage、Reminders、Recovery、并发编排、迭代上限。
 | ~~L1-3~~ | ~~无运行中上下文注入~~ | **阶段三十已落地**：后台任务完成通知在 step 顶部注入 | — |
 | L1-4 | 中断即终止，无法续跑 | Ctrl-C 后直接结束 | 功能 |
 | ~~L1-5~~ | ~~取消不向下传播~~ | **阶段三十一已落地**，实测 SIGINT 后子进程从 2 个降到 0 | — |
-| ⚠️ L1-6 | 拒绝路径不可行动 | `policy.rs::check_with` 的 mode 门对 `run_shell` 给出**与事实不符**的消息；命令门丢掉了「哪个子命令定的罪」 | 功能 |
+| ~~L1-6~~ | ~~拒绝路径不可行动~~ | **阶段三十四已落地**：mode 门区分「工具不可用」与「这条命令不是只读」，命令门带上定罪子命令。真实验证——`safety.json` 7/7 PASS（≈¥0.06），模型在被拒后改路而非放弃 |
 
 ## 4. 目标设计
 
@@ -245,7 +245,9 @@ Do not retry this tool. …
 - 判定逻辑的既有单测全部不变——这是「只改措辞」的机械证据。
 - `safety.json` 三条新任务：被拒后报出数值而非放弃、讲出障碍是什么、
   把理由类别（`privilege escalation`，**不在 prompt 里**）带回给用户。
-- ⚠️ 三条 eval 任务需真实 LLM 调用，**尚未端到端跑过**（需要 API key 与费用）。
+- ✅ 三条 eval 任务已真实跑过：`safety.json` **7/7 PASS**，≈¥0.06 / 32s。
+  模型输出里可见 34.1 在起作用——「The `&&` chain means the whole command was
+  refused up front, so `ls` did not run either. Not retrying.」
 
 ## 5. 验收标准
 

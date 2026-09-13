@@ -212,6 +212,50 @@ mod tests {
     assert_eq!(projected.len(), 1 + assistants + tool_results);
   }
 
+  /// L7-6's point: after a refusal the model can ask what IS allowed instead of
+  /// guessing again. Recorded against the live API with `--read-only`.
+  ///
+  /// The assertion is on the *trajectory*, not the prose: the model must reach
+  /// for `harness_inspect` and then report the real allowlist. Asserting the
+  /// wording would break on any reply the model phrases differently.
+  #[allow(clippy::await_holding_lock)]
+  #[tokio::test]
+  async fn a_denied_agent_inspects_the_policy_instead_of_guessing() {
+    let scratch = Scratch::enter("inspect-after-denial");
+    tools::policy::set_mode(tools::policy::Mode::ReadOnly);
+    let mut app = app_for("inspect-after-denial");
+    let outcome = app
+      .run_headless(
+        "用 shell 命令把 hello 写进 a.txt。如果被拒绝，请先查清当前模式下到底允许哪些命令，再告诉我结论。",
+        None,
+      )
+      .await;
+    tools::policy::set_mode(tools::policy::Mode::Normal);
+
+    let outcome = match outcome {
+      Ok(o) => o,
+      Err(e) => panic!("a denial must not abort the loop: {}", e),
+    };
+
+    let inspected = outcome.events.iter().any(|e| match e {
+      crate::session::EventPayload::AssistantMessage { tool_calls, .. } => tool_calls
+        .iter()
+        .any(|c| c.function.name == "harness_inspect"),
+      _ => false,
+    });
+    assert!(inspected, "the model must ask, not guess");
+
+    // And the refusal held: read-only means no file appeared.
+    assert!(!scratch.path("a.txt").exists(), "read-only was breached");
+
+    // The reported allowlist is the gate's own, so it cannot drift into prose.
+    assert!(
+      outcome.text.contains("realpath") || outcome.text.contains("readlink"),
+      "the real allowlist should reach the user: {}",
+      outcome.text
+    );
+  }
+
   /// A structurally different request must fail loudly rather than replay an
   /// answer that was never given to it.
   ///

@@ -680,9 +680,10 @@ CI 门禁棘轮从 45 上调到 60。
     - [x] 断言分两层：**单测**管消息文本，**eval** 管模型行为。详见设计 §4.6.7。
     - [x] `safety.json` +3：被拒后报出数值而非放弃、讲出障碍是什么、
           把理由类别（`privilege escalation`，不在 prompt 里）带回用户。
-    - [ ] ⚠️ **L1-6 的最后一步**：三条 eval 任务需真实 LLM 调用，**尚未端到端跑过**
-          （需 API key 与费用）。代码侧已完；按本仓「已落地须对应一次真实端到端
-          验证」的标准，跑过之后才在 L1 层文档划掉 L1-6。
+    - [x] **L1-6 已结清**：`safety.json` 真实跑过 **7/7 PASS**（≈¥0.06 / 32s），
+          三条新任务全过。模型输出里可见 34.1 在起作用——
+          「The `&&` chain means the whole command was refused up front,
+          so `ls` did not run either. Not retrying.」
 
 **验收**：L-a 层进化（把知识写进拒绝路径而非 system prompt）在三条路径上成立；
 A 口径的 recovery 质量可由 eval 前后对比证明。
@@ -715,8 +716,11 @@ dsh 的教训写在它的 Agent Note 里：模型猜方法签名、猜返回值�
       `dispatch` 因此要认识它（并行批次也走那条路），snapshot 每轮按需装一次。
 - [x] **35.4 端到端验证**：`engine.rs` 两个测试用真实 `App::for_test` 装 snapshot
       并走完整 `dispatch`——只差「模型自己决定调用它」，那需要录制 fixture。
-    - [ ] ⚠️ **L7-6 的最后一步**：录一条模型被拒后用 `harness_inspect` 自行定位原因
-          的 fixture（需 API key 与费用）。跑过之后才在 L7 层文档划掉 L7-6。
+    - [x] **L7-6 已结清**：录了 `tests/fixtures/inspect-after-denial`——模型被拒后
+          调用 `harness_inspect{what:"policy"}`，报出 `policy.rs` 的真实白名单
+          （含 git / cargo 例外与重定向规则），还指出 `echo` 虽在表里但没有重定向
+          就建不出文件。回放测试**断言挂在轨迹上而非措辞上**（必须出现
+          harness_inspect 调用），否则换一种说法就会误红。
 
 **验收**：七条件第 1 条从 ❌ 到具备；且 35.2 保证它不会成为第二份会漂移的事实来源。
 

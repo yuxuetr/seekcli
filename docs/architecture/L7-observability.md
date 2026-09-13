@@ -28,7 +28,7 @@
 | L7-3 | 无快照回归 | 无 | 提示词 / 流程变更无差异可看 |
 | ~~L7-4~~ | ~~覆盖率门禁形同虚设~~ | **阶段二十 20.5 已落地**，棘轮 45 → 60 | — |
 | L7-5 | 无 OTel 导出 | 取舍级 | |
-| ⚠️ L7-6 | 无自描述：模型看不到自己的运行时 | 全 crate 无 inspect 类工具；工具面、生效策略、skill、MCP 状态对模型均不可查 | 被拒后只能盲猜原因 |
+| ~~L7-6~~ | ~~无自描述：模型看不到自己的运行时~~ | **阶段三十五已落地**：`harness_inspect` 五分区。真实验证——录 `inspect-after-denial` fixture，模型被拒后调用 `harness_inspect{what:"policy"}` 并报出 `policy.rs` 的真实白名单；回放断言挂在轨迹上而非措辞上 |
 | L7-7 | 评价信号不回灌 | `bench.rs` 与 `skills.rs::accept_proposal` 无调用关系 | 进化无选择压力 |
 | ~~L7-8~~ | ~~trajectory 不可导出~~ | **阶段三十九已落地**：`--bench --trajectory <file>` 产出 JSONL。真实验证——用 `SEEKCLI_REPLAY` 回放 fixture 跑完一条任务，导出 3 步轨迹、终局 reward、status，无需 API key |
 
@@ -148,8 +148,9 @@ pub struct Replaying { dir: PathBuf, cursor: AtomicUsize }
 
 #### 4.5.4 验收
 
-- 模型在 `--read-only` 下被拒一次后，能用 `harness_inspect{what:"policy"}`
-  自行查出哪些命令可用，而不是盲试。
+- ✅ 已验证：模型在 `--read-only` 下被拒一次后，调用 `harness_inspect{what:"policy"}`
+  报出真实白名单（含 git / cargo 例外与重定向规则），并指出 `echo` 虽在表里但
+  没有重定向就建不出文件。fixture：`tests/fixtures/inspect-after-denial`。
 - `policy` 分区的内容与 `policy.rs` 常量同源——改常量则输出随之变化，有单测守。
 - 归入 `is_parallel_readonly`：它是纯读，没有理由阻塞并发批次。
 
