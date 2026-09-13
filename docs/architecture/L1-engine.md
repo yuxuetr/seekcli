@@ -201,9 +201,26 @@ Decision::Deny(r) => return Decision::Deny(r),   // part 没有被带出来
 `mcp/mod.rs` 的 server 启动失败是「跳过 + 一行可见告警」，符合
 [设计原则 §4](design-principles.md#4-错误处理) 的「降级但绝不静默」——
 但那行告警给的是**用户**，模型完全不知道少了哪些工具、为什么少。
-失败原因进上下文后，模型有机会自己定位（例如命令不存在、路径写错）。
 
-同理，未知工具名 / 参数不符 schema 时应附**最接近的可用工具名**及其 schema 片段。
+**实现时修正了方向。** 初稿写的是「失败原因进上下文」，那等于加一段常驻
+system prompt——与 §4.6.5「只有 `[MODE DENIED]` 那一处该改 system prompt」
+自相矛盾，而且为一个多数会话里无关的事实每轮付 token。
+
+改为：启动失败**记在 `McpRegistry` 上**，在模型真的去碰那个不存在的工具时
+由拒绝路径讲出来。
+
+```text
+MCP server `github` is configured but unavailable this session, so
+`mcp__github__create_issue` does not exist: <启动失败原因>.
+Do not retry this tool. …
+```
+
+这样常驻 token 成本为零，且与本节「知识长在拒绝路径里」的原则一致。
+同一份记录是[阶段三十五 `harness_inspect`](L7-observability.md) 的 `mcp` 分区
+要读的数据——**按需查询**才是「少了哪些工具」这类问题的正确出口。
+
+同理，未知工具名时应附**最接近的可用工具名**及其调用签名。建议必须有下限：
+一个几乎不沾边的候选比不给建议更糟，它让模型带着虚假信心走错路。
 
 #### 4.6.7 验收
 

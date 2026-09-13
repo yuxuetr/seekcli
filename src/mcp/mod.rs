@@ -37,6 +37,21 @@ const NAMESPACE: &str = "__";
 pub struct McpRegistry {
   clients: BTreeMap<String, McpClient>,
   tools: Vec<RegisteredTool>,
+  failures: Vec<McpFailure>,
+}
+
+/// A configured server that is not available this session, and why.
+///
+/// Kept rather than only printed. The startup warning goes to the user, but
+/// the model needs this at the moment it reaches for a tool that should have
+/// been there — otherwise the capability is simply absent with no explanation,
+/// and the model cannot tell a typo from a broken server. Stage 35's
+/// `harness_inspect` reads the same record on demand
+/// (`docs/architecture/L1-engine.md` §4.6.6).
+#[derive(Debug, Clone)]
+pub struct McpFailure {
+  pub server: String,
+  pub reason: String,
 }
 
 struct RegisteredTool {
@@ -62,6 +77,7 @@ impl McpRegistry {
     Self {
       clients: BTreeMap::new(),
       tools: Vec::new(),
+      failures: Vec::new(),
     }
   }
 
@@ -80,10 +96,10 @@ impl McpRegistry {
         Ok(Ok(client)) => registry.adopt(&config.name, client).await,
         // Both arms warn and continue: a broken server is the user's to fix,
         // and refusing to start the REPL over it would be a worse trade.
-        Ok(Err(e)) => eprintln!("[MCP] server `{}` unavailable: {:#}", config.name, e),
-        Err(_) => eprintln!(
-          "[MCP] server `{}` did not finish starting within {:?}; skipped",
-          config.name, timeout
+        Ok(Err(e)) => registry.record_failure(&config.name, format!("{e:#}")),
+        Err(_) => registry.record_failure(
+          &config.name,
+          format!("did not finish starting within {timeout:?}"),
         ),
       }
     }
@@ -105,8 +121,20 @@ impl McpRegistry {
         }
         self.clients.insert(name.to_string(), client);
       }
-      Err(e) => eprintln!("[MCP] server `{}` could not list tools: {:#}", name, e),
+      Err(e) => self.record_failure(name, format!("could not list its tools: {e:#}")),
     }
+  }
+
+  /// Warn the user *and* keep the reason for the model.
+  ///
+  /// The visible line stays: "degrade, never silently" is a standing rule
+  /// (`docs/architecture/design-principles.md` §4).
+  fn record_failure(&mut self, server: &str, reason: String) {
+    eprintln!("[MCP] server `{server}` unavailable: {reason}");
+    self.failures.push(McpFailure {
+      server: server.to_string(),
+      reason,
+    });
   }
 
   fn register(server: &str, tool: McpTool) -> RegisteredTool {
@@ -149,12 +177,55 @@ impl McpRegistry {
       .is_some_and(|t| t.read_only)
   }
 
+  /// The server half of `mcp__<server>__<tool>`, if the name is shaped like one.
+  fn server_of(qualified: &str) -> Option<&str> {
+    qualified
+      .strip_prefix("mcp__")
+      .and_then(|rest| rest.split_once("__"))
+      .map(|(server, _)| server)
+  }
+
+  /// Why a tool the model just tried to call does not exist.
+  ///
+  /// "unknown MCP tool" alone left the model unable to tell a hallucinated
+  /// name from a server that failed to start, so its cheapest next move was to
+  /// try the same call again. Naming the startup failure closes that loop
+  /// without costing a standing prompt section.
+  fn unknown_tool_error(&self, qualified: &str) -> anyhow::Error {
+    if let Some(failed) = Self::server_of(qualified)
+      .and_then(|server| self.failures.iter().find(|f| f.server == server))
+    {
+      return anyhow::anyhow!(
+        "MCP server `{}` is configured but unavailable this session, so `{}` does not \
+         exist: {}. Do not retry this tool — restarting it is the user's action, not \
+         yours. Use the tools you do have, or tell the user this server needs fixing.",
+        failed.server,
+        qualified,
+        failed.reason
+      );
+    }
+    if self.tools.is_empty() {
+      return anyhow::anyhow!(
+        "`{}` does not exist: no MCP tools are available in this session. Do not retry \
+         it; use the built-in tools instead.",
+        qualified
+      );
+    }
+    let available: Vec<&str> = self.tools.iter().map(|t| t.qualified.as_str()).collect();
+    anyhow::anyhow!(
+      "`{}` does not exist. Available MCP tools: {}. Do not retry this name; call one \
+       of those, or a built-in tool.",
+      qualified,
+      available.join(", ")
+    )
+  }
+
   pub async fn call(&self, qualified: &str, args: &Value) -> anyhow::Result<String> {
     let tool = self
       .tools
       .iter()
       .find(|t| t.qualified == qualified)
-      .ok_or_else(|| anyhow::anyhow!("unknown MCP tool `{}`", qualified))?;
+      .ok_or_else(|| self.unknown_tool_error(qualified))?;
     let client = self
       .clients
       .get(&tool.server)
@@ -230,6 +301,52 @@ mod tests {
     bare.description = String::new();
     let registered = McpRegistry::register("srv", bare);
     assert!(!registered.schema.function.description.is_empty());
+  }
+
+  /// The loop this closes: absent a reason, the model could not tell a
+  /// hallucinated name from a server that failed to start, so its cheapest
+  /// next move was to send the same call again.
+  #[tokio::test]
+  async fn a_failed_server_explains_itself_when_one_of_its_tools_is_called() {
+    let mut r = McpRegistry::empty();
+    r.record_failure("github", "command `ghmcp` not found".to_string());
+
+    let err = match r.call("mcp__github__create_issue", &json!({})).await {
+      Ok(_) => panic!("expected an error"),
+      Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("github"), "{err}");
+    assert!(err.contains("not found"), "must carry the reason: {err}");
+    assert!(err.to_lowercase().contains("do not retry"), "{err}");
+    // Restarting the server is the user's action; the model must not be sent
+    // off to attempt it.
+    assert!(err.contains("user's action"), "{err}");
+  }
+
+  #[tokio::test]
+  async fn an_unknown_name_with_no_failed_server_lists_what_does_exist() {
+    let mut r = McpRegistry::empty();
+    r.tools
+      .push(McpRegistry::register("srv", tool("reads", true)));
+
+    let err = match r.call("mcp__srv__typo", &json!({})).await {
+      Ok(_) => panic!("expected an error"),
+      Err(e) => format!("{e:#}"),
+    };
+    assert!(
+      err.contains("mcp__srv__reads"),
+      "must name the real one: {err}"
+    );
+  }
+
+  #[test]
+  fn the_server_half_of_a_qualified_name_is_recoverable() {
+    assert_eq!(
+      McpRegistry::server_of("mcp__github__create_issue"),
+      Some("github")
+    );
+    assert_eq!(McpRegistry::server_of("read_file"), None);
+    assert_eq!(McpRegistry::server_of("mcp__nounderscores"), None);
   }
 
   #[tokio::test]
