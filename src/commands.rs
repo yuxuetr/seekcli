@@ -508,8 +508,8 @@ impl App {
               .get(2)
               .and_then(|n| n.parse::<usize>().ok())
               .unwrap_or(source.events.len());
-            let child = source.fork(uuid::Uuid::new_v4().to_string(), count);
-            self.history.save_session(&child)?;
+            let mut child = source.fork(uuid::Uuid::new_v4().to_string(), count);
+            self.history.save_session(&mut child)?;
             println!(
               "{} Forked {} at event {} -> {} ({} events)",
               "✦".cyan(),

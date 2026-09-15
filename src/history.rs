@@ -19,6 +19,7 @@
 
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -77,16 +78,46 @@ impl HistoryManager {
     Session::new(Uuid::new_v4().to_string(), model)
   }
 
-  pub fn save_session(&self, session: &Session) -> Result<()> {
+  /// Append everything new, then refresh `meta.json`.
+  ///
+  /// The order matters and is the opposite of the obvious one. `meta.json` is
+  /// a summary of the log; writing it first would, on a crash in between,
+  /// leave a session claiming events its log does not contain. Appending
+  /// first can only ever leave the summary *behind* the log, which the next
+  /// load corrects for free.
+  ///
+  /// This used to rewrite `events.jsonl` wholesale on every call — an O(n)
+  /// write per turn on a file the module header calls append-only, and a
+  /// window in which a crash could destroy the whole session rather than the
+  /// last record.
+  pub fn save_session(&self, session: &mut Session) -> Result<()> {
     let dir = self.session_dir(session.id());
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+
+    let pending = session.unpersisted();
+    if !pending.is_empty() {
+      let body = session::to_jsonl(pending)?;
+      let path = dir.join("events.jsonl");
+      let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {} for append", path.display()))?;
+      file
+        .write_all(body.as_bytes())
+        .with_context(|| format!("cannot append to {}", path.display()))?;
+      // Without this the events are in the page cache but not necessarily on
+      // the disk, and "recorded before the tool ran" would be a claim the
+      // ordering cannot actually back after a power loss.
+      file
+        .sync_data()
+        .with_context(|| format!("cannot flush {}", path.display()))?;
+      session.mark_persisted();
+    }
+
     fs::write(
       dir.join("meta.json"),
       serde_json::to_string_pretty(&session.meta)?,
-    )?;
-    fs::write(
-      dir.join("events.jsonl"),
-      session::to_jsonl(&session.events)?,
     )?;
     Ok(())
   }
@@ -124,7 +155,12 @@ impl HistoryManager {
         .with_context(|| format!("cannot read {}", dir.join("meta.json").display()))?,
     )?;
     let events = session::from_jsonl(&fs::read_to_string(dir.join("events.jsonl"))?);
-    Ok(Session { meta, events })
+    // `meta.event_count` can legitimately lag the log: `save_session` appends
+    // events before refreshing the summary, so a crash in between leaves the
+    // log ahead. The log is the source of truth, so re-derive from it.
+    let mut meta = meta;
+    meta.event_count = events.len();
+    Ok(Session::restored(meta, events))
   }
 
   fn resolve_id(&self, id: &str) -> Result<PathBuf> {
@@ -322,7 +358,7 @@ mod tests {
       content: "hello".into(),
     });
     s.meta.title = "greeting".into();
-    if let Err(e) = h.save_session(&s) {
+    if let Err(e) = h.save_session(&mut s) {
       panic!("save failed: {}", e);
     }
 
@@ -335,6 +371,116 @@ mod tests {
     assert_eq!(back.messages().len(), 1);
   }
 
+  /// The whole point of the watermark: saving twice must append the new
+  /// events, not re-append the old ones. Rewriting the file hid this class of
+  /// bug entirely — a wholesale write is idempotent by construction, so
+  /// nothing ever had to be right about *which* events got written.
+  #[test]
+  fn saving_twice_appends_rather_than_duplicating() {
+    let h = store("append-twice");
+    let mut s = h.create_session("m".into());
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "first".into(),
+    });
+    let _ = h.save_session(&mut s);
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "second".into(),
+    });
+    let _ = h.save_session(&mut s);
+
+    let back = match h.load_session(s.id()) {
+      Ok(v) => v,
+      Err(e) => panic!("load failed: {}", e),
+    };
+    assert_eq!(back.events.len(), 2, "events: {:?}", back.events);
+    let text = fs::read_to_string(h.session_dir(s.id()).join("events.jsonl")).unwrap_or_default();
+    assert_eq!(
+      text.lines().filter(|l| l.contains("first")).count(),
+      1,
+      "the first event must be written exactly once:\n{text}"
+    );
+  }
+
+  /// A no-op save must not touch the log at all. Otherwise every turn that
+  /// records nothing would still rewrite, which is what this replaced.
+  #[test]
+  fn saving_with_nothing_new_writes_no_events() {
+    let h = store("append-noop");
+    let mut s = h.create_session("m".into());
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "only".into(),
+    });
+    let _ = h.save_session(&mut s);
+    let path = h.session_dir(s.id()).join("events.jsonl");
+    let before = fs::read_to_string(&path).unwrap_or_default();
+    let _ = h.save_session(&mut s);
+    let after = fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(before, after, "a second save appended something");
+  }
+
+  /// `save_session` appends events before refreshing `meta.json`, so a crash
+  /// in between leaves the summary behind the log. The log is the source of
+  /// truth, so the next load must believe the log, not the summary.
+  #[test]
+  fn a_meta_lagging_behind_the_log_is_corrected_on_load() {
+    let h = store("meta-lag");
+    let mut s = h.create_session("m".into());
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "a".into(),
+    });
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "b".into(),
+    });
+    let _ = h.save_session(&mut s);
+
+    // Simulate the crash window: meta claims one event, the log holds two.
+    let meta_path = h.session_dir(s.id()).join("meta.json");
+    let mut stale = s.meta.clone();
+    stale.event_count = 1;
+    if let Ok(text) = serde_json::to_string_pretty(&stale) {
+      let _ = fs::write(&meta_path, text);
+    }
+
+    let back = match h.load_session(s.id()) {
+      Ok(v) => v,
+      Err(e) => panic!("load failed: {}", e),
+    };
+    assert_eq!(back.events.len(), 2);
+    assert_eq!(
+      back.meta.event_count, 2,
+      "the summary must be re-derived from the log"
+    );
+  }
+
+  /// A fork writes a new file, so everything it inherited is unpersisted —
+  /// carrying the parent's watermark across would silently produce an empty
+  /// log for the child.
+  #[test]
+  fn a_fork_persists_every_event_it_inherited() {
+    let h = store("fork-persist");
+    let mut parent = h.create_session("m".into());
+    for text in ["one", "two"] {
+      parent.record(EventPayload::UserMessage {
+        images: Vec::new(),
+        content: text.into(),
+      });
+    }
+    let _ = h.save_session(&mut parent);
+
+    let mut child = parent.fork(uuid::Uuid::new_v4().to_string(), 2);
+    let _ = h.save_session(&mut child);
+    let back = match h.load_session(child.id()) {
+      Ok(v) => v,
+      Err(e) => panic!("load failed: {}", e),
+    };
+    assert_eq!(back.events.len(), 2, "fork wrote an empty log");
+  }
+
   #[test]
   fn listing_reads_meta_only_and_sorts_newest_first() {
     let h = store("listing");
@@ -342,7 +488,7 @@ mod tests {
       let mut s = h.create_session("m".into());
       s.meta.title = (*title).into();
       s.meta.updated = chrono::Utc::now() + chrono::Duration::seconds(n as i64);
-      let _ = h.save_session(&s);
+      let _ = h.save_session(&mut s);
     }
     let list = match h.list_sessions() {
       Ok(v) => v,
@@ -361,7 +507,7 @@ mod tests {
         images: Vec::new(),
         content: "x".into(),
       });
-      let _ = h.save_session(&s);
+      let _ = h.save_session(&mut s);
     }
     let err = match h.load_session("dup-") {
       Ok(_) => panic!("an ambiguous prefix must not silently pick one"),
@@ -417,13 +563,13 @@ mod tests {
       images: Vec::new(),
       content: "how do I configure ripgrep".into(),
     });
-    let _ = h.save_session(&a);
+    let _ = h.save_session(&mut a);
     let mut b = Session::new("bbb".into(), "m".into());
     b.record(EventPayload::UserMessage {
       images: Vec::new(),
       content: "unrelated chatter".into(),
     });
-    let _ = h.save_session(&b);
+    let _ = h.save_session(&mut b);
 
     let hits = match h.search("RIPGREP", 10) {
       Ok(v) => v,

@@ -583,7 +583,7 @@ impl App {
     }
     // Persist the session's running cost so it can be audited / restored later.
     self.current_session.meta.cost = self.cost.clone();
-    self.history.save_session(&self.current_session)?;
+    self.history.save_session(&mut self.current_session)?;
 
     // Print the session bill (token accounting + CNY estimate).
     if !self.cost.is_empty() {

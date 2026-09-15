@@ -122,6 +122,15 @@ pub struct SessionMeta {
 pub struct Session {
   pub meta: SessionMeta,
   pub events: Vec<SessionEvent>,
+  /// How many leading events are already on disk.
+  ///
+  /// The log calls itself append-only, but `save_session` used to rewrite the
+  /// whole file every time, which made a claimed O(1) append O(n) and meant a
+  /// crash mid-write could take the entire session with it. This watermark is
+  /// what lets the writer send only what is new. It is derived, never
+  /// serialized: on load it equals `events.len()`, because everything read
+  /// back was by definition already written.
+  persisted: usize,
 }
 
 pub const UNTITLED: &str = "New Chat";
@@ -141,7 +150,29 @@ impl Session {
         forked_from: None,
       },
       events: Vec::new(),
+      persisted: 0,
     }
+  }
+
+  /// Rebuild a session that was read back from disk: every event present is,
+  /// by definition, already persisted.
+  pub fn restored(meta: SessionMeta, events: Vec<SessionEvent>) -> Self {
+    let persisted = events.len();
+    Self {
+      meta,
+      events,
+      persisted,
+    }
+  }
+
+  /// Events not yet on disk.
+  pub fn unpersisted(&self) -> &[SessionEvent] {
+    self.events.get(self.persisted..).unwrap_or(&[])
+  }
+
+  /// Called by the writer once `unpersisted()` has been appended.
+  pub fn mark_persisted(&mut self) {
+    self.persisted = self.events.len();
   }
 
   pub fn id(&self) -> &str {
@@ -188,6 +219,9 @@ impl Session {
         forked_from: Some(self.meta.id.clone()),
       },
       events: self.events[..count].to_vec(),
+      // A fork is a new file with nothing in it yet, whatever the parent had
+      // already written.
+      persisted: 0,
     }
   }
 }
