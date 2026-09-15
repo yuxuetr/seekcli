@@ -10,6 +10,14 @@ pub struct Skill {
   pub description: String,
   pub system_prompt: String,
   pub tools: Option<Vec<SkillTool>>,
+  /// The tool names this skill narrows its agent to. `None` means "do not narrow".
+  ///
+  /// This can only ever **remove** tools. A skill declaring `run_shell` does
+  /// not thereby acquire `run_shell` — the tool must already be on the surface
+  /// and must still pass the policy gate on every call. Declaring is not
+  /// granting; that distinction is the whole reason this field is applied as a
+  /// filter over the effective set rather than as a source of tools.
+  pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -231,12 +239,22 @@ pub fn render_skill_md(skill: &Skill) -> String {
     "description: {}\n",
     quote_if_needed(&skill.description)
   ));
-  if let Some(tools) = &skill.tools
-    && !tools.is_empty()
-  {
+  // The declared whitelist wins. Deriving it from `tools` is the legacy path,
+  // kept for skills that carry full schemas instead of a name list — before
+  // stage 42 that derivation was the *only* source, so a rendered skill named
+  // tools it did not actually narrow to.
+  let names: Vec<String> = match &skill.allowed_tools {
+    Some(list) => list.clone(),
+    None => skill
+      .tools
+      .as_ref()
+      .map(|tools| tools.iter().map(|t| t.name.clone()).collect())
+      .unwrap_or_default(),
+  };
+  if !names.is_empty() {
     out.push_str("allowed_tools:\n");
-    for t in tools {
-      out.push_str(&format!("  - {}\n", quote_if_needed(&t.name)));
+    for name in &names {
+      out.push_str(&format!("  - {}\n", quote_if_needed(name)));
     }
   }
   out.push_str("---\n\n");
@@ -283,15 +301,13 @@ fn quote_if_needed(s: &str) -> String {
 /// required; the rest are optional. We deliberately hand-parse a tiny subset
 /// of YAML to avoid pulling in a full YAML crate.
 ///
-/// `allowed_tools` and `version` are parsed and validated now, but not yet
-/// consumed downstream — phase 12.5 will wire `allowed_tools` into a per-skill
-/// tool whitelist applied at agent loop entry. Kept here so SKILL.md files
-/// can be authored against the final schema starting in C1.
+/// `allowed_tools` is consumed since stage 42: it narrows the effective tool
+/// surface at agent-loop entry. `version` is still parsed for validation only,
+/// awaiting the `/skill info` UX pass.
 #[derive(Debug, Clone, Default)]
 pub struct Frontmatter {
   pub name: String,
   pub description: String,
-  #[allow(dead_code)] // consumed by phase 12.5 ToolDispatcher whitelist
   pub allowed_tools: Option<Vec<String>>,
   #[allow(dead_code)] // exposed via /skill info in a later UX pass
   pub version: Option<String>,
@@ -319,10 +335,11 @@ pub fn load_skill_md(path: &Path) -> Result<Skill> {
     name: fm.name,
     description: fm.description,
     system_prompt,
-    // `allowed_tools` in frontmatter is a name whitelist (different semantics
-    // from legacy `SkillTool` which carried full schemas). Stored in tools as
-    // None for now; later phases may wire the whitelist into ToolDispatcher.
+    // `allowed_tools` is a name whitelist, semantically different from the
+    // legacy `SkillTool` list which carried full schemas — so it travels in
+    // its own field and is applied as a filter, never as a source of tools.
     tools: None,
+    allowed_tools: fm.allowed_tools,
   })
 }
 
@@ -675,6 +692,7 @@ mod tests {
       description: "a test skill".to_string(),
       system_prompt: "do the thing".to_string(),
       tools: None,
+      allowed_tools: None,
     };
     let md = render_skill_md(&skill);
     assert!(md.starts_with("---\n"));
@@ -690,6 +708,7 @@ mod tests {
       description: "round: trip with # special chars".to_string(),
       system_prompt: "Body line 1.\nBody line 2.".to_string(),
       tools: None,
+      allowed_tools: None,
     };
     let md = render_skill_md(&original);
     let (fm, body) = parse_skill_md(&md).expect("roundtrip parses");
@@ -706,6 +725,7 @@ mod tests {
       description: "has: colon and #hash".to_string(),
       system_prompt: "body".to_string(),
       tools: None,
+      allowed_tools: None,
     };
     let md = render_skill_md(&skill);
     // description must be quoted since it contains both ':' and '#'
@@ -730,11 +750,67 @@ mod tests {
           parameters: serde_json::json!({}),
         },
       ]),
+      allowed_tools: None,
     };
     let md = render_skill_md(&skill);
     assert!(md.contains("allowed_tools:"));
     assert!(md.contains("  - read_file"));
     assert!(md.contains("  - run_shell"));
+  }
+
+  /// The gap this closed ran from the parser to the loop: `allowed_tools` was
+  /// read off disk into `Frontmatter` and then dropped on the floor, because
+  /// `load_skill_md` hard-coded `tools: None` and had nowhere else to put it.
+  #[test]
+  fn a_loaded_skill_carries_its_whitelist_to_the_loop() {
+    let tmp = std::env::temp_dir().join("seekcli_test_skill_allowed.md");
+    std::fs::write(
+      &tmp,
+      "---\nname: narrow\ndescription: read-only\nallowed_tools:\n  - read_file\n  - grep\n---\nbody\n",
+    )
+    .expect("write tmp");
+    let skill = load_skill_md(&tmp).expect("load ok");
+    assert_eq!(
+      skill.allowed_tools,
+      Some(vec!["read_file".to_string(), "grep".to_string()]),
+      "the whitelist must survive the trip from disk to Skill"
+    );
+    let _ = std::fs::remove_file(&tmp);
+  }
+
+  /// A skill with no `allowed_tools` must not narrow anything. `Some(vec![])`
+  /// and `None` mean different things and the loop branches on it.
+  #[test]
+  fn a_skill_without_a_whitelist_does_not_narrow() {
+    let tmp = std::env::temp_dir().join("seekcli_test_skill_nonarrow.md");
+    std::fs::write(&tmp, "---\nname: wide\ndescription: d\n---\nbody\n").expect("write tmp");
+    let skill = load_skill_md(&tmp).expect("load ok");
+    assert_eq!(skill.allowed_tools, None);
+    let _ = std::fs::remove_file(&tmp);
+  }
+
+  /// Render must emit the declared whitelist, not re-derive it from `tools`.
+  /// Before stage 42 the derivation was the only source, so a rendered skill
+  /// could name tools it did not actually narrow to.
+  #[test]
+  fn render_emits_the_declared_whitelist_over_the_derived_one() {
+    let skill = Skill {
+      name: "x".to_string(),
+      description: "y".to_string(),
+      system_prompt: "body".to_string(),
+      tools: Some(vec![SkillTool {
+        name: "run_shell".to_string(),
+        description: String::new(),
+        parameters: serde_json::json!({}),
+      }]),
+      allowed_tools: Some(vec!["read_file".to_string()]),
+    };
+    let md = render_skill_md(&skill);
+    assert!(md.contains("  - read_file"), "{md}");
+    assert!(
+      !md.contains("  - run_shell"),
+      "derived list must not win: {md}"
+    );
   }
 
   #[test]

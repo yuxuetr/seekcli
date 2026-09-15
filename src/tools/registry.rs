@@ -435,6 +435,31 @@ pub fn filter_by_allowed(tools: &[Tool], allowed: &[&str]) -> Vec<Tool> {
     .collect()
 }
 
+/// Apply a Skill's `allowed_tools` whitelist to the effective tool surface.
+///
+/// Returns the narrowed set plus any declared name that matched nothing, so a
+/// caller can name the typo instead of silently honouring it.
+///
+/// **This can only remove.** A skill listing `run_shell` does not thereby gain
+/// `run_shell`: the name has to already be on the surface, and every surviving
+/// tool still passes the policy gate on each call. Declaring a need is not the
+/// same as being granted it — the whitelist is a filter over what the host
+/// already decided to offer, never a source of authority.
+pub fn narrow_to_skill(tools: Vec<Tool>, allowed: &[String]) -> (Vec<Tool>, Vec<String>) {
+  let present: std::collections::HashSet<&str> =
+    tools.iter().map(|t| t.function.name.as_str()).collect();
+  let unknown: Vec<String> = allowed
+    .iter()
+    .filter(|name| !present.contains(name.as_str()))
+    .cloned()
+    .collect();
+  let kept = tools
+    .into_iter()
+    .filter(|t| allowed.iter().any(|name| name == &t.function.name))
+    .collect();
+  (kept, unknown)
+}
+
 /// Merge skill-declared tools onto the base system tools.
 /// System tools take precedence on name collision so their schemas remain authoritative.
 pub fn merge_with_skill(skill_tools: Option<Vec<Tool>>) -> Vec<Tool> {
@@ -534,5 +559,50 @@ mod tests {
     assert_eq!(edit_distance("", "abc"), 3);
     assert_eq!(edit_distance("abc", ""), 3);
     assert_eq!(edit_distance("glob", "grep"), edit_distance("grep", "glob"));
+  }
+
+  /// The asymmetry this closed: `filter_by_allowed` enforced a SubAgent
+  /// template's whitelist from day one, while the identically-named Skill
+  /// frontmatter field was parsed and thrown away. Same word, two meanings —
+  /// one a permission boundary, the other decoration.
+  #[test]
+  fn a_skill_whitelist_removes_what_it_does_not_name() {
+    let surface = vec![
+      make_tool("read_file", "", json!({})),
+      make_tool("run_shell", "", json!({})),
+      make_tool("write_file", "", json!({})),
+    ];
+    let allowed = vec!["read_file".to_string(), "write_file".to_string()];
+    let (kept, unknown) = narrow_to_skill(surface, &allowed);
+    let names: Vec<&str> = kept.iter().map(|t| t.function.name.as_str()).collect();
+    assert_eq!(names, vec!["read_file", "write_file"]);
+    assert!(unknown.is_empty());
+  }
+
+  /// Declaring is not granting. A skill cannot conjure a tool the host never
+  /// offered — the whitelist filters the surface, it does not add to it.
+  #[test]
+  fn a_skill_cannot_grant_itself_a_tool_that_is_not_offered() {
+    let surface = vec![make_tool("read_file", "", json!({}))];
+    let allowed = vec!["read_file".to_string(), "launch_missiles".to_string()];
+    let (kept, unknown) = narrow_to_skill(surface, &allowed);
+    assert_eq!(kept.len(), 1, "the surface cannot grow: {kept:?}");
+    assert_eq!(
+      unknown,
+      vec!["launch_missiles".to_string()],
+      "an unmatched name must be reported, not silently honoured"
+    );
+  }
+
+  /// A whitelist that matches nothing leaves no tools. That is a legitimate
+  /// (if useless) configuration, so it is honoured — but the caller is told,
+  /// because it otherwise looks like a model that stopped calling tools.
+  #[test]
+  fn a_whitelist_matching_nothing_is_honoured_and_reported() {
+    let surface = vec![make_tool("read_file", "", json!({}))];
+    let allowed = vec!["nope".to_string()];
+    let (kept, unknown) = narrow_to_skill(surface, &allowed);
+    assert!(kept.is_empty());
+    assert_eq!(unknown.len(), 1);
   }
 }

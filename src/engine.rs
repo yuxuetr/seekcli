@@ -969,6 +969,34 @@ impl App {
       // the tool-narrowing that makes sub-agents cheap and safe.
       let mut merged = tools::registry::merge_with_skill(tools);
       merged.extend(self.mcp.schemas());
+      // The active skill's `allowed_tools` narrows what the model can see.
+      // Applied here, after MCP, so a skill narrows the *effective* surface
+      // rather than only the built-ins — and applied as a filter, so it can
+      // never widen. See `narrow_to_skill`.
+      if let Some(allowed) = self
+        .current_skill
+        .as_ref()
+        .and_then(|s| s.allowed_tools.as_ref())
+      {
+        let (kept, unknown) = tools::registry::narrow_to_skill(merged, allowed);
+        if !unknown.is_empty() {
+          // A name that matches nothing is a typo or a tool the host does not
+          // offer. Honouring it silently would leave the author believing the
+          // skill is narrower than it is.
+          eprintln!(
+            "{} skill declares tool(s) that are not on the surface: {}",
+            "[Skill]".yellow(),
+            unknown.join(", ")
+          );
+        }
+        if kept.is_empty() {
+          eprintln!(
+            "{} `allowed_tools` matched nothing — this turn runs with no tools at all",
+            "[Skill]".yellow()
+          );
+        }
+        merged = kept;
+      }
       merged
     } else {
       tools.unwrap_or_default()

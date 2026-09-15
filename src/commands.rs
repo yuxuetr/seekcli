@@ -160,6 +160,16 @@ impl App {
         skill.name, skill.system_prompt
       ),
     });
+    // Say it at activation, not only in `harness_inspect`: a skill that
+    // silently removes tools looks like a model that has stopped trying.
+    if let Some(allowed) = &skill.allowed_tools {
+      eprintln!(
+        "{} '{}' narrows tools to: {}",
+        "[Skill]".cyan(),
+        skill.name,
+        allowed.join(", ")
+      );
+    }
     self.current_skill = Some(skill);
   }
 

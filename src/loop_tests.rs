@@ -273,6 +273,7 @@ mod tests {
       description: "adds a system message the recording never had".into(),
       system_prompt: "be terse".into(),
       tools: None,
+      allowed_tools: None,
     };
     let result = app
       .run_headless(

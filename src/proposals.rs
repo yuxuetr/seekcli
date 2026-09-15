@@ -230,16 +230,29 @@ impl ProposalStore {
     let md = pending.path.join("SKILL.md");
     let text = fs::read_to_string(&md).with_context(|| format!("cannot read {}", md.display()))?;
     let (front, body) = crate::skills::split_frontmatter(&text, "SKILL.md")?;
-    let description = front
-      .lines()
-      .find_map(|l| l.trim().strip_prefix("description:"))
-      .map(|d| d.trim().trim_matches('"').to_string())
-      .unwrap_or_default();
+    // Prefer the real parser, so the gate evaluates a proposal with the same
+    // tool narrowing it will have once it lands — measuring an unnarrowed
+    // version and then landing a narrowed one would make the verdict a
+    // statement about a skill that never runs. Fall back to the lenient scan
+    // for a draft that does not yet satisfy the full schema: `read_skill` is a
+    // preview, and refusing to preview a half-written draft helps nobody.
+    let (description, allowed_tools) = match crate::skills::parse_skill_md(&text) {
+      Ok((fm, _)) => (fm.description, fm.allowed_tools),
+      Err(_) => (
+        front
+          .lines()
+          .find_map(|l| l.trim().strip_prefix("description:"))
+          .map(|d| d.trim().trim_matches('"').to_string())
+          .unwrap_or_default(),
+        None,
+      ),
+    };
     Ok(crate::Skill {
       name: pending.name,
       description,
       system_prompt: body,
       tools: None,
+      allowed_tools,
     })
   }
 

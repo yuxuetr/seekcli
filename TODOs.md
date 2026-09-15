@@ -1093,13 +1093,22 @@ skill + shell 脚本这条路可用，照抄即可，不该占代码排期。
     - [ ] 恢复时区分动作类型，**不盲目重放**：只读可重跑、可检查结果的先查实际状态、
           无法确认的外部副作用标记「结果未知」并要求确认。
           **可恢复 ≠ 自动从最后一行继续，更不等于 exactly-once。**
-- [ ] **42.2 `allowed_tools` 语义不对称**（L5-7，**安全级**）
-    - [ ] 现状：SubAgent 模板真裁剪（`engine.rs:249` → `registry::filter_by_allowed`）；
-          Skill 完全不裁（`skills.rs:286` 自注 "not yet consumed downstream"）。
+- [x] **42.2 `allowed_tools` 语义不对称**（L5-7，**安全级**）✅ 2026-09-16
+    - [x] 现状：SubAgent 模板真裁剪（`engine.rs:249` → `registry::filter_by_allowed`）；
+          Skill 完全不裁（`skills.rs:286` 自注 "not yet consumed downstream"，
+          而它指向的「phase 12.5」从未存在）。
           **同名字段一边是权限边界一边是装饰。**
-    - [ ] 二选一，不许继续骗人：实现 Skill 侧裁剪，或删字段并在解析时显式报错。
-    - [ ] 若实现，必须同时写明：**Skill 声明需要哪些工具 ≠ Skill 有权授予自己这些工具**。
-          实际授权只来自 policy gate 与用户批准。
+    - [x] 选了实现：`registry::narrow_to_skill` 在 loop 入口裁剪 effective 工具面，
+          位置在 MCP 合并**之后**，所以作用于真实工具面而非只作用于内置工具。
+    - [x] 三条不变量各有单测：**只能删不能加**（声明需求 ≠ 被授予权限，
+          实际授权仍只来自 policy gate 与用户批准）；**匹配不上的名字被点名**
+          而非静默忽略；**裁剪后为空合法但会被告知**。
+    - [x] `delegate_to_subagent` 拿到的是裁剪后的集合，
+          故 **skill 的裁剪无法通过委派绕过**。
+    - [x] 顺带修了两处同源的名实不符：`render_skill_md` 此前从 `skill.tools`
+          反推 `allowed_tools:`（渲染出的 skill 会声明它并未裁剪到的工具）；
+          `ProposalStore::read_skill` 此前不带白名单，于是 **eval 闸门衡量的是
+          未裁剪版本、落地的却是裁剪版本**——判决在谈论一个从不运行的 skill。
 - [x] **42.3 中断不进子代理**（L1-7，**缺陷级**）✅ 2026-09-16
     - [x] 现状：`engine.rs:382`（流内）与 `engine.rs:962`（轮顶）两处中断检查都是
           `depth == 0` 门控。子代理跑起来后 Ctrl-C 不被它的循环看见——

@@ -30,6 +30,7 @@
 | L5-3 | 无插件 / profile 组合机制 | 取舍级，见 §5 |
 | L5-4 | 无 hooks | 取舍级 |
 | L5-5 | 无 workflow 编排 | 取舍级 |
+| ~~L5-7~~ | ~~Skill 的 `allowed_tools` 解析后未消费~~ | **阶段四十二已落地**：在 loop 入口按白名单裁剪 effective 工具面，见 §4.5 | — |
 | ~~L5-6~~ | ~~提案闸门只服务 skill~~ | **阶段三十七已落地**：`proposals/{skill,mcp,task}` + `propose` 工具 + `/propose` 闸门。真实验证——起草 → `/propose accept mcp files` → config.toml 追加且原注释一字未动 → 重启后该 server 真的被加载并尝试连接 |
 
 ## 4. 目标设计
@@ -158,3 +159,45 @@ config.toml 里的注释全部抹掉，而「首次运行生成一份带注释�
 ## 7. 对应路线
 
 阶段二十八（MCP 客户端，P1）、阶段三十（后台子代理随 job 一起落地，P2）。
+
+### 4.5 Skill 工具裁剪（L5-7）✅ 阶段四十二已落地
+
+**这一条是安全级的，因为它是一处语义不对称，不只是一个没做完的功能。**
+
+`allowed_tools` 这个名字在仓库里有两个意思：
+
+| 出现处 | 阶段九起的行为 |
+| --- | --- |
+| SubAgent 模板（`subagents/registry.rs`） | 真裁剪，经 `registry::filter_by_allowed` |
+| Skill frontmatter（`skills.rs`） | **解析、校验、然后丢掉** |
+
+`skills.rs` 自己的注释写着 "phase 12.5 will wire `allowed_tools` into a
+per-skill tool whitelist"——那个阶段从未存在。于是同一个字段一边是权限边界，
+一边是装饰；写 SKILL.md 的人没有办法从字段名分辨自己在哪一边。
+
+落地形态：
+
+```text
+merge_with_skill(内置 + skill 自带 schema)
+        + mcp.schemas()
+        → narrow_to_skill(effective, allowed)      ← 只能删，不能加
+        → policy gate（每次调用，未变）
+```
+
+三条不变量，各有单测：
+
+1. **只能删**。skill 声明 `run_shell` 不等于它因此获得 `run_shell`——
+   名字必须已经在工具面上。**声明需求不是被授予权限**，
+   实际授权仍然只来自宿主策略与用户批准。
+2. **匹配不上的名字被点名**，而不是静默忽略。一个 typo 会让作者以为
+   自己的 skill 比实际更窄。
+3. **裁剪后为空是合法但会被告知**的配置——否则看起来像模型不肯调工具了。
+
+裁剪发生在 MCP 合并**之后**，所以它作用于 effective 工具面而非只作用于内置工具；
+`delegate_to_subagent` 拿到的也是裁剪后的集合，因此 **skill 的裁剪无法通过委派绕过**。
+
+顺带修了两处同源的名实不符：`render_skill_md` 此前从 `skill.tools` **反推**
+`allowed_tools:`（于是渲染出的 skill 会声明它其实没有裁剪到的工具），
+现在以声明的白名单为准；`ProposalStore::read_skill` 此前不带白名单，
+于是 eval 闸门衡量的是一个**未裁剪**的版本、落地的却是裁剪版本——
+判决因此在谈论一个从不运行的 skill。
