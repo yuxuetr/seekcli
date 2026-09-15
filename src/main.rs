@@ -116,6 +116,10 @@ struct App {
   /// agent loop iteration and during stream consumption to allow graceful
   /// mid-task interruption back to the REPL.
   interrupt: Arc<AtomicBool>,
+  /// When to compact, derived from `[memory]` once at startup rather than per
+  /// turn — `Budget::from_config` warns about a bad ratio, and that warning
+  /// belongs in the startup output, not in the middle of every turn.
+  memory_budget: agent::compressor::Budget,
 }
 
 impl App {
@@ -150,6 +154,7 @@ impl App {
     // schemas in the very first request, and discovering a tool mid-turn
     // would change the tool set under prompt caching.
     let mcp = mcp::McpRegistry::connect_all(&config.mcp_servers).await;
+    let memory_budget = agent::compressor::Budget::from_config(&config.memory);
 
     let interrupt = Arc::new(AtomicBool::new(false));
     spawn_interrupt_watcher(interrupt.clone());
@@ -172,6 +177,7 @@ impl App {
       tracer: observability::trace::Trace::from_env(),
       mcp,
       interrupt,
+      memory_budget,
     })
   }
 
@@ -186,6 +192,7 @@ impl App {
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
+    let memory_budget = agent::compressor::Budget::from_config(&config.memory);
     Ok(Self {
       brain,
       config,
@@ -202,6 +209,7 @@ impl App {
       tracer: observability::trace::Trace::new(false),
       mcp: mcp::McpRegistry::empty(),
       interrupt: Arc::new(AtomicBool::new(false)),
+      memory_budget,
     })
   }
 

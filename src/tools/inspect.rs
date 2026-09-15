@@ -48,6 +48,20 @@ pub struct Snapshot {
   pub session_id: String,
   pub events: usize,
   pub compactions: usize,
+  /// When compaction trips, and how that number was arrived at. Rendered so
+  /// the model (and the user reading `/inspect`) can tell a threshold that was
+  /// configured from one that was defaulted — a window set too high for the
+  /// model in use is otherwise invisible until a request fails on length.
+  pub memory: MemoryEntry,
+}
+
+/// The `[memory]` budget as the session section renders it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemoryEntry {
+  pub threshold_tokens: usize,
+  pub window_tokens: usize,
+  pub ratio: f64,
+  pub keep_tail: usize,
 }
 
 /// The sections a caller may ask for.
@@ -182,8 +196,15 @@ fn mcp(snap: &Snapshot) -> String {
 
 fn session(snap: &Snapshot) -> String {
   format!(
-    "# session\nid: {}\nevents: {}\ncompactions: {}\n",
-    snap.session_id, snap.events, snap.compactions
+    "# session\nid: {}\nevents: {}\ncompactions: {}\n\
+     compact_at: {} tokens (window {} x {})\nkeep_tail: {} messages\n",
+    snap.session_id,
+    snap.events,
+    snap.compactions,
+    snap.memory.threshold_tokens,
+    snap.memory.window_tokens,
+    snap.memory.ratio,
+    snap.memory.keep_tail
   )
 }
 
@@ -214,6 +235,12 @@ mod tests {
       session_id: "abc123".into(),
       events: 42,
       compactions: 1,
+      memory: MemoryEntry {
+        threshold_tokens: 150_000,
+        window_tokens: 200_000,
+        ratio: 0.75,
+        keep_tail: 8,
+      },
     }
   }
 
@@ -226,6 +253,16 @@ mod tests {
     for s in SECTIONS {
       assert!(out.contains(&format!("# {s}")), "missing {s} in:\n{out}");
     }
+  }
+
+  /// A window set too high for the model in use is invisible until a request
+  /// fails on length. Rendering the derivation makes it inspectable before then.
+  #[test]
+  fn the_session_section_shows_where_the_threshold_came_from() {
+    let out = section("session", &snap());
+    assert!(out.contains("compact_at: 150000"), "{out}");
+    assert!(out.contains("window 200000"), "{out}");
+    assert!(out.contains("keep_tail: 8"), "{out}");
   }
 
   #[test]

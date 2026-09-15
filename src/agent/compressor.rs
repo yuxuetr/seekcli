@@ -31,16 +31,85 @@ use crate::api::tokens::{Heuristic, TokenCounter};
 use crate::api::{LlmProvider, Message, StreamItem};
 use crate::session::{self, EventPayload, Session};
 
-/// Compaction trips above this many estimated tokens.
+/// When to compact, and how much to protect — derived from the configured
+/// model window rather than hard-coded.
 ///
-/// 150K leaves comfortable room inside a large context window while giving the
-/// tail and the system prompts space to breathe. It replaces a 600_000-*byte*
-/// threshold, which meant the same conversation compacted at wildly different
-/// real sizes depending on whether it was written in English or Chinese.
-pub const COMPRESSION_THRESHOLD_TOKENS: usize = 150_000;
+/// The two numbers this replaced were a fixed `150_000` and a fixed `8`. The
+/// threshold in particular was wrong in a way nothing could observe: the
+/// provider is chosen statically from config and two wire protocols are
+/// supported, so the window behind that number differs per install. Point
+/// SeekCLI at a model with a smaller window and compaction simply never fires
+/// — the request fails on length, and no line of output connects the two.
+///
+/// `Budget::default()` reproduces the old constants exactly, so the change is
+/// one of configurability and visibility, not of behaviour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Budget {
+  /// Compaction trips at or above this many estimated tokens.
+  pub threshold_tokens: usize,
+  /// Trailing messages held out of compaction as protected working memory.
+  pub keep_tail: usize,
+  /// Kept for the log line, so the threshold can be read back as
+  /// `window * ratio` instead of appearing as an unexplained number.
+  pub window_tokens: usize,
+  pub ratio: f64,
+}
 
-/// Number of trailing messages to keep in the protected working memory.
-const KEEP_TAIL: usize = 8;
+/// Ratios outside this range are refused rather than honoured: at 0 every turn
+/// compacts, at 1 the threshold sits at the window itself and leaves the model
+/// no room to answer. Both are configuration mistakes, not intentions.
+const RATIO_BOUNDS: std::ops::RangeInclusive<f64> = 0.1..=0.95;
+
+impl Budget {
+  /// Build from config, clamping a nonsensical ratio **loudly**. Silently
+  /// honouring `compact_at_ratio = 5.0` would disable compaction with no trace
+  /// — the same invisible failure this type exists to end.
+  pub fn from_config(cfg: &crate::config::MemoryConfig) -> Self {
+    let mut ratio = cfg.compact_at_ratio;
+    if !ratio.is_finite() || !RATIO_BOUNDS.contains(&ratio) {
+      let clamped = if ratio.is_finite() {
+        ratio.clamp(*RATIO_BOUNDS.start(), *RATIO_BOUNDS.end())
+      } else {
+        default_ratio()
+      };
+      eprintln!(
+        "{} memory.compact_at_ratio = {} is out of range {:?}; using {}",
+        "[Memory]".yellow(),
+        ratio,
+        RATIO_BOUNDS,
+        clamped
+      );
+      ratio = clamped;
+    }
+    let window = cfg.context_window_tokens;
+    Self {
+      // `as usize` on a product of a positive usize and a bounded ratio: the
+      // ratio is <= 0.95 here, so the result cannot exceed `window`.
+      threshold_tokens: (window as f64 * ratio) as usize,
+      keep_tail: cfg.keep_tail_messages.max(2),
+      window_tokens: window,
+      ratio,
+    }
+  }
+
+  /// How the threshold was arrived at, for the compaction log line.
+  fn derivation(&self) -> String {
+    format!(
+      "{} = window {} x {}",
+      self.threshold_tokens, self.window_tokens, self.ratio
+    )
+  }
+}
+
+fn default_ratio() -> f64 {
+  0.75
+}
+
+impl Default for Budget {
+  fn default() -> Self {
+    Self::from_config(&crate::config::MemoryConfig::default())
+  }
+}
 
 /// Only mask far-history tool results larger than this (small outputs aren't
 /// worth a placeholder).
@@ -62,9 +131,10 @@ pub async fn maybe_compress(
   client: &dyn LlmProvider,
   model: &str,
   messages: &mut Vec<Message>,
+  budget: Budget,
 ) -> Result<bool> {
   let total = estimate_tokens(messages);
-  if total < COMPRESSION_THRESHOLD_TOKENS {
+  if total < budget.threshold_tokens {
     return Ok(false);
   }
 
@@ -74,14 +144,14 @@ pub async fn maybe_compress(
     .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
     .count();
 
-  if messages.len() <= head_end + KEEP_TAIL {
+  if messages.len() <= head_end + budget.keep_tail {
     // Nothing but head + protected tail; can't shed the middle safely.
     // Still head-tail truncate any oversized tail tool result (stage 2).
     let truncated = truncate_tail(messages, head_end);
     return Ok(truncated);
   }
 
-  let tail_start = messages.len() - KEEP_TAIL;
+  let tail_start = messages.len() - budget.keep_tail;
   let mut changed = false;
 
   // Stage 1: mask bulky far-history tool results (preserve ToolCall intent).
@@ -109,14 +179,16 @@ pub async fn maybe_compress(
     let after = estimate_tokens(messages);
     let reduction = 100usize.saturating_sub(after * 100 / total.max(1));
     eprintln!(
-      "{} staged compression: {} → {} tokens ({}% reduction, {} bytes masked)",
+      "{} staged compression: {} → {} tokens ({}% reduction, {} bytes masked); \
+       threshold {}",
       "[Memory]".magenta(),
       total,
       after,
       reduction,
-      masked_bytes
+      masked_bytes,
+      budget.derivation()
     );
-    if after < COMPRESSION_THRESHOLD_TOKENS {
+    if after < budget.threshold_tokens {
       return Ok(true);
     }
   }
@@ -158,9 +230,10 @@ pub async fn maybe_compact_session(
   client: &dyn LlmProvider,
   model: &str,
   session: &mut Session,
+  budget: Budget,
 ) -> Result<bool> {
   let (messages, seqs) = session::derive_messages_indexed(&session.events);
-  if estimate_tokens(&messages) < COMPRESSION_THRESHOLD_TOKENS {
+  if estimate_tokens(&messages) < budget.threshold_tokens {
     return Ok(false);
   }
 
@@ -170,10 +243,10 @@ pub async fn maybe_compact_session(
     .iter()
     .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
     .count();
-  if messages.len() <= head_end + KEEP_TAIL {
+  if messages.len() <= head_end + budget.keep_tail {
     return Ok(false);
   }
-  let tail_start = messages.len() - KEEP_TAIL;
+  let tail_start = messages.len() - budget.keep_tail;
 
   let from = match seqs.get(head_end) {
     Some(seq) => *seq,
@@ -325,6 +398,82 @@ mod tests {
       content: content.to_string(),
       tool_call_id: "call_1".to_string(),
     }
+  }
+
+  use crate::config::MemoryConfig;
+
+  /// The defaults must reproduce the constants they replaced exactly. This is
+  /// the whole safety argument for the change: it makes the threshold
+  /// configurable and visible without moving it for anyone who does nothing.
+  #[test]
+  fn the_default_budget_reproduces_the_old_constants() {
+    let b = Budget::default();
+    assert_eq!(
+      b.threshold_tokens, 150_000,
+      "was COMPRESSION_THRESHOLD_TOKENS"
+    );
+    assert_eq!(b.keep_tail, 8, "was KEEP_TAIL");
+  }
+
+  /// The bug this fixes: a fixed 150K threshold against a model whose window
+  /// is smaller means compaction never fires and the request fails on length.
+  #[test]
+  fn a_smaller_window_lowers_the_threshold() {
+    let small = Budget::from_config(&MemoryConfig {
+      context_window_tokens: 64_000,
+      ..MemoryConfig::default()
+    });
+    assert_eq!(small.threshold_tokens, 48_000);
+    assert!(
+      small.threshold_tokens < Budget::default().threshold_tokens,
+      "a 64K model must compact earlier than a 200K one"
+    );
+  }
+
+  /// A ratio outside the sane band is a configuration mistake, not an
+  /// intention — honouring `5.0` would silently disable compaction, which is
+  /// the exact invisible failure this type exists to end.
+  #[test]
+  fn an_absurd_ratio_is_clamped_rather_than_honoured() {
+    let too_big = Budget::from_config(&MemoryConfig {
+      compact_at_ratio: 5.0,
+      ..MemoryConfig::default()
+    });
+    assert!(too_big.threshold_tokens <= too_big.window_tokens);
+    assert_eq!(too_big.ratio, 0.95);
+
+    let too_small = Budget::from_config(&MemoryConfig {
+      compact_at_ratio: 0.0,
+      ..MemoryConfig::default()
+    });
+    assert_eq!(too_small.ratio, 0.1, "0 would compact on every single turn");
+
+    let nonsense = Budget::from_config(&MemoryConfig {
+      compact_at_ratio: f64::NAN,
+      ..MemoryConfig::default()
+    });
+    assert_eq!(nonsense.ratio, 0.75, "NaN falls back to the default");
+  }
+
+  /// `keep_tail` under 2 would let a compaction split a tool call from its
+  /// result — the one thing the whole module is built to prevent.
+  #[test]
+  fn keep_tail_has_a_floor() {
+    let b = Budget::from_config(&MemoryConfig {
+      keep_tail_messages: 0,
+      ..MemoryConfig::default()
+    });
+    assert_eq!(b.keep_tail, 2);
+  }
+
+  /// The threshold must be readable back as its derivation, so a number in the
+  /// log can be traced to the config that produced it.
+  #[test]
+  fn the_log_line_explains_where_the_threshold_came_from() {
+    let d = Budget::default().derivation();
+    assert!(d.contains("150000"), "{d}");
+    assert!(d.contains("200000"), "{d}");
+    assert!(d.contains("0.75"), "{d}");
   }
 
   #[test]

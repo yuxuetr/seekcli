@@ -211,6 +211,12 @@ impl App {
       session_id: self.current_session.id().to_string(),
       events: self.current_session.events.len(),
       compactions,
+      memory: tools::inspect::MemoryEntry {
+        threshold_tokens: self.memory_budget.threshold_tokens,
+        window_tokens: self.memory_budget.window_tokens,
+        ratio: self.memory_budget.ratio,
+        keep_tail: self.memory_budget.keep_tail,
+      },
     }
   }
 
@@ -549,6 +555,7 @@ impl App {
       self.brain.as_ref(),
       &self.model,
       &mut self.current_session,
+      self.memory_budget,
     )
     .await
     {
@@ -1002,8 +1009,13 @@ impl App {
       // contexts and their own max_iter cap.
       if depth == 0 {
         let cspan = self.tracer.begin("compaction", "maybe_compress", turn_span);
-        if let Err(e) =
-          agent::compressor::maybe_compress(self.brain.as_ref(), &self.model, &mut messages).await
+        if let Err(e) = agent::compressor::maybe_compress(
+          self.brain.as_ref(),
+          &self.model,
+          &mut messages,
+          self.memory_budget,
+        )
+        .await
         {
           eprintln!(
             "{} compression failed: {} (continuing without)",

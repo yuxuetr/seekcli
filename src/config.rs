@@ -53,6 +53,10 @@ pub struct Config {
   /// Absent in older config files, so it defaults to `~/.seekcli/tasks`.
   #[serde(default)]
   pub tasks: TasksConfig,
+  /// Context-compression budget. Absent means the built-in defaults, which
+  /// reproduce the fixed 150K threshold this section replaced.
+  #[serde(default)]
+  pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -330,6 +334,53 @@ pub struct TasksConfig {
   pub dir: Option<String>,
 }
 
+/// When to compact, expressed relative to the model's context window.
+///
+/// This replaced a bare `const COMPRESSION_THRESHOLD_TOKENS = 150_000`. The
+/// constant was wrong in a way that could not be seen: SeekCLI picks its
+/// provider statically from config and speaks two wire protocols, so the
+/// window behind that threshold varies per install. Configure a model whose
+/// window is under 150K and compression never fires — the request just fails,
+/// with nothing in the log pointing at the reason.
+///
+/// The defaults are chosen to reproduce the old constant exactly
+/// (200_000 * 0.75 = 150_000), so upgrading changes no behaviour.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct MemoryConfig {
+  /// The configured model's context window, in tokens.
+  #[serde(default = "default_context_window")]
+  pub context_window_tokens: usize,
+  /// Fraction of the window at which compaction trips. The remainder is left
+  /// for the system prompts, the next tool result, and the model's own output.
+  #[serde(default = "default_compact_at_ratio")]
+  pub compact_at_ratio: f64,
+  /// Trailing messages held out of compaction as protected working memory.
+  #[serde(default = "default_keep_tail")]
+  pub keep_tail_messages: usize,
+}
+
+fn default_context_window() -> usize {
+  200_000
+}
+
+fn default_compact_at_ratio() -> f64 {
+  0.75
+}
+
+fn default_keep_tail() -> usize {
+  8
+}
+
+impl Default for MemoryConfig {
+  fn default() -> Self {
+    Self {
+      context_window_tokens: default_context_window(),
+      compact_at_ratio: default_compact_at_ratio(),
+      keep_tail_messages: default_keep_tail(),
+    }
+  }
+}
+
 fn default_provider() -> String {
   "openai".to_string()
 }
@@ -348,6 +399,7 @@ impl Default for Config {
       pricing: PricingConfig::default(),
       security: SecurityConfig::default(),
       tasks: TasksConfig::default(),
+      memory: MemoryConfig::default(),
     }
   }
 }
@@ -577,7 +629,16 @@ fn write_default_config(path: &Path) -> Result<()> {
      [tasks]\n\
      # Where --run-task keeps reminders.md / todos.md / digest/.\n\
      # Defaults to ~/.seekcli/tasks when unset.\n\
-     # dir = \"~/Library/Mobile Documents/com~apple~CloudDocs/seekcli-tasks\"\n",
+     # dir = \"~/Library/Mobile Documents/com~apple~CloudDocs/seekcli-tasks\"\n\
+     \n\
+     # When to compact the conversation. The threshold is derived, not fixed:\n\
+     #   compact_at = context_window_tokens * compact_at_ratio\n\
+     # Set context_window_tokens to YOUR model's window. Leaving it too high\n\
+     # means compaction never fires and requests fail on length instead.\n\
+     [memory]\n\
+     context_window_tokens = {window}\n\
+     compact_at_ratio = {ratio}\n\
+     keep_tail_messages = {keep_tail}\n",
     project = PROJECT_CONFIG_FILE,
     env = CONFIG_ENV,
     provider = d.brain.provider,
@@ -588,6 +649,9 @@ fn write_default_config(path: &Path) -> Result<()> {
     max_delay = d.resilience.max_delay_secs,
     req_timeout = d.resilience.request_timeout_secs,
     idle_timeout = d.resilience.stream_idle_timeout_secs,
+    window = d.memory.context_window_tokens,
+    ratio = d.memory.compact_at_ratio,
+    keep_tail = d.memory.keep_tail_messages,
   );
   fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }
@@ -618,6 +682,33 @@ mod tests {
       let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(path, body);
+  }
+
+  /// The generated template must parse back into the very defaults it was
+  /// rendered from. Nothing checked this before, and `[memory]` introduced the
+  /// first *float* into the template — a rendering that TOML would not accept
+  /// (or that rounds) breaks first run for everyone, silently, on a path no
+  /// existing test walked.
+  #[test]
+  fn the_generated_template_parses_back_into_its_own_defaults() {
+    let root = temp_root("template-roundtrip");
+    let path = root.join("generated.toml");
+    if let Err(e) = write_default_config(&path) {
+      panic!("cannot write template: {e}");
+    }
+    let text = match fs::read_to_string(&path) {
+      Ok(t) => t,
+      Err(e) => panic!("cannot read back: {e}"),
+    };
+    let parsed: Config = match toml::from_str(&text) {
+      Ok(c) => c,
+      Err(e) => panic!("generated template is not valid TOML / schema: {e}\n{text}"),
+    };
+    assert_eq!(
+      parsed,
+      Config::default(),
+      "the template must round-trip to the defaults it claims to show"
+    );
   }
 
   #[test]
