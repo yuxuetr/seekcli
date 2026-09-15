@@ -37,6 +37,7 @@ Harness 还有 Two-Stage、Reminders、Recovery、并发编排、迭代上限。
 | L1-4 | 中断即终止，无法续跑 | Ctrl-C 后直接结束 | 功能 |
 | ~~L1-5~~ | ~~取消不向下传播~~ | **阶段三十一已落地**，实测 SIGINT 后子进程从 2 个降到 0 | — |
 | ~~L1-6~~ | ~~拒绝路径不可行动~~ | **阶段三十四已落地**：mode 门区分「工具不可用」与「这条命令不是只读」，命令门带上定罪子命令。真实验证——`safety.json` 7/7 PASS（≈¥0.06），模型在被拒后改路而非放弃 |
+| ~~L1-7~~ | ~~中断不进子代理~~ | **阶段四十二已落地**：两处检查的 `depth == 0` 门控去除，抽出 `take_interrupt`——每层观察、只有 depth 0 消费。见 §4.7 | — |
 
 ## 4. 目标设计
 
@@ -101,6 +102,33 @@ MCP 没有产生这个需求（它挂在工具层），L8 也没有（它在循�
 `Arc<AtomicBool>` 升级为携带 `tokio::sync::Notify` 的 `CancelToken`，
 经 `StepCtx` 传到 `tools::shell::run_shell`，用 `tokio::select!` 在
 子进程 `wait()` 与取消之间竞争，取消时 `child.start_kill()`。
+
+### 4.3.1 取消进子代理（L1-7）✅ 阶段四十二已落地
+
+**L1-5 只修了一半，而那一半看起来像全部。** 阶段三十一验收写的是「实测 SIGINT
+后子进程从 2 个降到 0」——那是**子进程**（`run_shell` 拉起的 OS 进程）。
+**子代理循环**是另一回事：`run_agent_loop` 的两处中断检查
+（流内、轮顶）都带着 `depth == 0` 门控，于是 Ctrl-C 杀掉了子代理正在跑的 shell，
+却让子代理的 ReAct 循环继续迭代 —— explore 15 轮 / general 20 轮。
+表现为「命令被杀了但 agent 还在转」。
+
+修法不是简单去掉门控。轮顶用的是 `swap`，**会消费标志位**：
+
+```rust
+fn take_interrupt(flag: &AtomicBool, depth: usize) -> bool {
+  if depth == 0 { flag.swap(false, Ordering::SeqCst) }
+  else          { flag.load(Ordering::SeqCst) }
+}
+```
+
+**每一层都观察，只有顶层消费。** 子代理若消费了标志位，就会停下自己
+而让父循环继续跑——比原 bug 更糟。正确的级联是：子代理跳出 →
+`[Interrupted by user]` 作为工具结果交回父 → 父的下一次轮顶看到标志位仍在 →
+依次解开 → 顶层 `swap` 清位，下一轮从干净状态开始。
+
+同时修正 `delegate_to_subagent` 的措辞：它原先对任何返回都说 `completed`。
+**被中断或撞上迭代上限的子代理没有完成**，按 `LoopStatus` 分别措辞——
+这与 L1 一贯的「模型停了 ≠ 任务过了」是同一条规则。
 
 ### 4.4 可续跑（L1-4）—— 部分落地
 

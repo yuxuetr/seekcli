@@ -274,10 +274,21 @@ impl App {
     ))
     .await
     {
-      Ok(run) => format!(
-        "Sub-agent '{}' completed. Summary:\n{}",
-        template.name, run.text
-      ),
+      // An interrupted or exhausted sub-agent has not "completed". Saying so
+      // would hand the parent a false success to reason from — the same
+      // confusion between "the model stopped" and "the task passed" that
+      // `LoopStatus` exists to keep apart.
+      Ok(run) => {
+        let verdict = match run.status {
+          LoopStatus::Completed => "completed",
+          LoopStatus::Interrupted => "was interrupted by the user before finishing",
+          LoopStatus::MaxIterations => "hit its iteration cap before finishing",
+        };
+        format!(
+          "Sub-agent '{}' {}. Summary:\n{}",
+          template.name, verdict, run.text
+        )
+      }
       Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
     }
   }
@@ -353,12 +364,7 @@ impl App {
   /// flow of its own: it turns a stream of deltas into a single response, and
   /// everything it touches (rendering, usage accounting, the mid-stream
   /// interrupt check) belongs to that job rather than to the loop's.
-  async fn request_step(
-    &mut self,
-    messages: &[Message],
-    tools: &[api::Tool],
-    depth: usize,
-  ) -> Result<Response> {
+  async fn request_step(&mut self, messages: &[Message], tools: &[api::Tool]) -> Result<Response> {
     let mut stream = self
       .brain
       .call_api_with_params(
@@ -377,9 +383,9 @@ impl App {
     let mut is_reasoning = false;
 
     while let Some(item) = stream.next().await {
-      // Mid-stream interrupt check. Don't reset the flag here — let the
-      // outer loop see it and exit cleanly.
-      if depth == 0 && self.interrupt.load(Ordering::SeqCst) {
+      // Mid-stream interrupt check, at every depth. Don't reset the flag here
+      // — let the outer loop see it and exit cleanly.
+      if self.interrupt.load(Ordering::SeqCst) {
         eprintln!("\n{}", "[Agent] interrupted by user (mid-stream)".yellow());
         break;
       }
@@ -459,6 +465,22 @@ impl App {
 /// The two must never be written separately: the moment a site appends to one
 /// and forgets the other, "model-visible means logged" quietly stops being
 /// true, and nothing would fail loudly to say so.
+/// Whether this loop level should stop for a user interrupt.
+///
+/// Every depth *observes* the flag, but only the top level *consumes* it. A
+/// sub-agent that cleared it would stop itself and leave its parent running —
+/// the user asked for everything to stop, not just the innermost thing. So the
+/// sub-agent breaks out, its `[Interrupted by user]` summary goes back as the
+/// tool result, and the parent's own top-of-iteration check sees the flag still
+/// set and unwinds in turn.
+fn take_interrupt(flag: &std::sync::atomic::AtomicBool, depth: usize) -> bool {
+  if depth == 0 {
+    flag.swap(false, Ordering::SeqCst)
+  } else {
+    flag.load(Ordering::SeqCst)
+  }
+}
+
 fn log_push(messages: &mut Vec<Message>, events: &mut Vec<EventPayload>, msg: Message) {
   if let Some(payload) = crate::session::event_for(&msg) {
     events.push(payload);
@@ -959,8 +981,9 @@ impl App {
 
     for iter in 0..max_iter {
       iterations = iter + 1;
-      // Top-of-iteration interrupt check (Ctrl-C between turns).
-      if depth == 0 && self.interrupt.swap(false, Ordering::SeqCst) {
+      // Top-of-iteration interrupt check (Ctrl-C between turns), at every
+      // depth — see `take_interrupt` for why only depth 0 clears the flag.
+      if take_interrupt(&self.interrupt, depth) {
         eprintln!("\n{}", "[Agent] interrupted by user".yellow());
         final_content = "[Interrupted by user]".to_string();
         completed = true;
@@ -1026,9 +1049,7 @@ impl App {
         content: assistant_content,
         reasoning: assistant_reasoning,
         tool_calls,
-      } = self
-        .request_step(&messages, &effective_tools, depth)
-        .await?;
+      } = self.request_step(&messages, &effective_tools).await?;
 
       // `verdict` makes the stage 19 failure mode visible at a glance: a turn
       // that produced prose but zero tool calls, while the model claimed to
@@ -1399,5 +1420,44 @@ mod tests {
     let mut messages = vec![Message::new_user_text("hi".to_string())];
     App::append_plan_with_bridge(&mut messages, "   ".to_string());
     assert_eq!(messages.len(), 1, "blank plan must not append anything");
+  }
+
+  /// The bug this replaced: both interrupt checks were gated on `depth == 0`,
+  /// so Ctrl-C during a sub-agent run was invisible to that sub-agent's loop.
+  /// `run_shell` died (it has its own copy of the flag) while the loop kept
+  /// iterating — up to `max_iter` 15 or 20 more times.
+  #[test]
+  fn a_sub_agent_sees_the_interrupt() {
+    let flag = std::sync::atomic::AtomicBool::new(true);
+    assert!(
+      take_interrupt(&flag, 1),
+      "a sub-agent must observe the flag"
+    );
+    assert!(take_interrupt(&flag, 3), "so must a nested one");
+  }
+
+  /// And the trap in fixing it: if the sub-agent *consumed* the flag, it would
+  /// stop itself and leave the parent running. The user asked for everything
+  /// to stop, so only depth 0 clears it.
+  #[test]
+  fn only_the_top_level_consumes_the_interrupt() {
+    let flag = std::sync::atomic::AtomicBool::new(true);
+    assert!(take_interrupt(&flag, 2));
+    assert!(
+      flag.load(Ordering::SeqCst),
+      "a sub-agent must leave the flag set for its parent"
+    );
+    assert!(take_interrupt(&flag, 0), "the parent then sees it");
+    assert!(
+      !flag.load(Ordering::SeqCst),
+      "and the top level is what clears it, so the next turn starts clean"
+    );
+  }
+
+  #[test]
+  fn an_unset_interrupt_stops_nobody() {
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    assert!(!take_interrupt(&flag, 0));
+    assert!(!take_interrupt(&flag, 1));
   }
 }
