@@ -308,12 +308,34 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
   out
 }
 
+/// What a tool call that was recorded but never answered projects as.
+///
+/// The wording is doing real work. The honest state is *unknown*, not
+/// "failed": the process could have died before the call ran, during it, or
+/// after it finished but before the result reached the log. Telling the model
+/// it failed would invite a retry of something that may already have sent the
+/// mail, made the commit, or deleted the file.
+pub const UNKNOWN_RESULT: &str = "[unknown result] SeekCLI stopped after this call was recorded \
+   but before its result was. The call may or may not have run. Check the actual state before \
+   retrying it — do not assume it did not happen.";
+
 pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
   // Later compactions win, so build the skip set first.
   let mut skip_until: Vec<(u64, u64, &str)> = Vec::new();
+  // Which tool calls ever got an answer. A crash between "recorded the intent"
+  // and "recorded the result" leaves an assistant message whose tool_calls
+  // have no matching tool messages — a shape the wire format rejects, so
+  // without this the session could be loaded but never continued.
+  let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
   for e in events {
-    if let EventPayload::Compaction { from, to, summary } = &e.payload {
-      skip_until.push((*from, *to, summary.as_str()));
+    match &e.payload {
+      EventPayload::Compaction { from, to, summary } => {
+        skip_until.push((*from, *to, summary.as_str()));
+      }
+      EventPayload::ToolResult { call_id, .. } => {
+        answered.insert(call_id.as_str());
+      }
+      _ => {}
     }
   }
 
@@ -347,17 +369,33 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
         content,
         reasoning,
         tool_calls,
-      } => out.push(Message::Simple {
-        images: Vec::new(),
-        role: "assistant".to_string(),
-        content: content.clone(),
-        reasoning_content: reasoning.clone(),
-        tool_calls: if tool_calls.is_empty() {
-          None
-        } else {
-          Some(tool_calls.clone())
-        },
-      }),
+      } => {
+        out.push(Message::Simple {
+          images: Vec::new(),
+          role: "assistant".to_string(),
+          content: content.clone(),
+          reasoning_content: reasoning.clone(),
+          tool_calls: if tool_calls.is_empty() {
+            None
+          } else {
+            Some(tool_calls.clone())
+          },
+        });
+        // Fill the holes a crash left, right here where the wire format needs
+        // them: every tool_call must be followed by a tool message. Real
+        // results for the same batch follow immediately after in the event
+        // stream, so the synthetic ones stay adjacent to their assistant
+        // message either way.
+        for call in tool_calls {
+          if !answered.contains(call.id.as_str()) {
+            out.push(Message::new_tool_response(
+              call.id.clone(),
+              UNKNOWN_RESULT.to_string(),
+              Vec::new(),
+            ));
+          }
+        }
+      }
       EventPayload::ToolResult {
         call_id,
         content,
@@ -395,9 +433,14 @@ pub fn derive_messages_indexed(events: &[SessionEvent]) -> (Vec<Message>, Vec<u6
   let messages = derive_messages(events);
   let mut seqs = Vec::with_capacity(messages.len());
   let mut skips: Vec<(u64, u64)> = Vec::new();
+  let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
   for e in events {
-    if let EventPayload::Compaction { from, to, .. } = &e.payload {
-      skips.push((*from, *to));
+    match &e.payload {
+      EventPayload::Compaction { from, to, .. } => skips.push((*from, *to)),
+      EventPayload::ToolResult { call_id, .. } => {
+        answered.insert(call_id.as_str());
+      }
+      _ => {}
     }
   }
   let mut index = 0usize;
@@ -416,6 +459,18 @@ pub fn derive_messages_indexed(events: &[SessionEvent]) -> (Vec<Message>, Vec<u6
     }
     if produces_message(&event.payload) {
       seqs.push(event.seq);
+      // The projection splices a synthetic tool response for every tool_call
+      // a crash left unanswered. They are attributed to the assistant event
+      // that declared the call, so the two walks stay the same length — the
+      // `debug_assert` below is what would otherwise catch this at runtime,
+      // in a build the user is not running.
+      if let EventPayload::AssistantMessage { tool_calls, .. } = &event.payload {
+        for call in tool_calls {
+          if !answered.contains(call.id.as_str()) {
+            seqs.push(event.seq);
+          }
+        }
+      }
     }
     index += 1;
   }
@@ -748,6 +803,101 @@ mod tests {
     assert_eq!(msgs.len(), seqs.len());
     // Every message is attributed to the event that produced it, in order.
     assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+  }
+
+  /// The crash this handles: the intent was journaled, the process died, and
+  /// the result never arrived. The wire format requires every `tool_calls`
+  /// entry to be followed by a tool message, so without a stand-in the session
+  /// could be loaded but never continued — `/resume` would produce a request
+  /// the API rejects.
+  #[test]
+  fn an_unanswered_tool_call_gets_an_explicit_unknown_result() {
+    let mut s = Session::new("crash".into(), "m".into());
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "delete the thing".into(),
+    });
+    s.record(EventPayload::AssistantMessage {
+      content: String::new(),
+      reasoning: None,
+      tool_calls: vec![ToolCall {
+        id: "c9".into(),
+        tool_type: "function".into(),
+        function: crate::api::FunctionCall {
+          name: "run_shell".into(),
+          arguments: "{}".into(),
+        },
+      }],
+    });
+    // ...and then the process died. No ToolResult event.
+
+    let msgs = s.messages();
+    let last = msgs.last().expect("a message");
+    match last {
+      Message::ToolResponse {
+        tool_call_id,
+        content,
+        ..
+      } => {
+        assert_eq!(tool_call_id, "c9");
+        assert!(content.contains("unknown result"), "{content}");
+        // The distinction that matters: unknown, not failed. Telling the model
+        // it failed invites a retry of something that may already have run.
+        assert!(
+          !content.to_lowercase().contains("failed"),
+          "must not claim the call failed: {content}"
+        );
+      }
+      other => panic!("expected a stand-in tool response, got {other:?}"),
+    }
+  }
+
+  /// The two projection walks must agree even when the first one splices in
+  /// stand-ins. `derive_messages_indexed` counts events, `derive_messages`
+  /// emits messages — adding a message without adding a seq trips a
+  /// `debug_assert` in a build the user is not running.
+  #[test]
+  fn the_index_map_accounts_for_spliced_stand_ins() {
+    let mut s = Session::new("crash".into(), "m".into());
+    s.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "go".into(),
+    });
+    s.record(EventPayload::AssistantMessage {
+      content: String::new(),
+      reasoning: None,
+      tool_calls: vec![
+        ToolCall {
+          id: "a".into(),
+          tool_type: "function".into(),
+          function: crate::api::FunctionCall {
+            name: "read_file".into(),
+            arguments: "{}".into(),
+          },
+        },
+        ToolCall {
+          id: "b".into(),
+          tool_type: "function".into(),
+          function: crate::api::FunctionCall {
+            name: "read_file".into(),
+            arguments: "{}".into(),
+          },
+        },
+      ],
+    });
+    s.record(EventPayload::ToolResult {
+      images: Vec::new(),
+      call_id: "a".into(),
+      content: "ok".into(),
+    });
+    // `b` never came back.
+    let (msgs, seqs) = derive_messages_indexed(&s.events);
+    assert_eq!(msgs.len(), seqs.len(), "the two walks diverged");
+    assert_eq!(
+      msgs.len(),
+      4,
+      "user + assistant + stand-in for b + result a"
+    );
   }
 
   #[test]

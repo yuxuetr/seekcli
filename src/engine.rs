@@ -23,6 +23,20 @@ pub(crate) enum LoopStatus {
   Interrupted,
 }
 
+/// Whether a run writes its events to the session log as it goes.
+///
+/// Only the interactive turn does. `run_headless` is documented as saving no
+/// session (the benchmark runner would otherwise leave one behind per eval
+/// task), and a sub-agent's events never belong to the parent log — its
+/// summary comes back as a tool result instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Journaling {
+  /// Append to `current_session` at each ordering point, and fsync.
+  Session,
+  /// Buffer in `LoopResult::events` and write nothing.
+  Buffered,
+}
+
 pub(crate) struct LoopResult {
   pub text: String,
   /// The working set is deliberately NOT returned. Once the log is the single
@@ -277,6 +291,9 @@ impl App {
       next_depth,
       template.max_iter,
       parent_span,
+      // A sub-agent's turns are not the parent's conversation; only its
+      // summary crosses back, as a tool result the parent then journals.
+      Journaling::Buffered,
     ))
     .await
     {
@@ -471,6 +488,34 @@ impl App {
 /// The two must never be written separately: the moment a site appends to one
 /// and forgets the other, "model-visible means logged" quietly stops being
 /// true, and nothing would fail loudly to say so.
+/// Get everything recorded so far onto disk, and say whether it worked.
+///
+/// The ordering this exists to enforce:
+///
+/// ```text
+///   record the intent (and its approval)  ->  fsync  ->  run the tool
+///   ->  record the result  ->  fsync  ->  hand it back to the model
+/// ```
+///
+/// Before this, nothing was written until the turn ended, so a crash mid-turn
+/// lost every tool call it had already made — the files were changed, the log
+/// said nothing. Writing the intent first cannot make a crash impossible; it
+/// makes the crash *legible*, by leaving a call with no result, which the
+/// projection turns into an explicit "unknown result" rather than a hole.
+///
+/// Returns the number of events written, or the error that stopped it.
+impl App {
+  fn flush_journal(&mut self, pending: &mut Vec<EventPayload>) -> Result<usize> {
+    if pending.is_empty() {
+      return Ok(0);
+    }
+    let n = pending.len();
+    self.current_session.extend(pending.drain(..));
+    self.history.save_session(&mut self.current_session)?;
+    Ok(n)
+  }
+}
+
 /// Whether this loop level should stop for a user interrupt.
 ///
 /// Every depth *observes* the flag, but only the top level *consumes* it. A
@@ -573,7 +618,14 @@ impl App {
     Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
     let run_span = self.tracer.start_run();
     let run = self
-      .run_agent_loop(messages, tools, 0, agent::MAX_ITER, run_span)
+      .run_agent_loop(
+        messages,
+        tools,
+        0,
+        agent::MAX_ITER,
+        run_span,
+        Journaling::Session,
+      )
       .await?;
     self.tracer.end(run_span);
     self.current_session.extend(run.events);
@@ -632,7 +684,14 @@ impl App {
     // where nobody is watching the terminal — `-p`, `--bench`, `--run-task`.
     let run_span = self.tracer.start_run();
     let run = self
-      .run_agent_loop(messages, tools, 0, self.max_iter, run_span)
+      .run_agent_loop(
+        messages,
+        tools,
+        0,
+        self.max_iter,
+        run_span,
+        Journaling::Buffered,
+      )
       .await?;
     self.tracer.end(run_span);
     match self.tracer.flush() {
@@ -953,6 +1012,7 @@ impl App {
     depth: usize,
     max_iter: usize,
     parent_span: Option<usize>,
+    journaling: Journaling,
   ) -> Result<LoopResult> {
     if depth > agent::MAX_SUBAGENT_DEPTH {
       anyhow::bail!(
@@ -1142,6 +1202,39 @@ impl App {
         break;
       }
 
+      // Ordering point 1: the intent to call these tools is on disk before
+      // any of them runs. A crash from here on leaves a call with no result,
+      // which the projection renders as an explicit "unknown result".
+      if journaling == Journaling::Session
+        && let Err(e) = self.flush_journal(&mut events)
+      {
+        // Whether this is fatal depends on what is about to happen. Read-only
+        // calls can be replayed freely, so an unwritable journal costs
+        // traceability and nothing else. Anything that writes must not run:
+        // continuing would change the world while the record of why is
+        // already known to be lost.
+        let side_effecting = tool_calls.iter().any(|tc| {
+          if crate::mcp::is_mcp_tool(&tc.function.name) {
+            !self.mcp.is_read_only(&tc.function.name)
+          } else {
+            !tools::registry::is_parallel_readonly(&tc.function.name)
+          }
+        });
+        if side_effecting {
+          self.tracer.end(turn_span);
+          anyhow::bail!(
+            "refusing to run tools with side effects: the session journal could not be \
+             written ({e}). Nothing was executed. Fix the problem with \
+             ~/.seekcli/sessions and retry."
+          );
+        }
+        eprintln!(
+          "{} journal write failed: {} — continuing because this turn only reads",
+          "[Session]".yellow(),
+          e
+        );
+      }
+
       let exec_span = self.tracer.begin(
         "execute",
         &format!("{} tool(s)", tool_calls.len()),
@@ -1274,6 +1367,21 @@ impl App {
         }),
       );
       self.tracer.end(exec_span);
+
+      // Ordering point 2: results are on disk before they go back to the
+      // model. A degradation here is not fatal — the side effects already
+      // happened, and stopping now would lose the results as well as the
+      // record of them — but it is never silent.
+      if journaling == Journaling::Session
+        && let Err(e) = self.flush_journal(&mut events)
+      {
+        eprintln!(
+          "{} tool results could not be journaled: {} — this turn is no longer \
+           fully recoverable",
+          "[Session]".yellow(),
+          e
+        );
+      }
 
       // System Reminder: if the main agent is repeating the same trajectory,
       // inject a high-priority user message at the point of decision to break
@@ -1466,6 +1574,46 @@ mod tests {
   /// so Ctrl-C during a sub-agent run was invisible to that sub-agent's loop.
   /// `run_shell` died (it has its own copy of the flag) while the loop kept
   /// iterating — up to `max_iter` 15 or 20 more times.
+  /// The ordering the journal exists to guarantee: what the loop recorded is
+  /// on disk *before* the tools run, not after the whole turn ends. Until this
+  /// existed, a crash mid-turn lost every call the turn had already made — the
+  /// files were changed and the log said nothing about why.
+  #[test]
+  fn flushing_puts_the_record_on_disk_mid_turn() {
+    let _guard = crate::testsync::lock();
+    let mut app = match App::for_test(Box::new(crate::api::record::Replaying::new(
+      std::path::PathBuf::from("tests/fixtures/nonexistent"),
+    ))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {e}"),
+    };
+
+    let mut pending = vec![EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "before the tools run".to_string(),
+    }];
+    match app.flush_journal(&mut pending) {
+      Ok(n) => assert_eq!(n, 1),
+      Err(e) => panic!("flush failed: {e}"),
+    }
+    assert!(pending.is_empty(), "flushed events must leave the buffer");
+
+    // On disk, not merely in the in-memory session.
+    let id = app.current_session.id().to_string();
+    let reloaded = match app.history.load_session(&id) {
+      Ok(s) => s,
+      Err(e) => panic!("cannot reload: {e}"),
+    };
+    assert_eq!(reloaded.events.len(), 1, "the event never reached the file");
+
+    // And a second flush with nothing pending is a no-op, not a rewrite.
+    let mut empty: Vec<EventPayload> = Vec::new();
+    match app.flush_journal(&mut empty) {
+      Ok(n) => assert_eq!(n, 0),
+      Err(e) => panic!("no-op flush failed: {e}"),
+    }
+  }
+
   #[test]
   fn a_sub_agent_sees_the_interrupt() {
     let flag = std::sync::atomic::AtomicBool::new(true);
