@@ -422,6 +422,18 @@ struct Cli {
   #[arg(long, value_name = "FILE.jsonl", requires = "bench")]
   trajectory: Option<PathBuf>,
 
+  /// Open the REPL on the most recent session instead of a blank one.
+  ///
+  /// The common case of "pick up where I left off", without having to read an
+  /// id out of `/history` first.
+  #[arg(short = 'c', long, conflicts_with = "resume")]
+  r#continue: bool,
+
+  /// Open the REPL on a specific stored session. Accepts an id prefix, the
+  /// same as `/resume`.
+  #[arg(long, value_name = "ID")]
+  resume: Option<String>,
+
   /// Run a named scheduled task (e.g. "reminders") headlessly instead of the
   /// REPL. Intended for launchd/cron invocation, not interactive use.
   #[arg(long, value_name = "TASK_NAME")]
@@ -631,6 +643,27 @@ async fn main() -> Result<()> {
   let mut app = App::new().await?;
   if let Some(n) = cli.max_iter {
     app.max_iter = n.max(1);
+  }
+
+  // Refused rather than ignored. A headless run deliberately keeps no session
+  // (`run_headless`), so honouring `--continue` there would mean silently
+  // starting fresh — and the caller would only find out from an answer that
+  // does not remember anything.
+  if (cli.r#continue || cli.resume.is_some()) && headless {
+    anyhow::bail!(
+      "--continue / --resume open the REPL on a stored session; they do not \
+       combine with -p / --bench / --run-task, because a headless run keeps no \
+       session to continue. Run `seekcli --continue` on its own."
+    );
+  }
+  if cli.r#continue || cli.resume.is_some() {
+    match app.resume_session(cli.resume.as_deref()) {
+      Ok(msg) => eprintln!("{} {}", "✦".cyan(), msg),
+      Err(e) => {
+        eprintln!("{} {:#}", "Error:".red(), e);
+        std::process::exit(exit::RUNTIME_ERROR);
+      }
+    }
   }
 
   if let Some(prompt) = cli.prompt {

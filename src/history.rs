@@ -137,6 +137,15 @@ impl HistoryManager {
     Ok(())
   }
 
+  /// The session touched most recently, if any.
+  ///
+  /// "Pick up where I left off" is the common case, and making the user run
+  /// `/history`, read a hex id and type it back is friction for the thing they
+  /// do most. Reads `meta.json` only, like `list_sessions`.
+  pub fn latest(&self) -> Option<SessionMeta> {
+    self.list_sessions().ok()?.into_iter().next()
+  }
+
   /// Session summaries, newest first. Reads `meta.json` only.
   pub fn list_sessions(&self) -> Result<Vec<SessionMeta>> {
     let mut out = Vec::new();
@@ -494,6 +503,32 @@ mod tests {
       Err(e) => panic!("load failed: {}", e),
     };
     assert_eq!(back.events.len(), 2, "fork wrote an empty log");
+  }
+
+  /// `--continue` and a bare `/resume` both mean "the one I was just in", so
+  /// this has to agree with what `/history` shows at the top.
+  #[test]
+  fn latest_is_the_most_recently_updated_session() {
+    let h = store("latest");
+    for (n, title) in ["older", "newer"].iter().enumerate() {
+      let mut s = h.create_session("m".into());
+      s.meta.title = (*title).into();
+      s.meta.updated = chrono::Utc::now() + chrono::Duration::seconds(n as i64);
+      let _ = h.save_session(&mut s);
+    }
+    assert_eq!(
+      h.latest().map(|m| m.title),
+      Some("newer".to_string()),
+      "latest must match the top of /history"
+    );
+  }
+
+  /// A fresh install has nothing to continue, and the caller needs to say so
+  /// rather than open a blank session that looks resumed.
+  #[test]
+  fn latest_is_none_when_nothing_is_stored() {
+    let h = store("latest-empty");
+    assert!(h.latest().is_none());
   }
 
   #[test]

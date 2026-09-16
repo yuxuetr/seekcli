@@ -19,6 +19,7 @@
 | Ctrl-C | `spawn_interrupt_watcher` + 循环轮询 |
 | Ctrl-V 贴图 | `main.rs::PasteKey`（rustyline 条件绑定 → `/paste`），见 §4.4 |
 | 通用 headless | `-p <prompt>` / stdin 管道 / `--output json` / `--max-iter` / `--read-only` / `--yes` / `--cwd` |
+| 会话续接 | `-c` / `--continue`（最近一次）、`--resume <id>`（指定），与 REPL 的 `/resume [id]` 共用 `App::resume_session` |
 | 特化 headless 入口 | `--bench <suite>` / `--run-task <name>` |
 | 输出分流 | `ui.rs`：进度与流式输出走 stderr，结果走 stdout |
 | 配置分层 | `config.rs`：用户级 + 项目级 + `$SEEKCLI_CONFIG` |
@@ -42,7 +43,8 @@
 seekcli -p "重构 foo.rs 里的错误处理"     # 一次性执行，结果打到 stdout
 cat bug_report.md | seekcli -p "分析这个 bug"   # stdin 作为附加上下文
 seekcli -p "..." --output json            # 结构化输出
-seekcli -p "..." --resume <session-id>    # 在既有会话上继续（依赖 L4）
+seekcli --continue                        # 接上最近一次会话，进 REPL
+seekcli --resume <id>                     # 接上指定会话（接受 id 前缀）
 seekcli -p "..." --max-iter 10 --read-only
 ```
 
@@ -149,6 +151,30 @@ REPL 实际分发 **18** 条命令，Tab 补全只认 **13** 条（`/fork` `/rea
 
 第三条测试守着抽取器本身（若它一条也抽不到，前两条就变成两个空集合相等）。
 与 `scripts/check-gap-coverage.py` 同一思路，只是对象从文档换成了代码。
+
+### 4.6 会话续接（阶段五十一）
+
+「接着上次那个」是最高频的恢复动作，而此前唯一的入口是 `/resume <id>`——
+要先跑 `/history`、读一串十六进制、再打回去。
+
+三个入口，**一处实现**（`App::resume_session`）：
+
+| 入口 | 含义 |
+| --- | --- |
+| `/resume` | 最近一次 |
+| `/resume <id>` | 指定（接受前缀） |
+| `seekcli -c` / `--continue` | 开 REPL 时接上最近一次 |
+| `seekcli --resume <id>` | 开 REPL 时接上指定会话 |
+
+共用一处的理由是具体的：恢复一段对话意味着**同时**恢复它的账单、blob 目录和
+来源记账——把这份清单抄两遍，正是其中一份将来少一行的方式。
+
+**与 `-p` / `--bench` / `--run-task` 组合会被明确拒绝**（退出码 1），而不是静默忽略。
+headless 运行按设计不保存会话（`run_headless`），所以在那里「续接」只能是悄悄
+从头开始——调用方只会从一个什么都不记得的回答里发现这件事。
+
+空历史时报「no stored sessions yet」并以退出码 1 结束，而不是开一个看起来像
+续接的空白会话。
 
 ## 5. 明确不做
 

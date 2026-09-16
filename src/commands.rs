@@ -4,7 +4,7 @@
 //! private fields. Only handle_command is pub(crate) (called from the REPL
 //! loop); the rest are dispatched from within it.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::session::{EventPayload, PromptKind};
@@ -109,8 +109,8 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     help: "List previous sessions",
   },
   SlashCommand {
-    usage: "/resume <id>",
-    help: "Resume a previous session (alias: /load)",
+    usage: "/resume [id]",
+    help: "Resume a session — no id means the most recent (alias: /load)",
   },
   SlashCommand {
     usage: "/load <id>",
@@ -272,6 +272,37 @@ impl App {
       println!("  {:<30} {}", entry.usage, entry.help);
     }
     println!();
+  }
+
+  /// Switch to a stored session. `None` means the most recent one.
+  ///
+  /// Shared by `/resume` and `--resume` / `--continue` rather than written
+  /// twice: restoring a conversation means restoring its cost, its blob
+  /// directory and its provenance together, and two copies of that list is how
+  /// one of them ends up missing a line.
+  pub(crate) fn resume_session(&mut self, prefix: Option<&str>) -> Result<String> {
+    let session = match prefix {
+      Some(p) => self.history.load_session(p)?,
+      None => {
+        let latest = self.history.latest().context(
+          "no stored sessions yet — start a conversation first, or give an id from /history",
+        )?;
+        self.history.load_session(&latest.id)?
+      }
+    };
+    // The bill continues from where it left off rather than mixing with
+    // whatever this process was doing before.
+    self.cost = session.meta.cost.clone();
+    // Same rule as /clear: this is a different conversation, and the previous
+    // one's sources are not evidence for it.
+    crate::tools::provenance::reset();
+    crate::tools::offload::set_blob_dir(self.history.blobs_dir(session.id()));
+    let msg = format!(
+      "Resumed: {} ({} events)",
+      session.meta.title, session.meta.event_count
+    );
+    self.current_session = session;
+    Ok(msg)
   }
 
   fn activate_skill(&mut self, skill: Skill) {
@@ -612,27 +643,9 @@ impl App {
       }
       // `/resume` is the name the docs and `-p --resume` use; `/load` stays
       // as an alias so muscle memory keeps working.
-      "/load" | "/resume" => match parts.get(1) {
-        None => println!("{} Usage: {} <id>", "Info:".blue(), cmd),
-        Some(prefix) => match self.history.load_session(prefix) {
-          Ok(session) => {
-            // Restore the loaded session's cost so the bill continues from
-            // where it left off rather than mixing with the prior session.
-            self.cost = session.meta.cost.clone();
-            // Same rule as /clear: this is a different conversation, and the
-            // previous one's sources are not evidence for it.
-            crate::tools::provenance::reset();
-            println!(
-              "{} Resumed: {} ({} events)",
-              "✦".cyan(),
-              session.meta.title,
-              session.meta.event_count
-            );
-            crate::tools::offload::set_blob_dir(self.history.blobs_dir(session.id()));
-            self.current_session = session;
-          }
-          Err(e) => println!("{} {}", "Error:".red(), e),
-        },
+      "/load" | "/resume" => match self.resume_session(parts.get(1).copied()) {
+        Ok(msg) => println!("{} {}", "✦".cyan(), msg),
+        Err(e) => println!("{} {:#}", "Error:".red(), e),
       },
       "/fork" => match parts.get(1) {
         None => println!(
