@@ -88,6 +88,59 @@ impl ThinkingMode {
   }
 }
 
+/// Ctrl+V — attach the clipboard image.
+///
+/// **Cmd+V cannot work and never will.** The terminal emulator handles it
+/// itself and pastes the clipboard's *text* into stdin; an image on the
+/// clipboard simply produces nothing the process can see. Ctrl+V arrives as a
+/// control character, so it is the only paste key an application can bind —
+/// which is why every terminal tool that supports image paste binds this one.
+///
+/// It rewrites the line rather than grabbing the image here: `/paste` already
+/// reads the clipboard, writes the blob and attaches it, and doing that work
+/// twice in two places is how the two drift apart. The cost is that the image
+/// is fetched on Enter rather than on Ctrl+V, so a clipboard that changes in
+/// between wins — an acceptable trade for one implementation of the thing.
+///
+/// This displaces readline's `quoted-insert`. Deliberate: inserting a literal
+/// control character is not something this REPL has any use for.
+struct PasteKey;
+
+impl rustyline::ConditionalEventHandler for PasteKey {
+  fn handle(
+    &self,
+    _evt: &rustyline::Event,
+    _n: rustyline::RepeatCount,
+    _positive: bool,
+    ctx: &rustyline::EventContext,
+  ) -> Option<rustyline::Cmd> {
+    Some(paste_command(ctx.line()))
+  }
+}
+
+/// What Ctrl+V should do to a line that currently reads `line`.
+///
+/// Split out of the handler because `EventContext` cannot be built in a test,
+/// and this is the part that can drift — the handler around it is one call.
+fn paste_command(line: &str) -> rustyline::Cmd {
+  let line = line.trim();
+  if line.is_empty() {
+    // The ordinary flow: screenshot, Ctrl+V, Enter.
+    return rustyline::Cmd::Insert(1, "/paste ".to_string());
+  }
+  if line.starts_with("/paste") {
+    // Already attaching; a second press must not nest the command.
+    return rustyline::Cmd::Noop;
+  }
+  // They typed first and then reached for paste, so what they typed is the
+  // caption. Rebuilding the whole line keeps `/paste` at the start, where a
+  // slash command has to be — inserting at the cursor would bury it mid-line.
+  rustyline::Cmd::Replace(
+    rustyline::Movement::WholeLine,
+    Some(format!("/paste {line}")),
+  )
+}
+
 struct App {
   brain: Box<dyn LlmProvider>,
   config: Config,
@@ -278,6 +331,10 @@ impl App {
     let mut rl: Editor<CmdCompleter, FileHistory> =
       Editor::new().context("rustyline init failed")?;
     rl.set_helper(Some(completer));
+    rl.bind_sequence(
+      rustyline::KeyEvent::ctrl('V'),
+      rustyline::EventHandler::Conditional(Box::new(PasteKey)),
+    );
 
     loop {
       let skill_label = self
@@ -600,4 +657,43 @@ async fn main() -> Result<()> {
   // exits would strand work nobody can collect the output of any more.
   tools::jobs::kill_all();
   outcome
+}
+
+#[cfg(test)]
+mod paste_key_tests {
+  use super::paste_command;
+  use rustyline::{Cmd, Movement};
+
+  /// The flow this key exists for: screenshot, Ctrl+V, Enter. `/paste` with no
+  /// caption is a legitimate request ("look at this"), so nothing more is
+  /// needed for the common case.
+  #[test]
+  fn an_empty_line_becomes_a_paste_command() {
+    match paste_command("") {
+      Cmd::Insert(1, text) => assert_eq!(text, "/paste "),
+      other => panic!("expected an insert, got {other:?}"),
+    }
+    // Whitespace the user did not mean to type counts as empty.
+    assert!(matches!(paste_command("   "), Cmd::Insert(1, _)));
+  }
+
+  /// Typing the caption first and then reaching for paste is the other natural
+  /// order. Inserting at the cursor would bury `/paste` mid-line, where it is
+  /// no longer a command.
+  #[test]
+  fn text_already_typed_becomes_the_caption() {
+    match paste_command("这张图里是什么") {
+      Cmd::Replace(Movement::WholeLine, Some(text)) => {
+        assert_eq!(text, "/paste 这张图里是什么");
+      }
+      other => panic!("expected a whole-line replace, got {other:?}"),
+    }
+  }
+
+  /// A second press must not produce `/paste /paste ...`.
+  #[test]
+  fn pressing_it_twice_does_nothing_the_second_time() {
+    assert!(matches!(paste_command("/paste "), Cmd::Noop));
+    assert!(matches!(paste_command("/paste 看看"), Cmd::Noop));
+  }
 }

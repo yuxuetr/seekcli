@@ -39,6 +39,13 @@ SeekCLI —— DeepSeek + Tools + Harness Agent 核心，单人维护的本地 C
   `[Recovery]`）是呈现层约定。新增时同步更新 `agent::prompt::agent_system_prompt`，
   否则模型不知道该怎么反应。
 
+## 交互约定
+
+- **Ctrl+V 贴图**：截图 → Ctrl+V → 回车。绑定在 `main.rs::PasteKey`，
+  展开成 `/paste`。**Cmd+V 永远不会工作**——终端自己吃掉它，只送文本进 stdin。
+- **不要引入基于路径的图像输入**（`/paste <路径>`、拖拽路径）。
+  零路径管理是这条命令存在的全部理由。
+
 ## 工程品格：写实现，不写围绕实现的东西
 
 **本节的判据不是「代码好不好看」，是「核心逻辑占了多少」。**

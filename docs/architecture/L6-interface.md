@@ -17,6 +17,7 @@
 | slash 命令 | `commands.rs::handle_command`（13 条） |
 | 状态指示 | prompt 显示 `model (thinking\|plan\|skill) ❯`；`run_shell` >800ms 显示 spinner |
 | Ctrl-C | `spawn_interrupt_watcher` + 循环轮询 |
+| Ctrl-V 贴图 | `main.rs::PasteKey`（rustyline 条件绑定 → `/paste`），见 §4.4 |
 | 通用 headless | `-p <prompt>` / stdin 管道 / `--output json` / `--max-iter` / `--read-only` / `--yes` / `--cwd` |
 | 特化 headless 入口 | `--bench <suite>` / `--run-task <name>` |
 | 输出分流 | `ui.rs`：进度与流式输出走 stderr，结果走 stdout |
@@ -99,6 +100,37 @@ SEEKCLI_CONFIG=<path>      显式指定，最高优先级
 
 随 L4 落地：`/resume <id>` `/fork <id> [seq]` `/search <kw>`；
 随 L2 落地：`/tools`（列出当前生效工具，含 MCP 来源）。
+
+### 4.4 Ctrl+V 贴图
+
+**Cmd+V 做不到，而且永远做不到。** 终端模拟器自己处理 Cmd+V，把剪贴板的*文本*
+写进 stdin；剪贴板上是图片时，进程侧什么也收不到。Ctrl+V 则作为控制字符
+（0x16）真正抵达应用，所以它是终端程序唯一能绑的贴图键——每一个支持贴图的
+终端工具绑的都是它。
+
+代价是占用了 readline 的 `quoted-insert`。这个 REPL 没有插入字面控制字符的用途，
+所以是划算的。
+
+三个分支（`paste_command`，纯函数，各有单测）：
+
+| 当前行 | 行为 |
+| --- | --- |
+| 空 | 插入 `/paste ` —— 截图、Ctrl+V、回车 |
+| 已有文字 | 整行替换为 `/paste <文字>`，把已打的字当作 caption |
+| 已是 `/paste…` | `Noop` —— 第二次按不会嵌套成 `/paste /paste` |
+
+**它改写命令行，而不是就地抓图。** `/paste` 已经在做「读剪贴板 → 写 blob →
+附加」这件事，在两个地方各做一遍正是两者漂移的起点。代价是图片在回车时抓取而非
+按键时抓取，期间换了剪贴板则以后者为准——为换取只有一份实现，这个代价可以接受。
+
+**实测**（伪终端驱动，因为 stdin 是管道时 rustyline 根本不走行编辑器，键绑定不生效）：
+Ctrl+V 后行缓冲区出现 `/paste `；回车后事件日志里 `UserMessage.images = 1`
+（`image/png`），blob 与原文件逐字节相同；256×256 的上红下绿图，模型准确描述了
+色块排列。
+
+> 一次值得记下的假警报：同一张图缩到 48×48 时模型说「整张都是蓝的」。
+> blob 逐像素核对是正确的（第 5 行红、第 40 行蓝），**是模型对极小图的视觉不可靠，
+> 不是管线出错**。换成 256×256 后描述准确。**先验证产物再归咎管线。**
 
 ## 5. 明确不做
 
