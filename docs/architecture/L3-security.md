@@ -1,6 +1,6 @@
 # L3 安全层：审批 · 路径策略 · 模式门禁
 
-> 完成度 **80%**（阶段二十四后）｜ 缺口来源：[评估 §3 L3](../evaluation/2026-08-harness-gap-analysis.md#l3-安全层--50且边界不一致)
+> 完成度 **90%**（阶段四十二 `allowed_tools`、四十三不可信输入边界后）｜ 缺口来源：[评估 §3 L3](../evaluation/2026-08-harness-gap-analysis.md#l3-安全层--50且边界不一致)
 > 安全模型的**范围声明**（做什么 / 不做什么 / 用户责任）见 [security-model.md](security-model.md)。
 
 ## 1. 职责边界

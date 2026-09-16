@@ -1,6 +1,6 @@
 # L5 组合层：SubAgent · Skill · MCP
 
-> 完成度 **65%**（阶段二十八后）｜ 缺口来源：[评估 §3 L5](../evaluation/2026-08-harness-gap-analysis.md#l5-组合层--40)
+> 完成度 **85%**（阶段四十二 skill 裁剪、四十四 references 递归、五十扩展清单后）｜ 缺口来源：[评估 §3 L5](../evaluation/2026-08-harness-gap-analysis.md#l5-组合层--40)
 
 ## 1. 职责边界
 

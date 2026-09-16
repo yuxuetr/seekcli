@@ -1,6 +1,6 @@
 # L7 可观测层：Cost · Tracing · Benchmark
 
-> 完成度 **95%**（阶段二十五、二十九后）｜ 缺口来源：[评估 §3 L7](../evaluation/2026-08-harness-gap-analysis.md#l7-可观测层--55)
+> 完成度 **98%**（阶段四十七 trace join、四十九场景化评估后）｜ 缺口来源：[评估 §3 L7](../evaluation/2026-08-harness-gap-analysis.md#l7-可观测层--55)
 
 ## 1. 职责边界
 
