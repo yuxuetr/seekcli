@@ -385,6 +385,25 @@ const WRITE_VERBS: &[&str] = &[
 /// absolute or `~` path. Full shell AST parsing stays out of scope
 /// (`security-model.md` §2) — the goal is to raise the cost of walking out of
 /// the workspace, not to make it impossible.
+/// Character devices a write cannot persist to.
+///
+/// `2>/dev/null` is one of the most common things a shell command does, and
+/// treating it as "writes outside the workspace" made the harness ask for
+/// approval on ordinary commands — and in headless mode, where `Ask` degrades
+/// to `Deny`, silently refuse them. Found by watching a real sub-agent get
+/// stuck on `md5 ... 2>/dev/null`.
+///
+/// Deliberately a short list of exact paths plus `/dev/fd/<n>`, not "anything
+/// under /dev": `/dev/disk0` is a genuine write target and must stay flagged.
+fn is_bit_bucket(token: &str) -> bool {
+  matches!(
+    token,
+    "/dev/null" | "/dev/zero" | "/dev/stdout" | "/dev/stderr" | "/dev/tty"
+  ) || token
+    .strip_prefix("/dev/fd/")
+    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 pub fn escaping_write_targets(cmd: &str) -> Vec<String> {
   let mut out = Vec::new();
   for part in split_subcommands(cmd) {
@@ -410,6 +429,9 @@ pub fn escaping_write_targets(cmd: &str) -> Vec<String> {
         continue;
       }
       if !(token.starts_with('/') || token.starts_with("~/") || token == "~") {
+        continue;
+      }
+      if is_bit_bucket(&token) {
         continue;
       }
       if super::path_security::ensure_within_cwd(&expand_home(&token)).is_err()
@@ -745,6 +767,50 @@ mod tests {
       Verdict::Deny(_)
     ));
     set_mode(Mode::Normal);
+  }
+
+  /// Found by running a real sub-agent: it wrote `md5 ... 2>/dev/null` and the
+  /// harness stopped to ask whether it could write outside the workspace. In
+  /// headless mode, where `Ask` degrades to `Deny`, that silently refuses an
+  /// ordinary command.
+  #[test]
+  fn redirecting_to_dev_null_is_not_an_escaping_write() {
+    assert!(
+      escaping_write_targets("md5 a.txt 2>/dev/null").is_empty(),
+      "2>/dev/null is a bit bucket, not an escape"
+    );
+    assert!(escaping_write_targets("echo hi > /dev/null").is_empty());
+    assert!(escaping_write_targets("cmd 1>/dev/stdout 2>/dev/stderr").is_empty());
+    assert!(escaping_write_targets("cmd >/dev/fd/3").is_empty());
+  }
+
+  /// The allowlist stays narrow: anything that is not one of the bit buckets
+  /// is still an escape.
+  #[test]
+  fn the_bit_bucket_allowlist_does_not_leak() {
+    assert!(
+      !escaping_write_targets("echo x > /etc/hosts").is_empty(),
+      "ordinary escapes must still be caught"
+    );
+    // `/dev/fd/<n>` is allowed; a name that merely starts that way is not.
+    assert!(!escaping_write_targets("cmd > /dev/fdsomething").is_empty());
+    assert!(!escaping_write_targets("cmd > /dev/disk0").is_empty());
+  }
+
+  /// Raw-device writes belong to the *command* gate, not this one: `dd` passes
+  /// its target as `of=/dev/...`, which is one shlex word and never starts with
+  /// `/`, so the path scanner cannot see it. Asserting it here would be
+  /// asserting against the wrong gate — and passing for the wrong reason is how
+  /// a security test stops meaning anything.
+  #[test]
+  fn a_raw_device_write_is_caught_by_the_command_gate() {
+    assert!(
+      matches!(
+        classify_command("dd if=/dev/zero of=/dev/disk0"),
+        Decision::Deny(_)
+      ),
+      "dd to a raw device must be refused by the command classifier"
+    );
   }
 
   #[test]
