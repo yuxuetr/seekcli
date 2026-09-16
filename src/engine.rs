@@ -571,6 +571,13 @@ struct Response {
   content: String,
   reasoning: String,
   tool_calls: Vec<api::ToolCall>,
+  /// What this one call cost, so the loop can attribute it to a turn.
+  ///
+  /// `self.cost` already accumulates the session bill, but a running total
+  /// cannot answer "which turn was expensive" — and that is the other half of
+  /// the attribution stage 47 built for time. `None` when the provider sent no
+  /// usage block (replay fixtures, and some error paths).
+  usage: Option<crate::api::UsageInfo>,
 }
 
 impl App {
@@ -595,6 +602,7 @@ impl App {
       content: String::new(),
       reasoning: String::new(),
       tool_calls: Vec::new(),
+      usage: None,
     };
     let mut is_reasoning = false;
 
@@ -655,6 +663,7 @@ impl App {
           );
           // Fold into the running session bill (decorator-style accounting).
           self.cost.record(&info);
+          out.usage = Some(info);
         }
       }
       ui::flush_content()?;
@@ -1494,7 +1503,16 @@ impl App {
         content: assistant_content,
         reasoning: assistant_reasoning,
         tool_calls,
+        usage,
       } = self.request_step(&messages, &effective_tools).await?;
+
+      // Attribute the cost to this turn. `self.cost` holds the running total,
+      // which cannot answer "which turn was expensive" — the same question
+      // stage 47 answered for time and left open for money. Bookkeeping, so it
+      // produces no message.
+      if let Some(u) = usage {
+        events.push(EventPayload::Usage(u));
+      }
 
       // `verdict` makes the stage 19 failure mode visible at a glance: a turn
       // that produced prose but zero tool calls, while the model claimed to
