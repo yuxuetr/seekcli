@@ -75,6 +75,20 @@ impl CostTracker {
     Self::default()
   }
 
+  /// Fold another tracker's totals in.
+  ///
+  /// A sub-agent keeps its own books while it runs — that is what lets several
+  /// run at once without sharing a `&mut App` — and the parent absorbs them
+  /// when it returns. Every field is a running total, so addition is the whole
+  /// of the merge.
+  pub fn absorb(&mut self, other: &CostTracker) {
+    self.prompt_tokens += other.prompt_tokens;
+    self.completion_tokens += other.completion_tokens;
+    self.cache_hit_tokens += other.cache_hit_tokens;
+    self.cache_miss_tokens += other.cache_miss_tokens;
+    self.api_calls += other.api_calls;
+  }
+
   /// Fold one usage block into the running total.
   pub fn record(&mut self, u: &UsageInfo) {
     self.prompt_tokens += u.prompt_tokens;
@@ -127,6 +141,54 @@ impl CostTracker {
 
 #[cfg(test)]
 mod tests {
+
+  /// A sub-agent keeps its own books while it runs — that is what lets several
+  /// run at once — and the parent absorbs them afterwards. Every field is a
+  /// running total, so the merge must be plain addition and must not drop one.
+  #[test]
+  fn absorbing_a_child_adds_every_field() {
+    let mut parent = CostTracker {
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      cache_hit_tokens: 8,
+      cache_miss_tokens: 2,
+      api_calls: 1,
+    };
+    let child = CostTracker {
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cache_hit_tokens: 80,
+      cache_miss_tokens: 20,
+      api_calls: 3,
+    };
+    parent.absorb(&child);
+    assert_eq!(parent.prompt_tokens, 110);
+    assert_eq!(parent.completion_tokens, 22);
+    assert_eq!(parent.cache_hit_tokens, 88);
+    assert_eq!(parent.cache_miss_tokens, 22);
+    assert_eq!(
+      parent.api_calls, 4,
+      "call count must include the child's, or the run budget under-counts"
+    );
+  }
+
+  /// Absorbing several children in turn is the concurrent case: three
+  /// sub-agents return independently and each is folded in.
+  #[test]
+  fn absorbing_several_children_accumulates() {
+    let mut parent = CostTracker::new();
+    for _ in 0..3 {
+      parent.absorb(&CostTracker {
+        prompt_tokens: 5,
+        completion_tokens: 1,
+        cache_hit_tokens: 0,
+        cache_miss_tokens: 5,
+        api_calls: 2,
+      });
+    }
+    assert_eq!(parent.api_calls, 6);
+    assert_eq!(parent.prompt_tokens, 15);
+  }
   use super::*;
 
   fn usage(prompt: u64, completion: u64, hit: u64, miss: u64) -> UsageInfo {

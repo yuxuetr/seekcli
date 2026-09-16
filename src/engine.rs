@@ -393,6 +393,30 @@ impl App {
   /// Handled in the engine rather than the dispatcher because it re-enters the
   /// loop — the dispatcher deliberately knows nothing about the loop, and
   /// giving it a recursive escape hatch would undo that.
+  /// How a finished sub-agent is described **to the model**.
+  ///
+  /// One source for both the sequential and the concurrent path: two sets of
+  /// wording for the same four outcomes is how one of them ends up telling the
+  /// parent that an exhausted child "completed".
+  fn child_verdict(status: LoopStatus) -> &'static str {
+    match status {
+      LoopStatus::Completed => "completed",
+      LoopStatus::BudgetExhausted => "stopped because the run's model-call budget was spent",
+      LoopStatus::Interrupted => "was interrupted by the user before finishing",
+      LoopStatus::MaxIterations => "hit its iteration cap before finishing",
+    }
+  }
+
+  /// The same four outcomes as they are **recorded**, for `ChildRun`.
+  fn child_status_label(status: LoopStatus) -> &'static str {
+    match status {
+      LoopStatus::Completed => "completed",
+      LoopStatus::BudgetExhausted => "budget_exhausted",
+      LoopStatus::Interrupted => "interrupted",
+      LoopStatus::MaxIterations => "max_iterations",
+    }
+  }
+
   /// Returns the summary the parent sees, plus the record of the delegation.
   ///
   /// The event is returned rather than recorded here so it joins the same
@@ -405,7 +429,6 @@ impl App {
     arguments: &str,
     available: &[api::Tool],
     depth: usize,
-    parent_span: Option<usize>,
   ) -> (String, Option<EventPayload>) {
     let (subagent_type, prompt) = Self::parse_invoke_agent_args(arguments);
     let next_depth = depth + 1;
@@ -433,18 +456,6 @@ impl App {
       );
     };
 
-    let sub_tools = tools::registry::filter_by_allowed(available, template.allowed_tools);
-    let sub_messages = vec![
-      Message::Simple {
-        images: Vec::new(),
-        role: "system".to_string(),
-        content: template.system_prompt.to_string(),
-        reasoning_content: None,
-        tool_calls: None,
-      },
-      Message::new_user_text(prompt),
-    ];
-
     eprintln!(
       "{} Spawning sub-agent '{}' (depth={}, max_iter={})...",
       "Agent:".magenta(),
@@ -453,35 +464,25 @@ impl App {
       template.max_iter
     );
     let started = std::time::Instant::now();
-    match Box::pin(self.run_agent_loop(
-      sub_messages,
-      Some(sub_tools),
-      next_depth,
-      template.max_iter,
-      parent_span,
-      // A sub-agent's turns are not the parent's conversation; only its
-      // summary crosses back, as a tool result the parent then journals.
-      Journaling::Buffered,
-    ))
-    .await
-    {
+    let budget =
+      std::sync::atomic::AtomicU64::new(self.cost.api_calls.saturating_sub(self.run_call_baseline));
+    let outcome = self
+      .run_sub_agent(template, &prompt, available, &budget)
+      .await;
+    // Fold the child's spend into the parent's books now that it is done.
+    if let Ok(o) = &outcome {
+      self.cost.absorb(&o.cost);
+    }
+    match outcome {
       // An interrupted or exhausted sub-agent has not "completed". Saying so
       // would hand the parent a false success to reason from — the same
       // confusion between "the model stopped" and "the task passed" that
       // `LoopStatus` exists to keep apart.
       Ok(run) => {
-        let (verdict, status) = match run.status {
-          LoopStatus::Completed => ("completed", "completed"),
-          LoopStatus::BudgetExhausted => (
-            "stopped because the run's model-call budget was spent",
-            "budget_exhausted",
-          ),
-          LoopStatus::Interrupted => (
-            "was interrupted by the user before finishing",
-            "interrupted",
-          ),
-          LoopStatus::MaxIterations => ("hit its iteration cap before finishing", "max_iterations"),
-        };
+        let (verdict, status) = (
+          Self::child_verdict(run.status),
+          Self::child_status_label(run.status),
+        );
         (
           format!(
             "Sub-agent '{}' {}. Summary:\n{}",
@@ -587,7 +588,7 @@ impl App {
   /// flow of its own: it turns a stream of deltas into a single response, and
   /// everything it touches (rendering, usage accounting, the mid-stream
   /// interrupt check) belongs to that job rather than to the loop's.
-  async fn request_step(&mut self, messages: &[Message], tools: &[api::Tool]) -> Result<Response> {
+  async fn request_step(&self, messages: &[Message], tools: &[api::Tool]) -> Result<Response> {
     let mut stream = self
       .brain
       .call_api_with_params(
@@ -661,8 +662,9 @@ impl App {
             info.prompt_cache_miss_tokens,
             info.completion_tokens
           );
-          // Fold into the running session bill (decorator-style accounting).
-          self.cost.record(&info);
+          // Handed back rather than folded in here: the caller owns the
+          // accounting, which is what lets several of these run at once
+          // without sharing a `&mut App`.
           out.usage = Some(info);
         }
       }
@@ -715,6 +717,192 @@ impl App {
     self.current_session.extend(pending.drain(..));
     self.history.save_session(&mut self.current_session)?;
     Ok(n)
+  }
+}
+
+/// A delegation resolved against the registry: either the template and prompt
+/// to run, or the message explaining why it cannot be run.
+///
+/// Named because the tuple it replaces was unreadable, and because resolving
+/// happens *before* the fan-out on purpose — a bad `subagent_type` should be
+/// reported without having spawned anything.
+type ResolvedDelegation = Result<(&'static subagents::registry::SubAgentTemplate, String), String>;
+
+/// What one sub-agent run produced, including what it spent.
+///
+/// The spend comes back rather than being folded in as it happens: that is
+/// precisely what lets several of these run at once without sharing a
+/// `&mut App`.
+pub(crate) struct SubAgentOutcome {
+  pub text: String,
+  pub status: LoopStatus,
+  pub iterations: usize,
+  pub cost: crate::observability::cost::CostTracker,
+}
+
+impl App {
+  /// Run one sub-agent to completion.
+  ///
+  /// Deliberately **not** `run_agent_loop`. That loop carries compaction,
+  /// Two-Stage planning, journaling, skill activation, the doom-loop detector
+  /// and nested delegation — every one of which it already skips behind an
+  /// `if depth == 0`. A sub-agent needs none of them, and the thing that made
+  /// it impossible to run two at once was the `&mut self` those features
+  /// require. So this is the same control flow with the depth-0 half removed,
+  /// taking `&self`.
+  ///
+  /// The duplication is bounded on purpose: this loop's feature set is frozen.
+  /// Anything a sub-agent would need beyond "think, call tools, answer" is a
+  /// reason to reconsider sub-agents, not a reason to grow this function.
+  ///
+  /// **No internal trace spans.** `Trace::begin` needs `&mut`, and putting it
+  /// behind a lock to record the inside of a concurrent sub-agent is a poor
+  /// trade: the `ChildRun` event already carries template, status, iterations
+  /// and duration, and the parent's `execute` span still covers the delegation.
+  async fn run_sub_agent(
+    &self,
+    template: &'static subagents::registry::SubAgentTemplate,
+    prompt: &str,
+    available: &[api::Tool],
+    calls_spent: &std::sync::atomic::AtomicU64,
+  ) -> Result<SubAgentOutcome> {
+    use std::sync::atomic::Ordering as AtomicOrd;
+
+    let tools = tools::registry::filter_by_allowed(available, template.allowed_tools);
+    let dispatcher = tools::ToolDispatcher::new();
+    let mut messages = vec![
+      Message::Simple {
+        images: Vec::new(),
+        role: "system".to_string(),
+        content: template.system_prompt.to_string(),
+        reasoning_content: None,
+        tool_calls: None,
+      },
+      Message::new_user_text(prompt.to_string()),
+    ];
+
+    let mut cost = crate::observability::cost::CostTracker::new();
+    let mut text = String::new();
+    let mut status = LoopStatus::MaxIterations;
+    let mut iterations = 0usize;
+
+    for iter in 0..template.max_iter {
+      iterations = iter + 1;
+
+      // Observed, not consumed: the top-level loop is what clears the flag, so
+      // the parent still sees it and unwinds too.
+      if self.interrupt.load(AtomicOrd::SeqCst) {
+        text = "[Interrupted by user]".to_string();
+        status = LoopStatus::Interrupted;
+        break;
+      }
+
+      // The run's budget, shared with the parent and with any sibling running
+      // right now. Reserving before the call rather than counting after is
+      // what keeps three concurrent sub-agents from each spending the last
+      // slot.
+      if calls_spent.fetch_add(1, AtomicOrd::SeqCst) >= self.max_llm_calls {
+        text = format!(
+          "[Stopped: run budget of {} model calls spent]",
+          self.max_llm_calls
+        );
+        status = LoopStatus::BudgetExhausted;
+        break;
+      }
+
+      let Response {
+        content,
+        reasoning,
+        tool_calls,
+        usage,
+      } = self.request_step(&messages, &tools).await?;
+      if let Some(u) = usage {
+        cost.record(&u);
+      }
+
+      messages.push(Message::Simple {
+        images: Vec::new(),
+        role: "assistant".to_string(),
+        content: content.clone(),
+        reasoning_content: if reasoning.is_empty() {
+          None
+        } else {
+          Some(reasoning)
+        },
+        tool_calls: if tool_calls.is_empty() {
+          None
+        } else {
+          Some(tool_calls.clone())
+        },
+      });
+
+      if tool_calls.is_empty() {
+        text = content;
+        status = LoopStatus::Completed;
+        break;
+      }
+
+      // Same rule as the main loop: a batch of pure reads fans out, anything
+      // that writes or prompts stays sequential.
+      let parallel = tool_calls.len() > 1
+        && tool_calls
+          .iter()
+          .all(|tc| tools::registry::is_parallel_readonly(&tc.function.name));
+
+      if parallel {
+        let futs = tool_calls.iter().map(|tc| {
+          let disp = &dispatcher;
+          let mcp = &self.mcp;
+          let name = tc.function.name.clone();
+          let args = tc.function.arguments.clone();
+          let id = tc.id.clone();
+          async move {
+            let outcome = Self::dispatch(disp, mcp, None, &name, &args).await;
+            let failed = outcome.kind.is_failure();
+            let rendered = if failed {
+              agent::recovery::augment(&name, outcome.render())
+            } else {
+              outcome.render()
+            };
+            (id, rendered, outcome.images)
+          }
+        });
+        for (id, rendered, images) in futures_util::future::join_all(futs).await {
+          messages.push(Message::new_tool_response(id, rendered, images));
+        }
+      } else {
+        for tc in &tool_calls {
+          let outcome = Self::dispatch(
+            &dispatcher,
+            &self.mcp,
+            None,
+            &tc.function.name,
+            &tc.function.arguments,
+          )
+          .await;
+          let rendered = if outcome.kind.is_failure() {
+            agent::recovery::augment(&tc.function.name, outcome.render())
+          } else {
+            outcome.render()
+          };
+          messages.push(Message::new_tool_response(
+            tc.id.clone(),
+            rendered,
+            outcome.images,
+          ));
+        }
+      }
+    }
+
+    if status == LoopStatus::MaxIterations && text.is_empty() {
+      text = format!("[Stopped at max iterations ({})]", template.max_iter);
+    }
+    Ok(SubAgentOutcome {
+      text,
+      status,
+      iterations,
+      cost,
+    })
   }
 }
 
@@ -1511,6 +1699,7 @@ impl App {
       // stage 47 answered for time and left open for money. Bookkeeping, so it
       // produces no message.
       if let Some(u) = usage {
+        self.cost.record(&u);
         events.push(EventPayload::Usage(u));
       }
 
@@ -1622,6 +1811,112 @@ impl App {
         .any(|tc| tc.function.name == "harness_inspect")
         .then(|| self.inspect_snapshot(&effective_tools));
 
+      // Several delegations in one turn fan out. This is the case sub-agents
+      // exist for — independent sub-problems, each needing its own multi-step
+      // reasoning, which tool-level parallelism cannot express. Measured on
+      // three `explore` agents: 26.0s serial (9.8 + 9.3 + 6.9) against 9.8s
+      // concurrent.
+      //
+      // It works because `run_sub_agent` takes `&self`: each child keeps its
+      // own books and the parent absorbs them below, so nothing needs a shared
+      // `&mut App`.
+      let all_delegations = tool_calls.len() > 1
+        && tool_calls
+          .iter()
+          .all(|tc| tc.function.name == "invoke_agent");
+      if all_delegations {
+        let plans: Vec<(String, ResolvedDelegation)> = tool_calls
+          .iter()
+          .map(|tc| {
+            let (kind, prompt) = Self::parse_invoke_agent_args(&tc.function.arguments);
+            let resolved = match subagents::registry::lookup(&kind) {
+              Some(t) if depth < agent::MAX_SUBAGENT_DEPTH => Ok((t, prompt)),
+              Some(_) => Err(format!(
+                "Cannot spawn sub-agent: max depth {} reached.",
+                agent::MAX_SUBAGENT_DEPTH
+              )),
+              None => Err(format!("Unknown subagent_type '{kind}'.")),
+            };
+            (tc.id.clone(), resolved)
+          })
+          .collect();
+
+        eprintln!(
+          "{} {} sub-agents — running concurrently",
+          "Agent:".magenta(),
+          plans.iter().filter(|(_, r)| r.is_ok()).count()
+        );
+        let budget = std::sync::atomic::AtomicU64::new(
+          self.cost.api_calls.saturating_sub(self.run_call_baseline),
+        );
+        let started = std::time::Instant::now();
+        // Shared reborrows, bound once: the futures only ever read from these,
+        // and taking them here is what keeps the closure from trying to move a
+        // `&mut self` into several concurrent tasks.
+        let me: &Self = self;
+        let surface: &[api::Tool] = &effective_tools;
+        let budget_ref = &budget;
+        let futs = plans.iter().map(move |(id, resolved)| async move {
+          match resolved {
+            Err(msg) => (id.clone(), None, msg.clone()),
+            Ok((template, prompt)) => {
+              let out = me
+                .run_sub_agent(template, prompt, surface, budget_ref)
+                .await;
+              (id.clone(), Some((*template, out)), String::new())
+            }
+          }
+        });
+        let results = futures_util::future::join_all(futs).await;
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        for (id, ran, err) in results {
+          let text = match ran {
+            None => err,
+            Some((template, Ok(run))) => {
+              self.cost.absorb(&run.cost);
+              turn_had_failure |= run.status != LoopStatus::Completed;
+              events.push(EventPayload::ChildRun {
+                call_id: id.clone(),
+                template: template.name.to_string(),
+                status: Self::child_status_label(run.status).to_string(),
+                iterations: run.iterations,
+                // Wall clock for the batch: concurrent runs overlap, so
+                // attributing the full span to each is the honest reading —
+                // none of them finished sooner by being alone.
+                duration_ms: elapsed,
+              });
+              format!(
+                "Sub-agent '{}' {}. Summary:\n{}",
+                template.name,
+                Self::child_verdict(run.status),
+                run.text
+              )
+            }
+            Some((template, Err(e))) => {
+              turn_had_failure = true;
+              events.push(EventPayload::ChildRun {
+                call_id: id.clone(),
+                template: template.name.to_string(),
+                status: "failed".to_string(),
+                iterations: 0,
+                duration_ms: elapsed,
+              });
+              format!("Sub-agent '{}' failed: {}", template.name, e)
+            }
+          };
+          Self::push_tool_response(&mut messages, &mut events, id, text, Vec::new());
+        }
+        self.tracer.annotate(
+          exec_span,
+          serde_json::json!({ "had_failure": turn_had_failure, "sub_agents": tool_calls.len() }),
+        );
+        self.tracer.end(exec_span);
+        self.tracer.end(turn_span);
+        eprintln!("{} Returning tool results to model...", "Agent:".cyan());
+        continue;
+      }
+
       let parallelizable = tool_calls.len() > 1
         && tool_calls.iter().all(|tc| {
           if crate::mcp::is_mcp_tool(&tc.function.name) {
@@ -1673,13 +1968,7 @@ impl App {
           let mut dispatched_images = Vec::new();
           let result_str = if tc.function.name == "invoke_agent" {
             let (summary, record) = self
-              .delegate_to_subagent(
-                &tc.id,
-                &tc.function.arguments,
-                &effective_tools,
-                depth,
-                exec_span,
-              )
+              .delegate_to_subagent(&tc.id, &tc.function.arguments, &effective_tools, depth)
               .await;
             // Into the same buffer as the rest of the turn, so it lands between
             // the assistant message that asked for the delegation and the tool
@@ -2094,6 +2383,32 @@ mod tests {
     let surface = app.effective_tool_surface(Some(template_tools), 1);
     let names: Vec<&str> = surface.iter().map(|t| t.function.name.as_str()).collect();
     assert_eq!(names, vec!["read_file"], "{names:?}");
+  }
+
+  /// The two descriptions of the same four outcomes must stay aligned: the
+  /// sequential path and the concurrent path both use them, and two sets of
+  /// wording is how one of them ends up telling the parent that an exhausted
+  /// child "completed".
+  #[test]
+  fn a_child_verdict_and_recorded_status_agree_on_every_outcome() {
+    for status in [
+      LoopStatus::Completed,
+      LoopStatus::Interrupted,
+      LoopStatus::MaxIterations,
+      LoopStatus::BudgetExhausted,
+    ] {
+      let verdict = App::child_verdict(status);
+      let label = App::child_status_label(status);
+      assert!(!verdict.is_empty(), "{status:?}");
+      assert!(!label.is_empty(), "{status:?}");
+      // Only a completed child may be described as completed, on either side.
+      let says_done = verdict == "completed" || label == "completed";
+      assert_eq!(
+        says_done,
+        status == LoopStatus::Completed,
+        "{status:?} must not read as success"
+      );
+    }
   }
 
   /// Every other ceiling bounds one dimension; none bounds the product. The
