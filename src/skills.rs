@@ -365,7 +365,7 @@ fn enumerate_skill_assets(skill_dir: &Path) -> String {
 
   let scripts_dir = skill_dir.join("scripts");
   if scripts_dir.is_dir() {
-    let entries = list_asset_entries(&scripts_dir, &["sh", "py", "js", "ts", "rb"]);
+    let (entries, withheld) = list_asset_entries(&scripts_dir, &["sh", "py", "js", "ts", "rb"]);
     if !entries.is_empty() {
       out.push_str("## Skill Scripts\n");
       out.push_str(&format!(
@@ -379,13 +379,14 @@ fn enumerate_skill_assets(skill_dir: &Path) -> String {
           out.push_str(&format!("- `{}` — {}\n", name, desc));
         }
       }
+      push_withheld(&mut out, withheld, &scripts_dir);
       out.push('\n');
     }
   }
 
   let refs_dir = skill_dir.join("references");
   if refs_dir.is_dir() {
-    let entries = list_asset_entries(&refs_dir, &["md", "txt", "json", "yaml", "yml"]);
+    let (entries, withheld) = list_asset_entries(&refs_dir, &["md", "txt", "json", "yaml", "yml"]);
     if !entries.is_empty() {
       out.push_str("## Skill References\n");
       out.push_str(&format!(
@@ -399,23 +400,85 @@ fn enumerate_skill_assets(skill_dir: &Path) -> String {
           out.push_str(&format!("- `{}` — {}\n", name, desc));
         }
       }
+      push_withheld(&mut out, withheld, &refs_dir);
     }
   }
 
   out
 }
 
+/// Say what was left out, and how to get at it.
+///
+/// Silent truncation here is the worst kind: the model would treat the listing
+/// as the corpus and answer from its priors for anything not shown, while
+/// looking grounded. `docs/architecture/design-principles.md` §4 —
+/// "不静默截断".
+fn push_withheld(out: &mut String, withheld: usize, dir: &Path) {
+  if withheld == 0 {
+    return;
+  }
+  out.push_str(&format!(
+    "- …and {} more not listed. This listing is capped; use `glob` or `grep` \
+     under `{}` to find the rest.\n",
+    withheld,
+    dir.display()
+  ));
+}
+
 /// Sorted `(filename, description)` list for files in `dir` matching any of
 /// `allowed_exts`. Returns empty Vec on any IO failure (assets are best-effort
 /// enrichment, not load-blocking).
-fn list_asset_entries(dir: &Path, allowed_exts: &[&str]) -> Vec<(String, String)> {
-  let read = match fs::read_dir(dir) {
-    Ok(r) => r,
-    Err(_) => return Vec::new(),
-  };
+/// How deep a `references/` tree is walked.
+///
+/// A textbook split into `chapter2/section3/` is the normal shape for the
+/// corpora this serves, and a flat listing simply cannot see it. Bounded
+/// rather than unbounded because the listing goes into every request's prompt.
+const MAX_ASSET_DEPTH: usize = 3;
+
+/// How many assets a listing names before it stops.
+///
+/// The listing is part of the skill's system prompt, so it is paid for on
+/// every turn. A 300-file reference set would cost more in prompt than it
+/// saves in discovery.
+const MAX_ASSET_ENTRIES: usize = 40;
+
+/// Files under `dir`, as paths relative to it, with a one-line description.
+///
+/// Returns `(entries, withheld)`. Recursing matters more than it looks:
+/// without it, a nested reference is invisible to the listing, and the model
+/// only finds it by deciding to go looking — measured at three extra tool
+/// calls when it does, and silence when it does not. A skill whose material
+/// lives in subdirectories would otherwise be answered from the model's
+/// priors while appearing to be grounded in the corpus.
+fn list_asset_entries(dir: &Path, allowed_exts: &[&str]) -> (Vec<(String, String)>, usize) {
   let mut out = Vec::new();
+  let mut total = 0usize;
+  collect_assets(dir, dir, allowed_exts, 0, &mut out, &mut total);
+  out.sort_by(|a, b| a.0.cmp(&b.0));
+  out.truncate(MAX_ASSET_ENTRIES);
+  (out, total.saturating_sub(MAX_ASSET_ENTRIES))
+}
+
+fn collect_assets(
+  root: &Path,
+  dir: &Path,
+  allowed_exts: &[&str],
+  depth: usize,
+  out: &mut Vec<(String, String)>,
+  total: &mut usize,
+) {
+  let Ok(read) = fs::read_dir(dir) else {
+    return;
+  };
+  let mut subdirs = Vec::new();
   for entry in read.flatten() {
     let path = entry.path();
+    if path.is_dir() {
+      if depth + 1 < MAX_ASSET_DEPTH {
+        subdirs.push(path);
+      }
+      continue;
+    }
     if !path.is_file() {
       continue;
     }
@@ -427,15 +490,22 @@ fn list_asset_entries(dir: &Path, allowed_exts: &[&str]) -> Vec<(String, String)
     if !allowed_exts.iter().any(|e| *e == ext) {
       continue;
     }
-    let name = match path.file_name().and_then(|s| s.to_str()) {
+    // Relative to the assets root, so the prompt shows `chapter2/ito.md`
+    // rather than an absolute path repeated on every line.
+    let name = match path.strip_prefix(root).ok().and_then(|p| p.to_str()) {
       Some(n) => n.to_string(),
       None => continue,
     };
-    let desc = extract_asset_description(&path).unwrap_or_default();
-    out.push((name, desc));
+    *total += 1;
+    if out.len() < MAX_ASSET_ENTRIES.saturating_mul(4) {
+      let desc = extract_asset_description(&path).unwrap_or_default();
+      out.push((name, desc));
+    }
   }
-  out.sort_by(|a, b| a.0.cmp(&b.0));
-  out
+  subdirs.sort();
+  for sub in subdirs {
+    collect_assets(root, &sub, allowed_exts, depth + 1, out, total);
+  }
 }
 
 /// Pull a one-line description from the first meaningful line of a file.
@@ -859,6 +929,61 @@ mod tests {
     let out = enumerate_skill_assets(&tmp);
     assert!(out.is_empty());
     std::fs::remove_dir_all(&tmp).ok();
+  }
+
+  /// The gap this closed, measured: with a flat listing the model needed three
+  /// extra tool calls (`list_dir` twice, then `read_file`) to reach a
+  /// reference one directory down — and only because it thought to look. A
+  /// skill whose material lives in subdirectories would otherwise be answered
+  /// from the model's priors while appearing to be grounded in the corpus.
+  #[test]
+  fn a_nested_reference_is_listed_with_its_relative_path() {
+    let tmp = std::env::temp_dir().join("seekcli_assets_nested");
+    let _ = fs::remove_dir_all(&tmp);
+    let refs = tmp.join("references");
+    let _ = fs::create_dir_all(refs.join("chapter2"));
+    let _ = fs::write(refs.join("glossary.md"), "# 术语表\n");
+    let _ = fs::write(refs.join("chapter2/ito.md"), "# 伊藤引理\n");
+
+    let out = enumerate_skill_assets(&tmp);
+    assert!(out.contains("`glossary.md`"), "{out}");
+    assert!(
+      out.contains("`chapter2/ito.md`"),
+      "a nested reference must be named, relative to references/: {out}"
+    );
+    let _ = fs::remove_dir_all(&tmp);
+  }
+
+  /// The listing rides in every request's prompt, so it is capped — and a cap
+  /// that does not announce itself would have the model treat the listing as
+  /// the whole corpus.
+  #[test]
+  fn an_oversized_reference_set_is_capped_and_says_so() {
+    let tmp = std::env::temp_dir().join("seekcli_assets_capped");
+    let _ = fs::remove_dir_all(&tmp);
+    let refs = tmp.join("references");
+    let _ = fs::create_dir_all(&refs);
+    for n in 0..(MAX_ASSET_ENTRIES + 7) {
+      let _ = fs::write(refs.join(format!("note{n:03}.md")), "# x\n");
+    }
+    let out = enumerate_skill_assets(&tmp);
+    assert!(out.contains("and 7 more not listed"), "{out}");
+    // And it must say how to reach them, not just that they exist.
+    assert!(out.contains("grep"), "{out}");
+    let _ = fs::remove_dir_all(&tmp);
+  }
+
+  /// Depth is bounded, so a stray deep tree cannot balloon the prompt.
+  #[test]
+  fn the_asset_walk_stops_at_a_bounded_depth() {
+    let tmp = std::env::temp_dir().join("seekcli_assets_deep");
+    let _ = fs::remove_dir_all(&tmp);
+    let deep = tmp.join("references/a/b/c/d");
+    let _ = fs::create_dir_all(&deep);
+    let _ = fs::write(deep.join("buried.md"), "# too deep\n");
+    let out = enumerate_skill_assets(&tmp);
+    assert!(!out.contains("buried.md"), "depth must be bounded: {out}");
+    let _ = fs::remove_dir_all(&tmp);
   }
 
   #[test]
