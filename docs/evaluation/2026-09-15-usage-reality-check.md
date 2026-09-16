@@ -248,3 +248,70 @@ design-principles §3 写着：
 的处理同理），于是 prompt 里会堆积历史记忆快照。**要么接受这个堆积，要么让投影
 对某类事件只取最后一条**，后者是投影语义的实质变更。排进阶段四十七与 Run 身份
 统一一起做，那一阶段本来就是在处理「记录是否完整、能否归因」。
+
+---
+
+## 7. 第四轮的真实验收（2026-09-16 晚）
+
+DeepSeek 密钥恢复后跑通的实测。**四批此前挂着「未验证」的东西全部落地**，
+并且其中一次差点被一个平凡的错误骗过去。
+
+### 7.1 阶段四十三：重放 2026-05-02 那条失效的 prompt
+
+`智谱(Zhipu AI)最近有什么值得关注的消息？请给出来源链接和发布时间。`
+—— 与 `@web 智谱的股价现在是多少？` 同类，那条自阶段七起就答不了。
+
+6 轮，`web_search` ×4、`web_fetch` ×8（多次并行），86K prompt / 99% cache hit。
+引用契约**逐条自发落实**，不是被提示词逼出来的：
+
+| 契约要求 | 模型实际输出 |
+| --- | --- |
+| 区分摘要与原文 | 「这条我**没有打开原文核实**……请当作待验证线索而非事实」 |
+| 取不到原文要说明 | 「付费墙，我只读到导语」 |
+| 时效性口径 | 「『当前』的边界：以上覆盖 8 月下旬至 9 月 16 日」 |
+| 来源可核 | 每条结论带 URL + 发布日期 |
+| 单方面说法标注 | 「这是 Anthropic 单方面指控，我未找到智谱的公开回应」 |
+
+### 7.2 阶段四十五：记忆
+
+- 记忆索引 → `memory{action:"read"}` → 发现条目已存在 → **拒绝重复写入**。
+- 两条经闸门接受的偏好被遵守：回答用中文、技术术语用英文。
+- 记忆 blob 内容与注入完全一致（偏好内联、`ielts` 只列名字与条数）。
+
+### 7.3 阶段四十七：全部四项
+
+```text
+run/chat   meta {"first_seq": 3, "session": "cadcb7f1-…"}
+  turn 0   meta {"seq": 3}      ← 日志 seq=3 正是本轮第一条 AssistantMessage
+  turn 1   meta {"seq": 5}      ← 日志 seq=5 同理
+```
+
+事件日志：
+
+```text
+seq=1 ContextInjected kind=Research blob=yes
+seq=2 ContextInjected kind=Memory   blob=yes
+seq=3 AssistantMessage  calls=[invoke_agent] id=call_00_bTE4RtJb0ogm
+seq=4 ChildRun  template=explore status=completed iters=2 1390ms call=call_00_bTE4RtJb0ogm
+seq=5 ToolResult
+```
+
+`ChildRun` 落在「请求委派的 assistant 消息」与「报告结果的 tool result」之间，
+`call_id` 精确匹配——这正是把事件由 `delegate_to_subagent` **返回**而不是就地记录
+所要达到的位置。`--output json` 同时给出 `"status": "completed"` 与
+`"verification": "not_verified"`。
+
+### 7.4 方法学：一次差点成功的假验证
+
+头两次实跑里，trace 的 join key 和 `ContextInjected` **都没出现**。
+差一点就得出「47 的实现有问题」的结论——
+
+**真实原因是二进制比源码旧了近十小时。** 阶段四十七之后我只跑过 `cargo test`
+与 `cargo clippy`，没跑 `cargo build`，而端到端用的是
+`~/.target/debug/seekcli`。`stat` 一下就看见了：10:36 vs 20:21。
+
+这条与 §5 的教训同源，也与四评 §5「设计稿与代码的接触面」同源：
+**验证的对象必须是你以为的那个对象。** 一次「功能没生效」的观察，
+和一次「跑的是旧二进制」的观察，现象完全一样。
+
+**已纳入习惯**：端到端实跑前先 `cargo build`，或直接看二进制时间戳。
