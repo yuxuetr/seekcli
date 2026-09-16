@@ -123,6 +123,23 @@ fn write_builtin_reminders(dir: &std::path::Path) -> Result<()> {
 }
 
 /// 列出已定义的任务，供 `seekcli task list`。
+/// Installed task names and their file paths, for the extension listing.
+///
+/// Read-only and non-creating, unlike `list`: an inspection must not have the
+/// side effect of writing the built-in task into existence.
+pub fn installed(config: &Config) -> Vec<(String, String)> {
+  let Ok(dir) = resolve_dir(config) else {
+    return Vec::new();
+  };
+  available(&dir)
+    .into_iter()
+    .map(|name| {
+      let path = task_file(&dir, &name).display().to_string();
+      (name, path)
+    })
+    .collect()
+}
+
 pub fn list(config: &Config) -> Result<String> {
   let dir = resolve_dir(config)?;
   // 让内置任务在首次 list 时也出现，而不是只在首次 run 时才存在。

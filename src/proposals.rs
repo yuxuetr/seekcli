@@ -268,6 +268,8 @@ impl ProposalStore {
       description,
       system_prompt: body,
       tools: None,
+      version: None,
+      source: Some(md.display().to_string()),
       allowed_tools,
     })
   }

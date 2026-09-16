@@ -147,6 +147,73 @@ impl App {
   /// Here rather than in `tools::inspect` because only the engine can reach the
   /// registries; the rendering stays a pure function over this struct so it can
   /// be asserted without constructing an `App`.
+  /// Every installed extension, in one list.
+  ///
+  /// The three kinds are genuinely different — a skill is a method, an MCP
+  /// server is a process, a task is a schedule — and "enabled" means something
+  /// different for each, which is why `state` is a sentence rather than a
+  /// boolean. Flattening them into a uniform lifecycle would need that
+  /// difference to be untrue.
+  fn installed_extensions(&self) -> Vec<tools::inspect::ExtensionEntry> {
+    let mut out = Vec::new();
+
+    for skill in self.skill_manager.load_skills().unwrap_or_default() {
+      let active = self
+        .current_skill
+        .as_ref()
+        .is_some_and(|s| s.name == skill.name);
+      out.push(tools::inspect::ExtensionEntry {
+        kind: "skill",
+        name: skill.name.clone(),
+        version: skill.version.clone(),
+        source: skill.source.clone().unwrap_or_else(|| "-".to_string()),
+        // A skill does nothing until activated, so "installed" is the honest
+        // resting state — not "enabled".
+        state: if active {
+          "active in this conversation".to_string()
+        } else {
+          "installed, not activated".to_string()
+        },
+      });
+    }
+
+    let connected = self.mcp.server_tool_counts();
+    for server in &self.config.mcp_servers {
+      let tools = connected
+        .iter()
+        .find(|(name, _)| name == &server.name)
+        .map(|(_, n)| *n);
+      out.push(tools::inspect::ExtensionEntry {
+        kind: "mcp",
+        name: server.name.clone(),
+        version: None,
+        source: server.command.clone(),
+        state: match (server.enabled, tools) {
+          (false, _) => "disabled in config".to_string(),
+          (true, Some(n)) => format!("connected, {n} tool(s)"),
+          // Configured and enabled but absent from the registry: it failed to
+          // start. Saying "enabled" here would describe the config rather than
+          // the world.
+          (true, None) => "enabled but not connected".to_string(),
+        },
+      });
+    }
+
+    for task in crate::tasks::installed(&self.config) {
+      out.push(tools::inspect::ExtensionEntry {
+        kind: "task",
+        name: task.0,
+        version: None,
+        source: task.1,
+        // Whether launchd actually runs it is outside this process, so
+        // claiming a schedule here would be claiming something unverified.
+        state: "defined; run by the scheduler".to_string(),
+      });
+    }
+
+    out
+  }
+
   fn inspect_snapshot(&self, effective: &[api::Tool]) -> tools::inspect::Snapshot {
     let builtin: std::collections::HashSet<String> = tools::registry::system_tools()
       .into_iter()
@@ -229,6 +296,7 @@ impl App {
       events: self.current_session.events.len(),
       compactions,
       sources: tools::provenance::snapshot(),
+      extensions: self.installed_extensions(),
       child_runs: self
         .current_session
         .events

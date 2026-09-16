@@ -55,11 +55,27 @@ pub struct Snapshot {
   pub memory: MemoryEntry,
   /// What this session searched up versus what it actually read.
   pub sources: Vec<super::provenance::Source>,
+  /// Everything installed that extends this agent, whatever its kind.
+  pub extensions: Vec<ExtensionEntry>,
   /// Sub-agent delegations made in this session, with how each ended.
   pub child_runs: Vec<ChildRunEntry>,
   /// Persistent memory scopes, and where the files live.
   pub memory_scopes: Vec<crate::memory::ScopeSummary>,
   pub memory_dir: String,
+}
+
+/// One installed extension, whatever kind it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionEntry {
+  /// `skill` / `mcp` / `task`.
+  pub kind: &'static str,
+  pub name: String,
+  pub version: Option<String>,
+  /// Where it came from — a path, or a command for an MCP server.
+  pub source: String,
+  /// Whether it is doing anything right now. Means something different per
+  /// kind, which is why it is a sentence and not a boolean.
+  pub state: String,
 }
 
 /// One delegation, as the session section renders it.
@@ -83,7 +99,14 @@ pub struct MemoryEntry {
 
 /// The sections a caller may ask for.
 const SECTIONS: &[&str] = &[
-  "tools", "policy", "skills", "mcp", "session", "sources", "memory",
+  "tools",
+  "policy",
+  "skills",
+  "mcp",
+  "session",
+  "sources",
+  "memory",
+  "extensions",
 ];
 
 /// Render the requested section, or every section when `what` is absent.
@@ -117,6 +140,7 @@ fn section(name: &str, snap: &Snapshot) -> String {
     "session" => session(snap),
     "sources" => sources(snap),
     "memory" => memory(snap),
+    "extensions" => extensions(snap),
     // `render` only passes values from SECTIONS.
     other => unreachable!("unlisted section `{other}` reached the renderer"),
   }
@@ -243,6 +267,42 @@ fn session(snap: &Snapshot) -> String {
   out
 }
 
+/// One listing for everything installed that extends the agent.
+///
+/// Skills and MCP servers already had sections, and tasks had none at all —
+/// but spread across them, "what is extending this agent right now, and where
+/// did it come from" had no single answer. That question is the whole of what
+/// a plugin system would be *for*; the registry, the lifecycle and the
+/// hot-swapping are machinery in service of it, and on a single-user CLI the
+/// machinery costs more than the answer is worth.
+///
+/// So: the answer, without the machinery. `docs/architecture/L5-composition.md`
+/// §4.6 records what is deliberately absent and what would have to change for
+/// that to be worth revisiting.
+fn extensions(snap: &Snapshot) -> String {
+  if snap.extensions.is_empty() {
+    return "# extensions\n(nothing installed)\n".to_string();
+  }
+  let mut out = String::from("# extensions\n");
+  for e in &snap.extensions {
+    // `v-` for an absent version reads as a version called "-". A bare dash
+    // reads as "there isn't one", which is what it means.
+    let version = match &e.version {
+      Some(v) => format!("v{v}"),
+      None => "-".to_string(),
+    };
+    out.push_str(&format!(
+      "  {:<5} {:<22} {:<8} {:<26} {}\n",
+      e.kind, e.name, version, e.state, e.source
+    ));
+  }
+  out.push_str(
+    "Versions are recorded, not enforced: nothing here is hot-swapped \
+     mid-run, and a change lands on the next run.\n",
+  );
+  out
+}
+
 /// Where the persistent notes are and what is in them.
 ///
 /// Naming the directory is the point, not decoration: a memory the user cannot
@@ -323,6 +383,7 @@ mod tests {
       events: 42,
       compactions: 1,
       sources: Vec::new(),
+      extensions: Vec::new(),
       child_runs: Vec::new(),
       memory_scopes: Vec::new(),
       memory_dir: "/tmp/seekcli-test-memory".into(),
@@ -382,6 +443,46 @@ mod tests {
   fn an_empty_sources_section_says_so_rather_than_rendering_nothing() {
     let out = section("sources", &snap());
     assert!(out.contains("nothing searched or fetched"), "{out}");
+  }
+
+  /// The one question a plugin system would exist to answer: what is extending
+  /// this agent right now, and where did each piece come from. Answering it
+  /// needed a listing, not a lifecycle.
+  #[test]
+  fn the_extensions_section_answers_what_is_installed_and_from_where() {
+    let mut s = snap();
+    s.extensions = vec![
+      ExtensionEntry {
+        kind: "skill",
+        name: "ielts_writing".into(),
+        version: Some("2".into()),
+        source: "/home/u/.seekcli/skills/ielts_writing/SKILL.md".into(),
+        state: "installed, not activated".into(),
+      },
+      ExtensionEntry {
+        kind: "mcp",
+        name: "github".into(),
+        version: None,
+        source: "npx".into(),
+        state: "enabled but not connected".into(),
+      },
+    ];
+    let out = section("extensions", &s);
+    assert!(out.contains("ielts_writing"), "{out}");
+    assert!(out.contains("v2"), "a recorded version must show: {out}");
+    assert!(out.contains("SKILL.md"), "and where it came from: {out}");
+    // The distinction that matters for MCP: configured is not connected.
+    assert!(out.contains("enabled but not connected"), "{out}");
+    assert!(
+      out.contains("hot-swapped"),
+      "the listing must say what it does NOT do: {out}"
+    );
+  }
+
+  #[test]
+  fn an_empty_extensions_section_says_so() {
+    let out = section("extensions", &snap());
+    assert!(out.contains("nothing installed"), "{out}");
   }
 
   /// A delegation that quietly hit its iteration cap used to be

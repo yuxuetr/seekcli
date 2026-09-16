@@ -10,6 +10,17 @@ pub struct Skill {
   pub description: String,
   pub system_prompt: String,
   pub tools: Option<Vec<SkillTool>>,
+  /// Declared `version:`, if the SKILL.md carries one.
+  ///
+  /// Recorded rather than acted on. Stage 49's gate can reject a skill that
+  /// breaks the smoke suite, but "roll back to the version that worked" needs
+  /// to know which version was running — and until that is written down,
+  /// rollback is a thing you do by remembering.
+  pub version: Option<String>,
+  /// Where it was loaded from. An installed skill, a proposal being previewed
+  /// and a hand-written test fixture are three different things, and a listing
+  /// that cannot tell them apart invites the wrong one being blamed.
+  pub source: Option<String>,
   /// The tool names this skill narrows its agent to. `None` means "do not narrow".
   ///
   /// This can only ever **remove** tools. A skill declaring `run_shell` does
@@ -339,6 +350,8 @@ pub fn load_skill_md(path: &Path) -> Result<Skill> {
     // legacy `SkillTool` list which carried full schemas — so it travels in
     // its own field and is applied as a filter, never as a source of tools.
     tools: None,
+    version: fm.version,
+    source: Some(path.display().to_string()),
     allowed_tools: fm.allowed_tools,
   })
 }
@@ -692,6 +705,8 @@ mod tests {
       description: "a test skill".to_string(),
       system_prompt: "do the thing".to_string(),
       tools: None,
+      version: None,
+      source: None,
       allowed_tools: None,
     };
     let md = render_skill_md(&skill);
@@ -708,6 +723,8 @@ mod tests {
       description: "round: trip with # special chars".to_string(),
       system_prompt: "Body line 1.\nBody line 2.".to_string(),
       tools: None,
+      version: None,
+      source: None,
       allowed_tools: None,
     };
     let md = render_skill_md(&original);
@@ -725,6 +742,8 @@ mod tests {
       description: "has: colon and #hash".to_string(),
       system_prompt: "body".to_string(),
       tools: None,
+      version: None,
+      source: None,
       allowed_tools: None,
     };
     let md = render_skill_md(&skill);
@@ -750,6 +769,8 @@ mod tests {
           parameters: serde_json::json!({}),
         },
       ]),
+      version: None,
+      source: None,
       allowed_tools: None,
     };
     let md = render_skill_md(&skill);
@@ -803,6 +824,8 @@ mod tests {
         description: String::new(),
         parameters: serde_json::json!({}),
       }]),
+      version: None,
+      source: None,
       allowed_tools: Some(vec!["read_file".to_string()]),
     };
     let md = render_skill_md(&skill);

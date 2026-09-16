@@ -27,7 +27,7 @@
 | --- | --- | --- |
 | ~~L5-1~~ | ~~无 MCP~~ | **阶段二十八已落地** |
 | ⚠️ L5-2 | 子代理一次性，无法续跑 / 通信 | 功能级，**未排期**——阶段三十 30.4（后台子代理）已主动推迟并写明理由 |
-| L5-3 | 无插件 / profile 组合机制 | 取舍级，见 §5 |
+| L5-3 | 无插件 / profile 组合机制 | 取舍级。**阶段五十收窄**：装配的「答案」已落地（`harness_inspect{what:"extensions"}`），不做的是生命周期机制，见 §4.6 |
 | L5-4 | 无 hooks | 取舍级 |
 | L5-5 | 无 workflow 编排 | 取舍级 |
 | ~~L5-7~~ | ~~Skill 的 `allowed_tools` 解析后未消费~~ | **阶段四十二已落地**：在 loop 入口按白名单裁剪 effective 工具面，见 §4.5 | — |
@@ -201,3 +201,55 @@ merge_with_skill(内置 + skill 自带 schema)
 现在以声明的白名单为准；`ProposalStore::read_skill` 此前不带白名单，
 于是 eval 闸门衡量的是一个**未裁剪**的版本、落地的却是裁剪版本——
 判决因此在谈论一个从不运行的 skill。
+
+### 4.6 扩展装配：做答案，不做平台（L5-3，阶段五十）
+
+路线图原先写的是「把 Skill / MCP / Task 三类资产的安装、启用、禁用、版本收成
+同一套声明式装配」。动手时用本仓自己的三问
+（[design-principles §5](design-principles.md#5-与-deepseek-harness-的边界)）
+重新过了一遍，收窄成一件事。
+
+**先问这套机制是为了回答什么。** 答案是：
+
+> 现在有什么东西在扩展这个 agent，各自从哪来，处于什么状态？
+
+注册表、生命周期、热插拔都是**为了回答这个问题而存在的机械**。
+而在单人 CLI 上，机械的成本高于答案的价值。所以：**给答案，不造机械。**
+
+```text
+# extensions
+  skill doc_parser             v2       installed, not activated   ~/.seekcli/skills/doc_parser/SKILL.md
+  skill ielts_writing          -        installed, not activated   ~/.seekcli/skills/ielts_writing/SKILL.md
+  mcp   github                 -        enabled but not connected  npx
+  task  reminders              -        defined; run by the scheduler  ~/.seekcli/tasks/reminders/TASK.md
+Versions are recorded, not enforced: nothing here is hot-swapped mid-run,
+and a change lands on the next run.
+```
+
+三个细节是刻意的：
+
+- **`state` 是一句话，不是布尔值。** 三类资产的「启用」根本不是同一件事：
+  skill 在被激活前什么也不做（所以静息态诚实的说法是 *installed*，不是
+  *enabled*）；MCP server 的 `enabled = true` 说的是配置，而**它是否真的连上了
+  是另一回事**——两者分开渲染，否则这一行描述的是配置而不是世界；
+  task 由 launchd 跑，**这个进程无从确认它到底有没有被调度**，
+  所以只说「已定义」。把三者压成一个统一的 lifecycle，需要这些差异不成立。
+- **版本被记录，不被强制。** `Skill` 新增 `version` / `source`（兑现 44.2）。
+  阶段四十九的闸门能拒绝一个破坏冒烟集的 skill，但「回滚到能用的那个版本」
+  要先知道当时跑的是哪个版本——在这件事写下来之前，回滚是靠记性完成的。
+- **不热插拔**，而且**在列表里说出来**。一个不说明自己不做什么的清单，
+  会被读成它做了。
+
+#### 4.6.1 明确不做，以及判据何时翻转
+
+| 不做 | 理由 |
+| --- | --- |
+| 统一 enable / disable | skill 的「启用」= 激活（已是显式的、按会话的）；MCP 已有 `enabled`；task 归 launchd。统一它需要三者的差异不成立 |
+| 运行中热插拔 | 一次 Run 用一份快照已经是现状（激活的 skill 持有在 `App` 上，MCP 启动时连接），把它形式化成机制不改变行为 |
+| Profile / bundle 组合 | design-principles §2 排除项未变；Skill + TASK.md + 项目级 `.seekcli.toml` 深合并已覆盖 |
+| 任意 Rust 动态加载 | 判据未变：跨 ABI 不安全，等价需求由 MCP 的进程边界满足 |
+
+**判据何时翻转**，与 §5.1 同一条：**当某一层出现真实的第二个实现时。**
+具体到这里——当 `~/.seekcli/` 下装着的扩展多到「哪个 skill 提供了这个工具」
+需要查询而不是回忆时，或者当同一个 skill 出现两个需要并存的版本时。
+今天是 11 个 skill、0 个 MCP server、1 个 task，一张表就够了。
