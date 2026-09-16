@@ -93,6 +93,11 @@ pub async fn spawn(command: &str) -> Result<String> {
     .stdin(Stdio::null())
     .stdout(Stdio::from(file))
     .stderr(Stdio::from(errfile))
+    // Same reason as the foreground path: `sh` execs away for a simple command,
+    // but forks for anything it cannot exec, and killing only `sh` then leaves
+    // the real work running. A background build that survives `job_kill` is
+    // worse than one that was never killable — the user believes it stopped.
+    .process_group(0)
     .spawn()
     .with_context(|| format!("cannot start background command: {command}"))?;
 
@@ -237,6 +242,7 @@ pub async fn job_kill(args: &Value) -> Result<String> {
     }
     Some(job) => {
       if let Some(child) = job.child.as_mut() {
+        crate::tools::shell::kill_process_group(child);
         let _ = child.start_kill();
       }
       job.state = JobState::Killed;
@@ -253,6 +259,7 @@ pub fn kill_all() {
   with_jobs(|jobs| {
     for job in jobs.values_mut() {
       if let Some(child) = job.child.as_mut() {
+        crate::tools::shell::kill_process_group(child);
         let _ = child.start_kill();
       }
       job.child = None;

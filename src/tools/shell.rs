@@ -42,6 +42,24 @@ fn interrupted() -> bool {
 /// Deliberately does **not** clear the flag: the agent loop's own check is
 /// what ends the turn, and consuming it here would kill the command while
 /// leaving the loop to carry on as if nothing happened.
+/// Kill the command's whole process group.
+///
+/// Shelling out to `kill` rather than taking a `libc` dependency for one call:
+/// the group id equals the child's pid (see `process_group(0)`), and `kill -KILL
+/// -<pgid>` is exactly what a shell would do. Best effort — the child is killed
+/// directly regardless.
+pub(crate) fn kill_process_group(child: &tokio::process::Child) {
+  let Some(pid) = child.id() else {
+    return;
+  };
+  let _ = std::process::Command::new("kill")
+    .arg("-KILL")
+    .arg(format!("-{pid}"))
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
+}
+
 async fn cancelled() {
   loop {
     if interrupted() {
@@ -127,6 +145,13 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     .arg(command)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
+    // Its own process group, so cancelling can reach the whole command tree.
+    // `sh` execs away for a simple command, so killing the child was enough
+    // there — but anything `sh` cannot exec (a pipeline, `&&`, `time`, a loop)
+    // leaves it forking, and killing only `sh` orphans the grandchild. Measured:
+    // `time sleep 20` kept the stdout pipe open for the full 19 seconds after
+    // its `sh` was killed, and went on running afterwards.
+    .process_group(0)
     .spawn()
     .context("Failed to spawn shell command")?;
 
@@ -154,6 +179,9 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     status = child.wait() => status.context("waiting for shell command")?,
     _ = cancelled() => {
       was_cancelled = true;
+      kill_process_group(&child);
+      // Still kill the child itself: `kill(1)` may be missing, and the group
+      // kill is the addition rather than the replacement.
       let _ = child.start_kill();
       child.wait().await.context("reaping interrupted shell command")?
     }
@@ -163,8 +191,28 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   stop_flag.store(true, Ordering::SeqCst);
   let _ = spinner_task.await;
 
-  let stdout_bytes = out_task.await.unwrap_or_default();
-  let stderr_bytes = err_task.await.unwrap_or_default();
+  // Draining is bounded when the command was cancelled. The group kill should
+  // have released the pipes, but "should" is what the previous version also
+  // assumed — and a stuck drain is indistinguishable, from the user's side,
+  // from Ctrl-C not working at all.
+  let (stdout_bytes, stderr_bytes) = if was_cancelled {
+    let drain = tokio::time::Duration::from_millis(500);
+    (
+      tokio::time::timeout(drain, out_task)
+        .await
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .unwrap_or_default(),
+      tokio::time::timeout(drain, err_task)
+        .await
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .unwrap_or_default(),
+    )
+  } else {
+    (
+      out_task.await.unwrap_or_default(),
+      err_task.await.unwrap_or_default(),
+    )
+  };
 
   if was_cancelled {
     eprintln!("{} command interrupted by user.", "[Agent]".yellow());
@@ -255,4 +303,41 @@ fn truncate_for_spinner(s: &str) -> String {
   }
   let cut: String = s.chars().take(MAX).collect();
   format!("{}…", cut)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  /// Platform probe kept as a test: `process_group(0)` must actually put the
+  /// child in its own group, or `kill -KILL -<pid>` targets the wrong thing.
+  #[tokio::test]
+  async fn spawned_commands_get_their_own_process_group() {
+    let child = tokio::process::Command::new("sh")
+      .arg("-c")
+      .arg("sleep 2")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .process_group(0)
+      .spawn();
+    let mut child = match child {
+      Ok(c) => c,
+      Err(e) => panic!("spawn failed: {e}"),
+    };
+    let pid = child.id().unwrap_or(0);
+    let out = std::process::Command::new("ps")
+      .args(["-o", "pgid=", "-p", &pid.to_string()])
+      .output();
+    let pgid: u32 = match out {
+      Ok(o) => String::from_utf8_lossy(&o.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0),
+      Err(e) => panic!("ps failed: {e}"),
+    };
+    let _ = child.kill().await;
+    assert_eq!(
+      pgid, pid,
+      "process_group(0) did not take effect: child pid {pid} is in group {pgid}"
+    );
+  }
 }
