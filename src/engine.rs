@@ -219,6 +219,58 @@ impl App {
     out
   }
 
+  /// What this run's model is allowed to see.
+  ///
+  /// Assembly order is load-bearing: built-ins, then the skill's own schemas,
+  /// then MCP, then the skill's `allowed_tools` as a filter over all of it. The
+  /// narrowing has to come last so it narrows the *effective* surface rather
+  /// than only the built-ins — and it is a filter precisely so it can never
+  /// widen. A skill declaring `run_shell` does not thereby acquire it.
+  ///
+  /// Sub-agents take their template's list verbatim: that list was written
+  /// without knowledge of whatever MCP servers the user happens to have
+  /// configured, so silently widening it would undo the narrowing that makes a
+  /// sub-agent cheap and safe.
+  fn effective_tool_surface(&self, tools: Option<Vec<api::Tool>>, depth: usize) -> Vec<api::Tool> {
+    if depth > 0 {
+      return tools.unwrap_or_default();
+    }
+
+    let mut merged = tools::registry::merge_with_skill(tools);
+    merged.push(tools::registry::memory_tool());
+    merged.extend(self.mcp.schemas());
+    if self.research_enabled {
+      merged.extend(tools::registry::research_tools());
+    }
+
+    let Some(allowed) = self
+      .current_skill
+      .as_ref()
+      .and_then(|s| s.allowed_tools.as_ref())
+    else {
+      return merged;
+    };
+
+    let (kept, unknown) = tools::registry::narrow_to_skill(merged, allowed);
+    if !unknown.is_empty() {
+      // A name matching nothing is a typo, or a tool this host does not offer.
+      // Honouring it silently would leave the author believing their skill is
+      // narrower than it is.
+      eprintln!(
+        "{} skill declares tool(s) that are not on the surface: {}",
+        "[Skill]".yellow(),
+        unknown.join(", ")
+      );
+    }
+    if kept.is_empty() {
+      eprintln!(
+        "{} `allowed_tools` matched nothing — this turn runs with no tools at all",
+        "[Skill]".yellow()
+      );
+    }
+    kept
+  }
+
   fn inspect_snapshot(&self, effective: &[api::Tool]) -> tools::inspect::Snapshot {
     let builtin: std::collections::HashSet<String> = tools::registry::system_tools()
       .into_iter()
@@ -1322,49 +1374,7 @@ impl App {
     }
 
     let tool_dispatcher = tools::ToolDispatcher::new();
-    let effective_tools = if depth == 0 {
-      // MCP tools go to the main agent only. A sub-agent runs under a template
-      // whose allowed_tools list was written without knowledge of whatever the
-      // user happens to have configured, so silently widening it would break
-      // the tool-narrowing that makes sub-agents cheap and safe.
-      let mut merged = tools::registry::merge_with_skill(tools);
-      merged.push(tools::registry::memory_tool());
-      merged.extend(self.mcp.schemas());
-      if self.research_enabled {
-        merged.extend(tools::registry::research_tools());
-      }
-      // The active skill's `allowed_tools` narrows what the model can see.
-      // Applied here, after MCP, so a skill narrows the *effective* surface
-      // rather than only the built-ins — and applied as a filter, so it can
-      // never widen. See `narrow_to_skill`.
-      if let Some(allowed) = self
-        .current_skill
-        .as_ref()
-        .and_then(|s| s.allowed_tools.as_ref())
-      {
-        let (kept, unknown) = tools::registry::narrow_to_skill(merged, allowed);
-        if !unknown.is_empty() {
-          // A name that matches nothing is a typo or a tool the host does not
-          // offer. Honouring it silently would leave the author believing the
-          // skill is narrower than it is.
-          eprintln!(
-            "{} skill declares tool(s) that are not on the surface: {}",
-            "[Skill]".yellow(),
-            unknown.join(", ")
-          );
-        }
-        if kept.is_empty() {
-          eprintln!(
-            "{} `allowed_tools` matched nothing — this turn runs with no tools at all",
-            "[Skill]".yellow()
-          );
-        }
-        merged = kept;
-      }
-      merged
-    } else {
-      tools.unwrap_or_default()
-    };
+    let effective_tools = self.effective_tool_surface(tools, depth);
 
     let mut events: Vec<EventPayload> = Vec::new();
     let mut final_content = String::new();
@@ -2020,6 +2030,52 @@ mod tests {
       Ok(n) => assert_eq!(n, 0),
       Err(e) => panic!("no-op flush failed: {e}"),
     }
+  }
+
+  /// Assembly order is the property worth testing, and it could not be tested
+  /// while it lived inside the 470-line loop body: narrowing must apply to the
+  /// *whole* surface, so it has to run after MCP and the research tools, not
+  /// over the built-ins alone.
+  #[test]
+  fn a_skills_whitelist_narrows_the_whole_surface_not_just_the_builtins() {
+    let mut app = test_app();
+    app.research_enabled = true;
+    app.current_skill = Some(crate::Skill {
+      name: "narrow".into(),
+      description: "d".into(),
+      system_prompt: "p".into(),
+      tools: None,
+      version: None,
+      source: None,
+      allowed_tools: Some(vec!["read_file".into(), "web_search".into()]),
+    });
+
+    let surface = app.effective_tool_surface(None, 0);
+    let names: Vec<&str> = surface.iter().map(|t| t.function.name.as_str()).collect();
+    assert!(names.contains(&"read_file"), "{names:?}");
+    // A research tool added after the built-ins must still be subject to the
+    // whitelist — which is what "narrow the effective surface" means.
+    assert!(names.contains(&"web_search"), "{names:?}");
+    assert!(!names.contains(&"run_shell"), "narrowing failed: {names:?}");
+    assert!(!names.contains(&"web_fetch"), "narrowing failed: {names:?}");
+    assert!(!names.contains(&"memory"), "narrowing failed: {names:?}");
+  }
+
+  /// A sub-agent takes its template's list verbatim. Widening it with whatever
+  /// MCP servers the host happens to have configured would undo the narrowing
+  /// that makes a sub-agent cheap and safe.
+  #[test]
+  fn a_sub_agent_surface_is_not_widened_by_host_configuration() {
+    let mut app = test_app();
+    app.research_enabled = true;
+    let template_tools = tools::registry::system_tools()
+      .into_iter()
+      .filter(|t| t.function.name == "read_file")
+      .collect::<Vec<_>>();
+
+    let surface = app.effective_tool_surface(Some(template_tools), 1);
+    let names: Vec<&str> = surface.iter().map(|t| t.function.name.as_str()).collect();
+    assert_eq!(names, vec!["read_file"], "{names:?}");
   }
 
   /// Every other ceiling bounds one dimension; none bounds the product. The
