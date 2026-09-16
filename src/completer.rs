@@ -10,21 +10,18 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
 /// Top-level slash commands eligible for tab completion.
-const SLASH_COMMANDS: &[&str] = &[
-  "/help",
-  "/quit",
-  "/exit",
-  "/clear",
-  "/history",
-  "/copy",
-  "/model",
-  "/thinking",
-  "/plan",
-  "/skill",
-  "/propose",
-  "/paste",
-  "/load",
-];
+/// Command names for completion, read off the same table `/help` renders.
+///
+/// Two hand-kept lists drifted: the REPL dispatched 18 commands while this one
+/// listed 13, so five could not be Tab-completed. Deriving removes the axis.
+fn slash_commands() -> Vec<&'static str> {
+  let mut out: Vec<&'static str> = crate::commands::SLASH_COMMANDS
+    .iter()
+    .map(|c| c.name())
+    .collect();
+  out.dedup();
+  out
+}
 
 /// Subcommands for `/skill` that aren't skill names.
 const SKILL_SUBCOMMANDS: &[&str] = &["list", "proposals", "migrate", "accept", "reject"];
@@ -235,7 +232,7 @@ impl Completer for CmdCompleter {
 
     // Bare slash command
     if prefix.starts_with('/') && !prefix.contains(' ') {
-      let matches: Vec<String> = SLASH_COMMANDS
+      let matches: Vec<String> = slash_commands()
         .iter()
         .filter(|c| c.starts_with(prefix))
         .map(|c| c.to_string())

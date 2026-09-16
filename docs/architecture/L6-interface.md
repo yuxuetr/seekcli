@@ -14,7 +14,7 @@
 | --- | --- |
 | REPL | `main.rs::App::run`（rustyline） |
 | Tab 补全 | `completer.rs::CmdCompleter` |
-| slash 命令 | `commands.rs::handle_command`（13 条） |
+| slash 命令 | `commands.rs::handle_command`（**18 条**）；`SLASH_COMMANDS` 是唯一清单，`/help` 与 Tab 补全都从它派生，见 §4.5 |
 | 状态指示 | prompt 显示 `model (thinking\|plan\|skill) ❯`；`run_shell` >800ms 显示 spinner |
 | Ctrl-C | `spawn_interrupt_watcher` + 循环轮询 |
 | Ctrl-V 贴图 | `main.rs::PasteKey`（rustyline 条件绑定 → `/paste`），见 §4.4 |
@@ -131,6 +131,24 @@ Ctrl+V 后行缓冲区出现 `/paste `；回车后事件日志里 `UserMessage.i
 > 一次值得记下的假警报：同一张图缩到 48×48 时模型说「整张都是蓝的」。
 > blob 逐像素核对是正确的（第 5 行红、第 40 行蓝），**是模型对极小图的视觉不可靠，
 > 不是管线出错**。换成 256×256 后描述准确。**先验证产物再归咎管线。**
+
+### 4.5 命令清单只有一份（阶段五十一）
+
+`/help`、Tab 补全、`match` 分发曾是**三份各自手维护的清单**，于是它们漂了：
+REPL 实际分发 **18** 条命令，Tab 补全只认 **13** 条（`/fork` `/readonly`
+`/resume` `/search` `/tools` 补不出来），而本文档还写着 13。
+
+**编译器和行为测试都发现不了这种漂移**——一条补不出来的命令，完整打出来照样能用。
+
+现在 `commands.rs::SLASH_COMMANDS` 是唯一清单：`/help` 渲染它，`completer.rs`
+从它取名字。剩下的一份是 `match` 分发，用**源码级校验**对齐——一条测试读
+`include_str!("commands.rs")` 抽出所有 `"/x" =>` 分支，双向比对：
+
+- 分发了但不在表里 → 用户按 Tab 补不出来
+- 在表里但没分发 → `/help` 宣传了一条不存在的命令
+
+第三条测试守着抽取器本身（若它一条也抽不到，前两条就变成两个空集合相等）。
+与 `scripts/check-gap-coverage.py` 同一思路，只是对象从文档换成了代码。
 
 ## 5. 明确不做
 

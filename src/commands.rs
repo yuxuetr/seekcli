@@ -10,6 +10,134 @@ use colored::Colorize;
 use crate::session::{EventPayload, PromptKind};
 use crate::{App, Skill, ThinkingMode, observability};
 
+/// One line of `/help`.
+///
+/// `usage` starts with the command name, so the completer can read names off
+/// the same list the help renders. Several entries may share a name (`/skill`
+/// has five forms); the completer deduplicates.
+pub(crate) struct SlashCommand {
+  pub(crate) usage: &'static str,
+  pub(crate) help: &'static str,
+}
+
+impl SlashCommand {
+  /// The bare command, e.g. `/skill` for `"/skill accept <name>"`.
+  pub(crate) fn name(&self) -> &'static str {
+    self.usage.split_whitespace().next().unwrap_or(self.usage)
+  }
+}
+
+/// Every slash command, in the order `/help` shows them.
+///
+/// **One list, three consumers**: `/help` renders it, `completer.rs` completes
+/// from it, and a test reads this file's own `match` arms and asserts the two
+/// agree. They were two hand-kept lists until stage 51, and they had drifted:
+/// the REPL dispatched 18 commands while Tab completed 13 — `/fork`,
+/// `/readonly`, `/resume`, `/search` and `/tools` could not be completed at
+/// all, and the layer doc still claimed 13.
+pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
+  SlashCommand {
+    usage: "/model [flash|pro]",
+    help: "Switch DeepSeek model",
+  },
+  SlashCommand {
+    usage: "/thinking [n|h|m]",
+    help: "Switch thinking intensity (None/High/Max)",
+  },
+  SlashCommand {
+    usage: "/plan [on|off]",
+    help: "Toggle Plan Mode (externalize state to PLAN.md/TODO.md)",
+  },
+  SlashCommand {
+    usage: "/readonly [on|off]",
+    help: "Toggle read-only mode (refuse all mutating tools)",
+  },
+  SlashCommand {
+    usage: "/skill list",
+    help: "List active skills",
+  },
+  SlashCommand {
+    usage: "/skill <name> [prompt]",
+    help: "Activate a skill (optional: send prompt immediately)",
+  },
+  SlashCommand {
+    usage: "/skill proposals",
+    help: "List pending skill proposals from the agent",
+  },
+  SlashCommand {
+    usage: "/skill accept <name>",
+    help: "Promote a proposal to active skill",
+  },
+  SlashCommand {
+    usage: "/skill reject <name>",
+    help: "Discard a skill proposal",
+  },
+  SlashCommand {
+    usage: "/skill migrate",
+    help: "Convert legacy <name>.json skills to <name>/SKILL.md",
+  },
+  SlashCommand {
+    usage: "/propose list",
+    help: "Everything the agent drafted, awaiting your review",
+  },
+  SlashCommand {
+    usage: "/propose accept <kind> <name>",
+    help: "Land it (kinds: skill, mcp, task, memory)",
+  },
+  SlashCommand {
+    usage: "/propose reject <kind> <name>",
+    help: "Discard it",
+  },
+  SlashCommand {
+    usage: "/paste [说明]",
+    help: "把剪贴板里的图交给模型（截图后 Ctrl+V 即可，不用存文件）",
+  },
+  SlashCommand {
+    usage: "/copy [index]",
+    help: "Copy code block from last response",
+  },
+  SlashCommand {
+    usage: "/tools",
+    help: "List active tools (built-in + MCP)",
+  },
+  SlashCommand {
+    usage: "/clear",
+    help: "Reset conversation",
+  },
+  SlashCommand {
+    usage: "/history",
+    help: "List previous sessions",
+  },
+  SlashCommand {
+    usage: "/resume <id>",
+    help: "Resume a previous session (alias: /load)",
+  },
+  SlashCommand {
+    usage: "/load <id>",
+    help: "Alias for /resume",
+  },
+  SlashCommand {
+    usage: "/fork <id> [n]",
+    help: "Fork a session at event n into a new one",
+  },
+  SlashCommand {
+    usage: "/search <text>",
+    help: "Find sessions mentioning text",
+  },
+  SlashCommand {
+    usage: "/help",
+    help: "Show this help",
+  },
+  SlashCommand {
+    usage: "/quit",
+    help: "Exit (alias: /exit)",
+  },
+  SlashCommand {
+    usage: "/exit",
+    help: "Alias for /quit",
+  },
+];
+
 impl App {
   /// Accept a proposal, then re-read anything the acceptance changed.
   ///
@@ -140,29 +268,10 @@ impl App {
 
   fn print_help(&self) {
     println!("{}", "\nAvailable Commands:".bold().yellow());
-    println!("  /model [flash|pro]      Switch DeepSeek model");
-    println!("  /thinking [n|h|m]       Switch thinking intensity (None/High/Max)");
-    println!("  /plan [on|off]          Toggle Plan Mode (externalize state to PLAN.md/TODO.md)");
-    println!("  /readonly [on|off]      Toggle read-only mode (refuse all mutating tools)");
-    println!("  /skill list             List active skills");
-    println!("  /skill <name> [prompt]  Activate a skill (optional: send prompt immediately)");
-    println!("  /skill proposals        List pending skill proposals from the agent");
-    println!("  /skill accept <name>    Promote a proposal to active skill");
-    println!("  /skill reject <name>    Discard a skill proposal");
-    println!("  /propose list           Everything the agent drafted, awaiting your review");
-    println!("  /propose accept <kind> <name>  Land it (kinds: skill, mcp, task)");
-    println!("  /propose reject <kind> <name>  Discard it");
-    println!("  /paste [说明]           把剪贴板里的图交给模型（截图后直接用，不用存文件）");
-    println!("  /skill migrate          Convert legacy <name>.json skills to <name>/SKILL.md");
-    println!("  /copy [index]           Copy code block from last response");
-    println!("  /clear                  Reset conversation");
-    println!("  /history                List previous sessions");
-    println!("  /resume <id>            Resume a previous session (alias: /load)");
-    println!("  /fork <id> [n]          Fork a session at event n into a new one");
-    println!("  /search <text>          Find sessions mentioning text");
-    println!("  /tools                  List active tools (built-in + MCP)");
-    println!("  /help                   Show this help");
-    println!("  /quit                   Exit\n");
+    for entry in SLASH_COMMANDS {
+      println!("  {:<30} {}", entry.usage, entry.help);
+    }
+    println!();
   }
 
   fn activate_skill(&mut self, skill: Skill) {
@@ -629,5 +738,79 @@ impl App {
       println!("{} /copy is only implemented on macOS.", "Info:".blue());
     }
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod slash_command_tests {
+  use super::SLASH_COMMANDS;
+  use std::collections::BTreeSet;
+
+  /// Command names this file's `match` actually dispatches, read out of its own
+  /// source.
+  ///
+  /// Reading the source is unusual, and it is the point: the table and the
+  /// `match` are two lists that must agree, and nothing but a comparison can
+  /// keep them agreeing. They had already drifted once — the REPL dispatched 18
+  /// commands while the completer offered 13 — and neither the compiler nor any
+  /// behavioural test noticed, because a command that cannot be *completed*
+  /// still *works* when typed in full. Same reasoning as
+  /// `scripts/check-gap-coverage.py`, applied to code instead of docs.
+  fn dispatched() -> BTreeSet<&'static str> {
+    let src = include_str!("commands.rs");
+    let mut out = BTreeSet::new();
+    for line in src.lines() {
+      let line = line.trim();
+      // Match arms look like `"/foo" => ...` or `"/foo" | "/bar" => ...`.
+      let Some(arrow) = line.find("=>") else {
+        continue;
+      };
+      let head = &line[..arrow];
+      if !head.trim_start().starts_with('"') {
+        continue;
+      }
+      for part in head.split('|') {
+        let part = part.trim().trim_matches(',').trim();
+        if let Some(name) = part.strip_prefix('"').and_then(|p| p.strip_suffix('"'))
+          && name.starts_with('/')
+        {
+          out.insert(name);
+        }
+      }
+    }
+    out
+  }
+
+  fn tabled() -> BTreeSet<&'static str> {
+    SLASH_COMMANDS.iter().map(|c| c.name()).collect()
+  }
+
+  #[test]
+  fn every_dispatched_command_is_in_the_help_table() {
+    let missing: Vec<&str> = dispatched().difference(&tabled()).copied().collect();
+    assert!(
+      missing.is_empty(),
+      "the REPL handles these but /help and Tab completion do not know them: {missing:?}"
+    );
+  }
+
+  #[test]
+  fn every_tabled_command_is_actually_dispatched() {
+    let phantom: Vec<&str> = tabled().difference(&dispatched()).copied().collect();
+    assert!(
+      phantom.is_empty(),
+      "these are advertised but the REPL does not handle them: {phantom:?}"
+    );
+  }
+
+  /// The extractor has to actually find things, or both tests above pass by
+  /// comparing two empty sets.
+  #[test]
+  fn the_source_scan_finds_the_commands_it_is_meant_to() {
+    let found = dispatched();
+    assert!(found.len() > 10, "suspiciously few arms found: {found:?}");
+    for known in ["/help", "/clear", "/paste", "/fork"] {
+      assert!(found.contains(known), "scan missed {known}: {found:?}");
+    }
   }
 }
