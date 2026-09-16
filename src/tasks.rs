@@ -244,7 +244,25 @@ pub async fn run_task(app: &mut App, name: &str) -> Result<()> {
     .as_deref()
     .map(|n| load_named_skill(app, n))
     .transpose()?;
-  let prompt = spec.prompt;
+  // The clock has to be read **now**, not when the TASK.md was written.
+  //
+  // Stage 32 turned tasks from a Rust `match` into declarative files, and in
+  // doing so froze a runtime value: `write_builtin_reminders` interpolated
+  // `Local::now()` into the body once, so every later run was told the local
+  // time was 2026-08-23. The digest went to the wrong filename, and — much
+  // worse — every due-date comparison ran against a "now" that was a month
+  // stale, so a due reminder could never fire. The scheduler's whole purpose
+  // silently did not work.
+  //
+  // Prefixed rather than templated: every task needs to know when it is, and a
+  // placeholder syntax would be one more thing a hand-written TASK.md can get
+  // wrong.
+  let prompt = format!(
+    "当前本地时间：{}。（由 harness 在每次运行时注入，以此为准；\
+     任务正文里若出现其它时间，一律以这一行为准。）\n\n{}",
+    Local::now().format("%Y-%m-%d %H:%M (%A)"),
+    spec.prompt
+  );
 
   let original_cwd = env::current_dir()?;
   env::set_current_dir(&dir)?;
@@ -283,15 +301,19 @@ pub fn pending_digest_notice(config: &Config) -> Option<String> {
   ))
 }
 
+/// The body written into a fresh `reminders/TASK.md`.
+///
+/// **Must not interpolate the clock.** The body is written to disk once and
+/// read back on every run afterwards; anything time-dependent baked in here
+/// becomes a lie the moment the file is saved. `run_task` prefixes the real
+/// time at run time. `{today}` below is likewise a placeholder the model fills
+/// from that prefix, not a value from this process.
 fn reminders_prompt() -> String {
-  let today = Local::now().format("%Y-%m-%d").to_string();
-  let now = Local::now().format("%Y-%m-%d %H:%M (%A)").to_string();
+  let today = "<今天的日期，取自上面注入的本地时间>";
   format!(
     r#"你现在是被系统定时任务（launchd/cron，约每 15 分钟一次）无人值守调用的
 一次性 headless 运行，不是交互式会话。没有用户在场——绝不要执行需要交互确认
 的命令，也不要等待任何输入。
-
-当前本地时间：{now}。
 
 当前工作目录下应该有两个文件：
   - reminders.md — 有时间点的提醒事项，到期需要触发系统通知
@@ -348,6 +370,30 @@ todos.md，每行一条（没有具体时间点，到期日期可选）：
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The regression that made the scheduler pointless: stage 32 wrote the
+  /// clock into the TASK.md body once, so every later run was told the local
+  /// time was the day the file was generated. Due-date comparisons then ran
+  /// against a stale "now", and a due reminder could never fire.
+  ///
+  /// Tests the exact property rather than "contains no date": the body does
+  /// carry example dates in its format spec, and those are fine. What must not
+  /// appear is *today*.
+  #[test]
+  fn the_builtin_task_body_does_not_bake_in_the_clock() {
+    let body = reminders_prompt();
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    assert!(
+      !body.contains(&today),
+      "the task body is written to disk once and read back forever, so \
+       interpolating today ({today}) freezes it; run_task injects the real \
+       time on every run"
+    );
+    assert!(
+      !body.contains("当前本地时间"),
+      "that line is the harness's to add at run time, not the file's"
+    );
+  }
 
   fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("seekcli-tasks-{}", name));
