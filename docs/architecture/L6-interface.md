@@ -48,11 +48,21 @@ seekcli -p "..." --max-iter 10 --read-only
 `--output json` 的形状：
 
 ```json
-{"session_id":"...","final":"...","iterations":7,
- "usage":{"prompt":12000,"completion":800,"cache_hit_pct":72},
- "cost_cny":0.031,"tools":[{"name":"read_file","count":4}],
- "status":"completed"}
+{"final":"...","status":"completed","verification":"not_verified",
+ "iterations":7,"llm_calls":9,
+ "usage":{"prompt_tokens":12000,"completion_tokens":800,"cache_hit_pct":72},
+ "cost_cny":0.031}
 ```
+
+> **2026-09-17 订正。** 上面是实际输出，此前这里写的是阶段二十三的设计草稿，
+> 从未与落地对齐：它列了 `session_id` 与 `tools:[{name,count}]` 两个**不存在**的
+> 字段，并把 `prompt_tokens` / `completion_tokens` 写成 `prompt` / `completion`。
+> 照着这份文档写的 CI 脚本会直接取到 `undefined`。
+>
+> 订正方向是**改文档而不是补字段**：`-p` 明确不保存会话（见 `run_headless`），
+> `session_id` 对它没有意义；`tools` 数组目前没有消费者，而没有消费者的字段是
+> 承诺不是灵活性（[AGENTS.md 工程品格](../../AGENTS.md)）。
+> `status` 与 `verification` 的分工见 [L7 附](L7-observability.md)。
 
 退出码语义（供 CI 判断）：
 
