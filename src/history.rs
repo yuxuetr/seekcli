@@ -32,6 +32,21 @@ pub struct HistoryManager {
 }
 
 impl HistoryManager {
+  /// A store rooted anywhere. Exists so a test `App` writes into a scratch
+  /// directory instead of the user's real history — 49 of one machine's 129
+  /// sessions turned out to be `cargo test` residue, because `for_test` built
+  /// a real `HistoryManager` and anything that saved left a session behind.
+  ///
+  /// Not `#[cfg(test)]`: `for_test` lives in `main.rs`, so this has to be
+  /// reachable from the binary's non-test build of that module.
+  pub fn at(sessions_dir: PathBuf) -> Result<Self> {
+    fs::create_dir_all(&sessions_dir)
+      .with_context(|| format!("cannot create {}", sessions_dir.display()))?;
+    Ok(Self {
+      base_dir: sessions_dir,
+    })
+  }
+
   pub fn new() -> Result<Self> {
     let home = std::env::var("HOME").context("Could not find HOME directory")?;
     let base = PathBuf::from(home).join(".seekcli");

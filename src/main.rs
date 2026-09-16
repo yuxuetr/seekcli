@@ -224,7 +224,13 @@ impl App {
   #[cfg(test)]
   pub(crate) fn for_test(brain: Box<dyn LlmProvider>) -> Result<Self> {
     let config = Config::default();
-    let history = HistoryManager::new()?;
+    // Scratch, not `$HOME`. A test that saves a session used to leave it in
+    // the user's real history; one machine had 49 such strays out of 129.
+    let history = HistoryManager::at(
+      std::env::temp_dir()
+        .join("seekcli-test-sessions")
+        .join(uuid::Uuid::new_v4().to_string()),
+    )?;
     let skill_manager = SkillManager::new()?;
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());

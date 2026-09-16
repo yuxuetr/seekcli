@@ -2130,6 +2130,21 @@ mod tests {
     assert_ne!(LoopStatus::BudgetExhausted, LoopStatus::Completed);
   }
 
+  /// Tests must not write into the user's real history. This is not
+  /// hypothetical: 49 of one machine's 129 stored sessions were `cargo test`
+  /// residue before `for_test` was pointed at a scratch directory, and every
+  /// full test run added more.
+  #[test]
+  fn a_test_app_writes_no_session_into_the_real_home() {
+    let app = test_app();
+    let dir = app.history.base_dir.display().to_string();
+    let real = std::env::var("HOME").unwrap_or_default();
+    assert!(
+      !real.is_empty() && !dir.starts_with(&format!("{real}/.seekcli")),
+      "a test session store must not live under the real ~/.seekcli: {dir}"
+    );
+  }
+
   /// A recorded run must be reproducible from the recording alone.
   ///
   /// The memory note goes into the prompt, so a test `App` that read the real
