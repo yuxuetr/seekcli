@@ -202,7 +202,23 @@ pub fn confirm(cmd: &str, reason: &str) -> bool {
   confirm_interactive(cmd, reason)
 }
 
+/// Only one prompt at a time.
+///
+/// The prompt writes to stderr and then reads a line from stdin, and neither
+/// is safe to do from two places at once: the questions interleave into one
+/// unreadable block, and whichever thread reaches `read_line` first consumes
+/// the answer meant for the other. Today nothing runs two tool calls that can
+/// prompt — `run_shell` is excluded from the parallel read-only batch — so this
+/// is a precondition rather than a fix, and it has to exist before anything
+/// runs sub-agents concurrently.
+static PROMPT: Mutex<()> = Mutex::new(());
+
 fn confirm_interactive(cmd: &str, reason: &str) -> bool {
+  let _one_at_a_time = match PROMPT.lock() {
+    Ok(g) => g,
+    // A panic while prompting poisons it; the next caller still needs to ask.
+    Err(poisoned) => poisoned.into_inner(),
+  };
   eprintln!();
   eprintln!(
     "{} Dangerous command intercepted: {}",
@@ -352,6 +368,23 @@ mod interaction_tests {
 
   /// The whole point of the non-interactive modes is that they never touch
   /// stdin. If they did, a launchd job would hang on an invisible prompt.
+  /// The prompt must be exclusive. Verified on the lock rather than by
+  /// racing two real prompts, because a test that reads stdin from two threads
+  /// is exactly the thing being prevented.
+  #[test]
+  fn only_one_approval_prompt_can_be_open_at_a_time() {
+    let held = match PROMPT.lock() {
+      Ok(g) => g,
+      Err(p) => p.into_inner(),
+    };
+    assert!(
+      PROMPT.try_lock().is_err(),
+      "a second prompt must wait; interleaved questions share one stdin"
+    );
+    drop(held);
+    assert!(PROMPT.try_lock().is_ok(), "and the lock must be released");
+  }
+
   #[test]
   fn non_interactive_modes_resolve_without_reading_stdin() {
     set_interaction(Interaction::AutoDeny);
