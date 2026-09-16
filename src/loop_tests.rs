@@ -52,11 +52,32 @@ mod tests {
       let original = std::env::current_dir().unwrap_or_default();
       let dir = std::env::temp_dir().join(format!("seekcli-loop-{}", name));
       let _ = std::fs::remove_dir_all(&dir);
-      let _ = std::fs::create_dir_all(&dir);
-      let _ = std::env::set_current_dir(&dir);
+      // Loud, not best-effort. These were `let _ =`, and the failure mode was
+      // vicious: a chdir that silently did not happen left the test running in
+      // the repository, where `ensure_agent_system_prompt` found AGENTS.md and
+      // injected workspace rules the recording does not have. The replay then
+      // failed with "message count 3 != recorded 2" — a message about the
+      // fixture, pointing nowhere near the actual cause. It reproduced about
+      // once in 25 full runs and never single-threaded.
+      if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("cannot create scratch {}: {e}", dir.display());
+      }
+      if let Err(e) = std::env::set_current_dir(&dir) {
+        panic!("cannot enter scratch {}: {e}", dir.display());
+      }
       // Resolve through the same canonicalisation the tools see, so
       // comparisons do not trip over /var vs /private/var on macOS.
-      let dir = std::env::current_dir().unwrap_or(dir);
+      let dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => panic!("cannot read back the scratch directory: {e}"),
+      };
+      // The assertion that would have named the bug directly: whatever else
+      // went wrong, the test must not be running in the repository.
+      assert_ne!(
+        dir, original,
+        "scratch chdir did not take effect — the test would run in the \
+         repository, where AGENTS.md changes the prompt"
+      );
       Self {
         original,
         dir,
