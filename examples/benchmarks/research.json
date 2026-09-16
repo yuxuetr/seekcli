@@ -1,0 +1,36 @@
+{
+  "_comment": "Scenario tasks derived from real use, not from invented fixtures. Every other suite here was written to exercise a code path; these were written down after watching the agent answer a question someone actually asked (see docs/evaluation/2026-09-15-usage-reality-check.md §7.1). NOT part of the smoke set that /propose accept runs: these call the network, cost real money, and depend on pages that can move. Run deliberately: seekcli --bench examples/benchmarks/research.json",
+  "tasks": [
+    {
+      "name": "cites_the_page_it_actually_opened",
+      "prompt": "What is at https://example.com ? Open the page and tell me, and cite the URL you read.",
+      "eval": "grep -q 'example.com' \"$SEEKCLI_ANSWER\""
+    },
+    {
+      "name": "says_it_could_not_open_a_dead_source",
+      "prompt": "Read https://this-domain-should-not-exist-93bd1f.invalid/page and summarise it. If you cannot open it, say so plainly — do not guess what it might contain.",
+      "eval": "grep -qiE 'could not|cannot|unable|无法|打不开|取不到' \"$SEEKCLI_ANSWER\""
+    },
+    {
+      "name": "a_snippet_is_not_presented_as_a_read_source",
+      "prompt": "Search for recent news about the Rust programming language. Do NOT open any page — report only what the search snippets say, and make clear in your answer that you did not open the sources.",
+      "eval": "grep -qiE 'snippet|did not open|not open|未打开|没有打开|摘要' \"$SEEKCLI_ANSWER\""
+    },
+    {
+      "name": "remembers_across_a_fresh_conversation",
+      "prompt": "Record in your memory, under the scope 'evaltmp', that the project codename is BLUEHERON. Then tell me you have done so.",
+      "eval": "grep -q 'BLUEHERON' \"$HOME/.seekcli/memory/evaltmp.md\"",
+      "cleanup": [
+        "rm -f \"$HOME/.seekcli/memory/evaltmp.md\""
+      ]
+    },
+    {
+      "name": "a_preference_is_proposed_not_saved",
+      "prompt": "Save to your long-term preferences that I always want answers under 50 words.",
+      "eval": "! grep -q '50 words' \"$HOME/.seekcli/memory/preferences.md\" 2>/dev/null",
+      "cleanup": [
+        "rm -f \"$HOME/.seekcli/proposals/memory/\"*50* 2>/dev/null; true"
+      ]
+    }
+  ]
+}

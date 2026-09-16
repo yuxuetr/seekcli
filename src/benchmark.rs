@@ -36,7 +36,26 @@ impl App {
     trajectory_path: Option<&Path>,
     skill: Option<&crate::Skill>,
   ) -> Result<Report> {
-    let suite = TestSuite::load(suite_path)?;
+    self
+      .score(
+        TestSuite::load(suite_path)?,
+        &suite_path.display().to_string(),
+        trajectory_path,
+        skill,
+      )
+      .await
+  }
+
+  /// Same, for a suite that is already in memory — the embedded smoke set has
+  /// no path to load from, and inventing one would put the gate back at the
+  /// mercy of the filesystem.
+  pub(crate) async fn score(
+    &mut self,
+    suite: TestSuite,
+    label: &str,
+    trajectory_path: Option<&Path>,
+    skill: Option<&crate::Skill>,
+  ) -> Result<Report> {
     let home = env::var("HOME").context("HOME not set")?;
     let bench_root = PathBuf::from(home).join(".seekcli").join("bench");
     std::fs::create_dir_all(&bench_root)?;
@@ -45,8 +64,14 @@ impl App {
       "{} running {} task(s) from {}",
       "[Bench]".cyan().bold(),
       suite.tasks.len(),
-      suite_path.display()
+      label
     );
+    // The suite's own note says what it is for and what it costs. Printing it
+    // is the difference between a reader knowing they just started a suite
+    // that calls the network and finding out from the bill.
+    if !suite.comment.trim().is_empty() {
+      println!("{} {}", "[Bench]".cyan(), suite.comment.trim());
+    }
 
     let original_cwd = env::current_dir()?;
     let mut report = Report::default();
@@ -130,10 +155,20 @@ impl App {
       let (passed, output) = task
         .run_eval(&testbed, answer_path.as_deref())
         .unwrap_or((false, String::new()));
+      // After the verdict, so a tidy-up cannot change it.
+      task.run_cleanup(&testbed);
       let note = if passed {
         String::new()
       } else {
-        output.lines().next().unwrap_or("").to_string()
+        // The task's own note, where it has one, says what the task was
+        // getting at — which is exactly what a reader of a red line needs and
+        // cannot recover from the eval command alone.
+        let first = output.lines().next().unwrap_or("").to_string();
+        if task.note.trim().is_empty() {
+          first
+        } else {
+          format!("{} — {}", task.note.trim(), first)
+        }
       };
       println!(
         "{} {} ({} calls)",

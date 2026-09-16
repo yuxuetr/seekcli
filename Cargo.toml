@@ -11,7 +11,10 @@ keywords = ["agent", "cli", "llm", "deepseek", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 # Ship only what a build needs. Recorded LLM fixtures are ~76K of test data and
 # examples/ is documentation, not code — neither belongs in a published crate.
-include = ["src/**/*", "README.md", "LICENSE", "CHANGELOG.md"]
+# `examples/benchmarks/basic.json` is `include_str!`d into the binary (the
+# regression gate must exist wherever the binary does, not only in a source
+# tree), so it is a build input rather than documentation.
+include = ["src/**/*", "examples/benchmarks/basic.json", "README.md", "LICENSE", "CHANGELOG.md"]
 rust-version = "1.85"
 
 [dependencies]

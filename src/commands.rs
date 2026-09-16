@@ -83,25 +83,33 @@ impl App {
       Err(_) => return Ok(None),
     };
 
-    let suite =
-      std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/benchmarks/basic.json");
-    if !suite.exists() {
-      println!(
-        "{} smoke suite not found at {} — accepting unmeasured.",
-        "Warning:".yellow(),
-        suite.display()
-      );
-      return Ok(None);
-    }
+    // A user's own copy wins, so the smoke set can be tuned without rebuilding.
+    // Otherwise the embedded one, which is always there — the gate must not
+    // depend on a build-time path that does not exist on the machine running
+    // the binary.
+    let user_suite = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+      .join(".seekcli/benchmarks/basic.json");
+    let (suite, label) = if user_suite.exists() {
+      (
+        observability::bench::TestSuite::load(&user_suite)?,
+        user_suite.display().to_string(),
+      )
+    } else {
+      (
+        observability::bench::TestSuite::embedded_smoke()?,
+        "the built-in smoke suite".to_string(),
+      )
+    };
 
     // Stated before it runs: this costs real calls and real minutes.
     println!(
-      "{} checking `{}` against the smoke suite (two runs, so ~2x the suite in LLM calls)…",
+      "{} checking `{}` against {} (two runs, so ~2x the suite in LLM calls)…",
       "✦".cyan(),
-      name
+      name,
+      label
     );
-    let before = self.score_suite(&suite, None, None).await?;
-    let after = self.score_suite(&suite, None, Some(&skill)).await?;
+    let before = self.score(suite.clone(), &label, None, None).await?;
+    let after = self.score(suite, &label, None, Some(&skill)).await?;
 
     let verdict = observability::bench::Regression::compare(&before, &after);
     println!(

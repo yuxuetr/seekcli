@@ -17,8 +17,19 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// A single benchmark task loaded from the suite JSON.
+///
+/// `deny_unknown_fields` because the alternative is a suite that looks like it
+/// does something it does not. A `cleanup` key that serde quietly drops leaves
+/// the author believing their task tidies up after itself, and the mess only
+/// shows up much later somewhere else.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Task {
+  /// A note to whoever reads the suite. Same story as `TestSuite::comment`:
+  /// the convention already existed and was surviving only because unknown
+  /// fields were dropped.
+  #[serde(default, rename = "_note")]
+  pub note: String,
   /// Unique, filesystem-safe task identifier.
   pub name: String,
   /// Instruction handed to the agent.
@@ -46,15 +57,55 @@ pub struct Task {
   /// splitting it between the JSON and how the runner was invoked.
   #[serde(default)]
   pub flags: Vec<String>,
+  /// Commands run after `eval`, whatever the verdict.
+  ///
+  /// For the rare task whose side effects land outside its testbed — writing
+  /// into the user's real memory directory, say. Failures here are reported
+  /// and do not change the verdict: a task that passed did pass, and a tidy-up
+  /// that could not run is a separate problem the user should hear about
+  /// rather than see folded into a red result.
+  #[serde(default)]
+  pub cleanup: Vec<String>,
 }
 
 /// A loaded benchmark suite.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestSuite {
+  /// The suite's own note to a reader. JSON has no comments, so every suite
+  /// here already carried one — silently dropped until `deny_unknown_fields`
+  /// made the drop visible. Declaring it keeps the convention and keeps a
+  /// typo'd key an error.
+  #[serde(default, rename = "_comment")]
+  pub comment: String,
   pub tasks: Vec<Task>,
 }
 
+/// The smoke suite, compiled into the binary.
+///
+/// `CARGO_MANIFEST_DIR` is a *build-time* path. Resolving the suite through it
+/// works in the source tree and nowhere else: an installed binary looks for a
+/// directory that does not exist on that machine, and `examples/` is not in the
+/// crate's `include` list either. So the gate stage 38 built — "a skill that
+/// breaks the smoke suite does not land" — silently became no gate at all for
+/// every user who did not clone the repo, while still printing a reassuring
+/// line about it.
+///
+/// Embedding it means the gate exists wherever the binary does.
+const EMBEDDED_SMOKE: &str = include_str!("../../examples/benchmarks/basic.json");
+
 impl TestSuite {
+  /// The built-in smoke suite. Cannot fail to be found; can only fail to parse,
+  /// and then it failed at compile time.
+  pub fn embedded_smoke() -> Result<Self> {
+    let suite: TestSuite =
+      serde_json::from_str(EMBEDDED_SMOKE).with_context(|| "parsing the embedded smoke suite")?;
+    if suite.tasks.is_empty() {
+      anyhow::bail!("the embedded smoke suite has no tasks");
+    }
+    Ok(suite)
+  }
+
   /// Parse a suite from a JSON file.
   pub fn load(path: &Path) -> Result<Self> {
     let raw = std::fs::read_to_string(path)
@@ -133,6 +184,31 @@ impl Task {
     // describes what actually happened, which is what a failing report needs.
     let raw = out.status.success();
     Ok((raw != self.expect_fail, combined))
+  }
+
+  /// Run the task's `cleanup` commands. Best-effort and loud.
+  ///
+  /// The verdict is already decided, so a failure here must not change it —
+  /// but it must not be swallowed either, or the user finds the leftovers
+  /// later with no idea where they came from.
+  pub fn run_cleanup(&self, testbed: &Path) {
+    for command in &self.cleanup {
+      match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(testbed)
+        .output()
+      {
+        Ok(out) if !out.status.success() => eprintln!(
+          "[Bench] cleanup for `{}` exited {}: {}",
+          self.name,
+          out.status,
+          String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => eprintln!("[Bench] cleanup for `{}` could not run: {e}", self.name),
+        Ok(_) => {}
+      }
+    }
   }
 }
 
@@ -288,6 +364,64 @@ mod tests {
     assert_eq!(Regression::compare(&before, &after), Regression::Clean);
   }
 
+  /// A suite key serde quietly drops is a suite that looks like it does
+  /// something it does not — the author believes their task tidies up after
+  /// itself and the mess surfaces much later, somewhere else.
+  #[test]
+  fn an_unknown_suite_key_is_refused_rather_than_ignored() {
+    let json = r#"{"tasks":[{"name":"t","prompt":"p","eval":"true","clenup":["rm x"]}]}"#;
+    let err = match serde_json::from_str::<TestSuite>(json) {
+      Err(e) => e.to_string(),
+      Ok(_) => panic!("a typo'd key must not parse silently"),
+    };
+    assert!(
+      err.contains("clenup"),
+      "the error must name the typo: {err}"
+    );
+  }
+
+  /// The scenario suite is the one place a task can touch state outside its
+  /// testbed, so its cleanup has to actually be a thing the runner knows about.
+  #[test]
+  fn cleanup_commands_are_parsed_not_discarded() {
+    let json = r#"{"tasks":[{"name":"t","prompt":"p","eval":"true","cleanup":["rm -f x"]}]}"#;
+    let suite = match serde_json::from_str::<TestSuite>(json) {
+      Ok(s) => s,
+      Err(e) => panic!("{e}"),
+    };
+    assert_eq!(
+      suite.tasks.first().map(|t| t.cleanup.len()),
+      Some(1),
+      "cleanup must survive parsing"
+    );
+  }
+
+  /// The gate's own precondition. Before this, the suite was resolved through
+  /// `CARGO_MANIFEST_DIR` — a build-time path — so an installed binary looked
+  /// for a directory that does not exist on that machine, printed a warning,
+  /// and accepted the proposal unmeasured. A gate that is only a gate on the
+  /// developer's laptop is not a gate.
+  #[test]
+  fn the_embedded_smoke_suite_is_present_and_usable() {
+    let suite = match TestSuite::embedded_smoke() {
+      Ok(s) => s,
+      Err(e) => panic!("the built-in smoke suite must always load: {e:#}"),
+    };
+    assert!(
+      !suite.tasks.is_empty(),
+      "an empty smoke suite would pass everything"
+    );
+    // Every task needs the two things the runner cannot invent.
+    for t in &suite.tasks {
+      assert!(!t.name.trim().is_empty(), "a task needs a name");
+      assert!(
+        !t.prompt.trim().is_empty(),
+        "a task needs a prompt: {}",
+        t.name
+      );
+    }
+  }
+
   /// The case the gate exists for: a badly written skill prompt degrades the
   /// agent on work it could already do.
   #[test]
@@ -361,6 +495,8 @@ mod tests {
       eval: "true".to_string(),
       expect_fail: false,
       flags: Vec::new(),
+      cleanup: Vec::new(),
+      note: String::new(),
     };
     let root = std::env::temp_dir().join(format!("seekcli_bench_{}", uuid::Uuid::new_v4()));
     let bed = task.prepare_testbed(&root).expect("prepare");
@@ -427,6 +563,8 @@ mod tests {
       eval: "test -f forbidden.txt".into(),
       expect_fail: true,
       flags: Vec::new(),
+      cleanup: Vec::new(),
+      note: String::new(),
     };
     match guard.run_eval(&dir, None) {
       Ok((passed, _)) => assert!(passed, "absent file means the guard held"),
@@ -451,6 +589,8 @@ mod tests {
       eval: "true".to_string(),
       expect_fail: false,
       flags: Vec::new(),
+      cleanup: Vec::new(),
+      note: String::new(),
     };
     let bed = pass.prepare_testbed(&root).unwrap();
     assert!(pass.run_eval(&bed, None).unwrap().0);
@@ -476,6 +616,8 @@ mod tests {
       eval: "grep -q 42 \"$SEEKCLI_ANSWER\"".to_string(),
       expect_fail: false,
       flags: Vec::new(),
+      cleanup: Vec::new(),
+      note: String::new(),
     };
     let bed = match task.prepare_testbed(&root) {
       Ok(b) => b,
