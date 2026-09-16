@@ -1,6 +1,6 @@
 # L6 界面层：REPL · CLI · headless 入口
 
-> 完成度 **75%**（阶段二十、二十三后）｜ 缺口来源：[评估 §3 L6](../evaluation/2026-08-harness-gap-analysis.md#l6-界面层--35)
+> 完成度 **85%**（阶段四十一 `/paste`、四十七 `verification` 字段后）｜ 缺口来源：[评估 §3 L6](../evaluation/2026-08-harness-gap-analysis.md#l6-界面层--35)
 
 ## 1. 职责边界
 
@@ -31,7 +31,7 @@
 | L6-3 | 无编辑器 / IDE 集成通道 | 取舍级 | |
 | L6-4 | 无 TUI / Web UI | 取舍级，**不追求** | |
 | ~~L6-5~~ | ~~配置文件读 CWD~~ | **阶段二十 20.2 已落地** | — |
-| L6-6 | 无图像输入入口 | 全 crate 无 clipboard / paste 代码（只有 `/copy`）；**被 L4-8 阻塞** |
+| ~~L6-6~~ | ~~无图像输入入口~~ | **阶段四十一已落地**：`/paste` 读剪贴板（`commands.rs`），与 `read_image`、MCP 透传并列为三条图像入口。当时被 L4-8 阻塞，L4-8 解除后一并完成 |
 
 ## 4. 目标设计
 
