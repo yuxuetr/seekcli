@@ -21,6 +21,11 @@ pub(crate) enum LoopStatus {
   Completed,
   MaxIterations,
   Interrupted,
+  /// The run hit its total model-call ceiling. Distinct from `MaxIterations`:
+  /// that one means the main loop ran out of turns, this means the run — its
+  /// sub-agents included — ran out of budget, which a turn cap cannot express
+  /// because one turn may spawn any number of sub-agent runs.
+  BudgetExhausted,
 }
 
 /// Whether a run writes its events to the session log as it goes.
@@ -415,6 +420,10 @@ impl App {
       Ok(run) => {
         let (verdict, status) = match run.status {
           LoopStatus::Completed => ("completed", "completed"),
+          LoopStatus::BudgetExhausted => (
+            "stopped because the run's model-call budget was spent",
+            "budget_exhausted",
+          ),
           LoopStatus::Interrupted => (
             "was interrupted by the user before finishing",
             "interrupted",
@@ -760,6 +769,7 @@ impl App {
     // Logged before the request goes out, for the same reason tool intent is:
     // a record written afterwards is a record that a crash can lose.
     self.record_injected_context(&injected);
+    self.run_call_baseline = self.cost.api_calls;
     let run_span = self.tracer.start_run();
     // The join key between the two records. Before this the trace and the
     // event log were separate identity spaces — spans numbered per run, events
@@ -850,6 +860,7 @@ impl App {
     // Headless runs used to produce no trace at all: this path never opened a
     // run span and never flushed. That left tracing broken in exactly the mode
     // where nobody is watching the terminal — `-p`, `--bench`, `--run-task`.
+    self.run_call_baseline = self.cost.api_calls;
     let run_span = self.tracer.start_run();
     let run = self
       .run_agent_loop(
@@ -1359,6 +1370,7 @@ impl App {
     let mut final_content = String::new();
     let mut completed = false;
     let mut interrupted = false;
+    let mut budget_exhausted = false;
     let mut iterations = 0usize;
     // Doom-loop detector — main agent only. Persists across iterations of this
     // chat turn so it can spot repeated tool-call trajectories.
@@ -1443,6 +1455,28 @@ impl App {
           }
           self.tracer.end(pspan);
         }
+      }
+
+      // The one ceiling that bounds a whole run rather than one dimension of
+      // it. Checked at every depth, against a baseline taken when the run
+      // started — so a sub-agent charges the same counter as its parent, and
+      // "inherits the budget" is true by construction rather than by plumbing.
+      let spent = self.cost.api_calls.saturating_sub(self.run_call_baseline);
+      if spent >= self.max_llm_calls {
+        eprintln!(
+          "\n{} run budget spent: {} model call(s). Stopping. Raise \
+           `[limits] max_llm_calls_per_run` if this run was legitimate.",
+          "[Budget]".yellow(),
+          spent
+        );
+        budget_exhausted = true;
+        final_content = format!(
+          "[Stopped: run budget of {} model calls spent]",
+          self.max_llm_calls
+        );
+        completed = true;
+        self.tracer.end(turn_span);
+        break;
       }
 
       let gen_span = self.tracer.begin("generate", "llm action", turn_span);
@@ -1730,6 +1764,8 @@ impl App {
 
     let status = if interrupted {
       LoopStatus::Interrupted
+    } else if budget_exhausted {
+      LoopStatus::BudgetExhausted
     } else if completed {
       LoopStatus::Completed
     } else {
@@ -1984,6 +2020,58 @@ mod tests {
       Ok(n) => assert_eq!(n, 0),
       Err(e) => panic!("no-op flush failed: {e}"),
     }
+  }
+
+  /// Every other ceiling bounds one dimension; none bounds the product. The
+  /// measurement that produced this: both sub-agent templates exclude
+  /// `invoke_agent`, so `MAX_SUBAGENT_DEPTH = 3` guards a path that cannot be
+  /// taken — while tool calls per turn, and therefore sub-agent runs per turn,
+  /// had no ceiling at all.
+  #[test]
+  fn the_run_budget_is_measured_from_the_runs_own_baseline() {
+    let mut app = test_app();
+    app.max_llm_calls = 10;
+    // A session that has already spent calls must not eat into this run's
+    // budget — the ceiling is per run, the counter is per session.
+    app.cost.api_calls = 500;
+    app.run_call_baseline = app.cost.api_calls;
+    let spent = app.cost.api_calls.saturating_sub(app.run_call_baseline);
+    assert_eq!(spent, 0, "a fresh run starts with nothing spent");
+
+    app.cost.api_calls += 10;
+    let spent = app.cost.api_calls.saturating_sub(app.run_call_baseline);
+    assert!(spent >= app.max_llm_calls, "the ceiling must be reachable");
+  }
+
+  /// The property that makes "a sub-agent inherits its parent's budget" true
+  /// without threading a budget object through the call stack: both charge the
+  /// same `cost` counter, so the parent's remaining budget shrinks as the
+  /// child spends.
+  #[test]
+  fn a_sub_agent_spends_the_same_budget_as_its_parent() {
+    let mut app = test_app();
+    app.max_llm_calls = 100;
+    app.run_call_baseline = app.cost.api_calls;
+    // Parent makes 3 calls, then delegates; the child makes 20.
+    app.cost.api_calls += 3;
+    let after_parent = app.cost.api_calls.saturating_sub(app.run_call_baseline);
+    app.cost.api_calls += 20;
+    let after_child = app.cost.api_calls.saturating_sub(app.run_call_baseline);
+    assert_eq!(after_parent, 3);
+    assert_eq!(
+      after_child, 23,
+      "the child's calls must come out of the same budget"
+    );
+  }
+
+  /// `BudgetExhausted` has to be its own status: "the main loop ran out of
+  /// turns" and "the run ran out of budget" are different facts, and one turn
+  /// can spawn any number of sub-agent runs, so a turn cap cannot express the
+  /// second.
+  #[test]
+  fn budget_exhaustion_is_not_reported_as_max_iterations() {
+    assert_ne!(LoopStatus::BudgetExhausted, LoopStatus::MaxIterations);
+    assert_ne!(LoopStatus::BudgetExhausted, LoopStatus::Completed);
   }
 
   /// A recorded run must be reproducible from the recording alone.

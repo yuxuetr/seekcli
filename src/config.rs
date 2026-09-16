@@ -61,6 +61,9 @@ pub struct Config {
   /// are not offered at all.
   #[serde(default)]
   pub research: ResearchConfig,
+  /// Ceiling on what one run may spend.
+  #[serde(default)]
+  pub limits: LimitsConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -338,6 +341,41 @@ pub struct TasksConfig {
   pub dir: Option<String>,
 }
 
+/// What one run may spend before it is stopped.
+///
+/// Every other ceiling in the harness bounds one dimension: `MAX_ITER` bounds
+/// the main loop's turns, a sub-agent template bounds its own iterations. None
+/// of them bounds the product — and one turn may emit any number of tool
+/// calls, each `invoke_agent` among them costing a whole sub-agent run. The
+/// worst case was roughly `MAX_ITER x N x 20` with N unbounded.
+///
+/// Counting total LLM calls closes every dimension at once, including the one
+/// nobody was watching. It also makes "a sub-agent inherits its parent's
+/// budget" true by construction rather than by plumbing: both charge the same
+/// counter.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct LimitsConfig {
+  /// Total model calls one run may make, sub-agents included.
+  ///
+  /// The default is deliberately far above ordinary use — a six-turn research
+  /// run with eight page fetches cost 12 — so it catches runaway loops without
+  /// interrupting real work.
+  #[serde(default = "default_max_llm_calls")]
+  pub max_llm_calls_per_run: u64,
+}
+
+fn default_max_llm_calls() -> u64 {
+  150
+}
+
+impl Default for LimitsConfig {
+  fn default() -> Self {
+    Self {
+      max_llm_calls_per_run: default_max_llm_calls(),
+    }
+  }
+}
+
 /// The backend behind `web_search` / `web_fetch`.
 ///
 /// Absent or `provider = "none"` means the two tools are not registered at
@@ -466,6 +504,7 @@ impl Default for Config {
       tasks: TasksConfig::default(),
       memory: MemoryConfig::default(),
       research: ResearchConfig::default(),
+      limits: LimitsConfig::default(),
     }
   }
 }
@@ -714,7 +753,14 @@ fn write_default_config(path: &Path) -> Result<()> {
      [research]\n\
      provider = \"{research_provider}\"       # tavily | none\n\
      # api_key = \"env:TAVILY_API_KEY\"\n\
-     max_results = {max_results}\n",
+     max_results = {max_results}\n\
+     \n\
+     # Ceiling on one run, sub-agents included. Every other limit bounds a\n\
+     # single dimension (main-loop turns, a sub-agent's iterations); none\n\
+     # bounds the product, and one turn may emit any number of tool calls.\n\
+     # Counting model calls closes all of them at once.\n\
+     [limits]\n\
+     max_llm_calls_per_run = {max_calls}\n",
     project = PROJECT_CONFIG_FILE,
     env = CONFIG_ENV,
     provider = d.brain.provider,
@@ -730,6 +776,7 @@ fn write_default_config(path: &Path) -> Result<()> {
     keep_tail = d.memory.keep_tail_messages,
     research_provider = d.research.provider,
     max_results = d.research.max_results,
+    max_calls = d.limits.max_llm_calls_per_run,
   );
   fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }

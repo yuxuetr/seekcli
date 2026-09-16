@@ -124,6 +124,15 @@ struct App {
   /// Whether `[research]` resolved to a usable backend. When false the two
   /// web tools are not put on the surface at all.
   research_enabled: bool,
+  /// Model calls already spent when the current run began.
+  ///
+  /// The budget is per *run*, while `cost.api_calls` is per session — so the
+  /// ceiling is measured against this baseline. Sub-agents share `cost`, which
+  /// is what makes them charge the same budget without it being threaded
+  /// through their call stack.
+  run_call_baseline: u64,
+  /// Ceiling from `[limits] max_llm_calls_per_run`.
+  max_llm_calls: u64,
   /// Persistent notes across conversations.
   ///
   /// Held rather than opened per turn, and `None` under test on purpose: the
@@ -168,6 +177,7 @@ impl App {
     let mcp = mcp::McpRegistry::connect_all(&config.mcp_servers).await;
     let memory_budget = agent::compressor::Budget::from_config(&config.memory);
     let research_enabled = tools::web::init(&config.research);
+    let config_limits = config.limits.max_llm_calls_per_run;
     let memory = match memory::MemoryStore::new() {
       Ok(m) => Some(m),
       Err(e) => {
@@ -201,6 +211,8 @@ impl App {
       interrupt,
       memory_budget,
       research_enabled,
+      run_call_baseline: 0,
+      max_llm_calls: config_limits,
       memory,
     })
   }
@@ -217,6 +229,7 @@ impl App {
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
     let memory_budget = agent::compressor::Budget::from_config(&config.memory);
+    let max_llm_calls = config.limits.max_llm_calls_per_run;
     Ok(Self {
       brain,
       config,
@@ -235,6 +248,8 @@ impl App {
       interrupt: Arc::new(AtomicBool::new(false)),
       memory_budget,
       research_enabled: false,
+      run_call_baseline: 0,
+      max_llm_calls,
       memory: None,
     })
   }
@@ -481,6 +496,7 @@ async fn run_prompt(app: &mut App, prompt: String, format: OutputFormat) -> Resu
           engine::LoopStatus::Completed => "completed",
           engine::LoopStatus::MaxIterations => "max_iterations",
           engine::LoopStatus::Interrupted => "interrupted",
+          engine::LoopStatus::BudgetExhausted => "budget_exhausted",
         },
         // Deliberately separate from `status`. `status` says why the loop
         // stopped; this says whether anything checked the result. A consumer
@@ -508,7 +524,9 @@ async fn run_prompt(app: &mut App, prompt: String, format: OutputFormat) -> Resu
 
   Ok(match outcome.status {
     engine::LoopStatus::Completed => exit::OK,
-    engine::LoopStatus::MaxIterations => exit::NOT_CONVERGED,
+    // Same class as running out of turns: the run stopped without finishing,
+    // and a caller that retries wants to know that before it does.
+    engine::LoopStatus::MaxIterations | engine::LoopStatus::BudgetExhausted => exit::NOT_CONVERGED,
     engine::LoopStatus::Interrupted => exit::POLICY_REFUSED,
   })
 }
