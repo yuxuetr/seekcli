@@ -53,6 +53,8 @@ pub struct Snapshot {
   /// configured from one that was defaulted — a window set too high for the
   /// model in use is otherwise invisible until a request fails on length.
   pub memory: MemoryEntry,
+  /// What this session searched up versus what it actually read.
+  pub sources: Vec<super::provenance::Source>,
 }
 
 /// The `[memory]` budget as the session section renders it.
@@ -65,7 +67,7 @@ pub struct MemoryEntry {
 }
 
 /// The sections a caller may ask for.
-const SECTIONS: &[&str] = &["tools", "policy", "skills", "mcp", "session"];
+const SECTIONS: &[&str] = &["tools", "policy", "skills", "mcp", "session", "sources"];
 
 /// Render the requested section, or every section when `what` is absent.
 pub fn render(args: &Value, snap: &Snapshot) -> Result<String> {
@@ -96,6 +98,7 @@ fn section(name: &str, snap: &Snapshot) -> String {
     "skills" => skills(snap),
     "mcp" => mcp(snap),
     "session" => session(snap),
+    "sources" => sources(snap),
     // `render` only passes values from SECTIONS.
     other => unreachable!("unlisted section `{other}` reached the renderer"),
   }
@@ -208,6 +211,35 @@ fn session(snap: &Snapshot) -> String {
   )
 }
 
+/// Searched versus read, kept apart.
+///
+/// A conclusion supported only by search snippets rests on a page nobody
+/// opened. Rendering the two groups separately makes that visible without
+/// having to take anyone's word for it.
+fn sources(snap: &Snapshot) -> String {
+  if snap.sources.is_empty() {
+    return "# sources\n(nothing searched or fetched this session)\n".to_string();
+  }
+  let mut out = String::from("# sources\n");
+  let (read, seen): (Vec<_>, Vec<_>) = snap.sources.iter().partition(|s| s.fetched_at.is_some());
+  out.push_str(&format!("read ({}):\n", read.len()));
+  for s in &read {
+    out.push_str(&format!(
+      "  {} (fetched {})\n",
+      s.url,
+      s.fetched_at.as_deref().unwrap_or("?")
+    ));
+  }
+  out.push_str(&format!(
+    "search hits not opened ({}) -- snippets only, not evidence:\n",
+    seen.len()
+  ));
+  for s in &seen {
+    out.push_str(&format!("  {}\n", s.url));
+  }
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -235,6 +267,7 @@ mod tests {
       session_id: "abc123".into(),
       events: 42,
       compactions: 1,
+      sources: Vec::new(),
       memory: MemoryEntry {
         threshold_tokens: 150_000,
         window_tokens: 200_000,
@@ -263,6 +296,34 @@ mod tests {
     assert!(out.contains("compact_at: 150000"), "{out}");
     assert!(out.contains("window 200000"), "{out}");
     assert!(out.contains("keep_tail: 8"), "{out}");
+  }
+
+  /// The distinction the section exists for: a conclusion supported only by
+  /// snippets rests on a page nobody opened, and that must be visible.
+  #[test]
+  fn the_sources_section_separates_what_was_read_from_what_was_merely_found() {
+    let mut s = snap();
+    s.sources = vec![
+      super::super::provenance::Source {
+        url: "https://opened.test".into(),
+        fetched_at: Some("2026-09-16T00:00:00Z".into()),
+      },
+      super::super::provenance::Source {
+        url: "https://only-a-snippet.test".into(),
+        fetched_at: None,
+      },
+    ];
+    let out = section("sources", &s);
+    assert!(out.contains("read (1)"), "{out}");
+    assert!(out.contains("https://opened.test"), "{out}");
+    assert!(out.contains("search hits not opened (1)"), "{out}");
+    assert!(out.contains("not evidence"), "{out}");
+  }
+
+  #[test]
+  fn an_empty_sources_section_says_so_rather_than_rendering_nothing() {
+    let out = section("sources", &snap());
+    assert!(out.contains("nothing searched or fetched"), "{out}");
   }
 
   #[test]

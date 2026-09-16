@@ -170,6 +170,9 @@ SubAgent 必须类型化；Skill 必须策展；长会话必须有压缩。
   工具面广度、生成式文档 + CI 新鲜度门禁。
 - **不借鉴**：插件框架（Cordis）、profile/bundle 组合、Web UI、多语言 SDK、i18n。
   这些的复杂度收益比在单人 Rust CLI 上不成立。
+  扩展分两条既有通道而非一个框架：**进程外扩展走 MCP，带脚本的方法论扩展走 Skill**，
+  而需要 harness 理解其结果的能力（如出网取内容）**做成内置 Tool**
+  （阶段四十三收窄，判据见 [design-principles §1.2](design-principles.md#12-改造为-tool-是本条的后半句不是可选项阶段四十三收窄)）。
 
 ### 5.1 不借鉴 Cordis 的精确理由
 

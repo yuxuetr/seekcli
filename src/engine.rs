@@ -150,6 +150,7 @@ impl App {
   fn inspect_snapshot(&self, effective: &[api::Tool]) -> tools::inspect::Snapshot {
     let builtin: std::collections::HashSet<String> = tools::registry::system_tools()
       .into_iter()
+      .chain(tools::registry::research_tools())
       .map(|t| t.function.name)
       .collect();
 
@@ -225,6 +226,7 @@ impl App {
       session_id: self.current_session.id().to_string(),
       events: self.current_session.events.len(),
       compactions,
+      sources: tools::provenance::snapshot(),
       memory: tools::inspect::MemoryEntry {
         threshold_tokens: self.memory_budget.threshold_tokens,
         window_tokens: self.memory_budget.window_tokens,
@@ -615,7 +617,7 @@ impl App {
     // One source of truth is what keeps "model-visible means logged" true
     // instead of aspirational.
     let mut messages = self.current_session.messages();
-    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
+    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode, self.research_enabled);
     let run_span = self.tracer.start_run();
     let run = self
       .run_agent_loop(
@@ -677,7 +679,7 @@ impl App {
       });
     }
     messages.push(Message::new_user_text(prompt.to_string()));
-    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode);
+    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode, self.research_enabled);
     let tools = skill.and_then(|s| s.to_api_tools());
     // Headless runs used to produce no trace at all: this path never opened a
     // run span and never flushed. That left tracing broken in exactly the mode
@@ -893,7 +895,7 @@ impl App {
     Ok(())
   }
 
-  fn ensure_agent_system_prompt(messages: &mut Vec<Message>, plan_mode: bool) {
+  fn ensure_agent_system_prompt(messages: &mut Vec<Message>, plan_mode: bool, research: bool) {
     // Plan Mode guidance is added/removed as the flag toggles. Marker-prefixed
     // so we can find and drop it without touching other system messages.
     let plan_msg = agent::prompt::plan_mode_rules();
@@ -952,6 +954,36 @@ impl App {
         };
         messages.insert(
           insert_at,
+          Message::Simple {
+            images: Vec::new(),
+            role: "system".to_string(),
+            content: rules,
+            reasoning_content: None,
+            tool_calls: None,
+          },
+        );
+      }
+    }
+
+    // The citation contract, on the same terms as workspace rules: a separate
+    // message after the kernel, so the cache prefix is untouched and it is
+    // absent entirely when the web tools are not on the surface.
+    if research {
+      let rules = agent::prompt::research_rules();
+      let present = messages.iter().any(|m| {
+        matches!(
+          m,
+          Message::Simple { role, content: t, .. }
+            if role == "system" && t == &rules
+        )
+      });
+      if !present {
+        let head_end = messages
+          .iter()
+          .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
+          .count();
+        messages.insert(
+          head_end,
           Message::Simple {
             images: Vec::new(),
             role: "system".to_string(),
@@ -1029,6 +1061,9 @@ impl App {
       // the tool-narrowing that makes sub-agents cheap and safe.
       let mut merged = tools::registry::merge_with_skill(tools);
       merged.extend(self.mcp.schemas());
+      if self.research_enabled {
+        merged.extend(tools::registry::research_tools());
+      }
       // The active skill's `allowed_tools` narrows what the model can see.
       // Applied here, after MCP, so a skill narrows the *effective* surface
       // rather than only the built-ins — and applied as a filter, so it can
@@ -1561,6 +1596,64 @@ mod tests {
       }
       _ => panic!("expected Simple user bridge message"),
     }
+  }
+
+  /// The contract is absent when the tools are — describing a capability that
+  /// is not on the surface costs a turn every time the model tries it.
+  #[test]
+  fn the_citation_contract_appears_only_with_the_web_tools() {
+    let mut without = vec![Message::new_user_text("hi".to_string())];
+    App::ensure_agent_system_prompt(&mut without, false, false);
+    assert!(
+      !without.iter().any(|m| matches!(
+        m,
+        Message::Simple { content, .. } if content.contains("Research and citation")
+      )),
+      "must not describe tools that are not offered"
+    );
+
+    let mut with = vec![Message::new_user_text("hi".to_string())];
+    App::ensure_agent_system_prompt(&mut with, false, true);
+    assert!(
+      with.iter().any(|m| matches!(
+        m,
+        Message::Simple { content, .. } if content.contains("Research and citation")
+      )),
+      "{with:?}"
+    );
+  }
+
+  /// The kernel at index 0 must stay byte-identical whatever else is injected,
+  /// or every turn pays a full prompt-cache miss.
+  #[test]
+  fn injecting_the_contract_does_not_disturb_the_cache_prefix() {
+    let kernel = agent::prompt::agent_system_prompt();
+    let mut messages = vec![Message::new_user_text("hi".to_string())];
+    App::ensure_agent_system_prompt(&mut messages, false, true);
+    match messages.first() {
+      Some(Message::Simple { role, content, .. }) => {
+        assert_eq!(role, "system");
+        assert_eq!(content, &kernel, "the cache prefix moved");
+      }
+      other => panic!("expected the kernel at index 0, got {other:?}"),
+    }
+  }
+
+  /// Injection must be idempotent: `ensure_` runs every turn, and a contract
+  /// appended once per turn would grow the prompt without bound.
+  #[test]
+  fn the_contract_is_injected_once_not_once_per_turn() {
+    let mut messages = vec![Message::new_user_text("hi".to_string())];
+    for _ in 0..3 {
+      App::ensure_agent_system_prompt(&mut messages, false, true);
+    }
+    let count = messages
+      .iter()
+      .filter(|m| {
+        matches!(m, Message::Simple { content, .. } if content.contains("Research and citation"))
+      })
+      .count();
+    assert_eq!(count, 1, "{messages:?}");
   }
 
   #[test]

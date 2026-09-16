@@ -120,6 +120,9 @@ struct App {
   /// turn — `Budget::from_config` warns about a bad ratio, and that warning
   /// belongs in the startup output, not in the middle of every turn.
   memory_budget: agent::compressor::Budget,
+  /// Whether `[research]` resolved to a usable backend. When false the two
+  /// web tools are not put on the surface at all.
+  research_enabled: bool,
 }
 
 impl App {
@@ -155,6 +158,7 @@ impl App {
     // would change the tool set under prompt caching.
     let mcp = mcp::McpRegistry::connect_all(&config.mcp_servers).await;
     let memory_budget = agent::compressor::Budget::from_config(&config.memory);
+    let research_enabled = tools::web::init(&config.research);
 
     let interrupt = Arc::new(AtomicBool::new(false));
     spawn_interrupt_watcher(interrupt.clone());
@@ -178,6 +182,7 @@ impl App {
       mcp,
       interrupt,
       memory_budget,
+      research_enabled,
     })
   }
 
@@ -210,6 +215,7 @@ impl App {
       mcp: mcp::McpRegistry::empty(),
       interrupt: Arc::new(AtomicBool::new(false)),
       memory_budget,
+      research_enabled: false,
     })
   }
 

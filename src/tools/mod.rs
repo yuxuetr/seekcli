@@ -17,10 +17,12 @@ pub mod meta;
 pub mod offload;
 pub mod path_security;
 pub mod policy;
+pub mod provenance;
 pub mod registry;
 pub mod result;
 pub mod search;
 pub mod shell;
+pub mod web;
 
 /// Default ceiling for a single tool call.
 ///
@@ -148,6 +150,8 @@ impl ToolDispatcher {
       "create_skill" => meta::create_skill(args).await,
       "propose" => meta::propose(args).await,
       "ask_user_question" => ask::ask_user_question(args).await,
+      "web_search" => web::web_search(args).await,
+      "web_fetch" => web::web_fetch(args).await,
       _ => anyhow::bail!("{}", registry::unknown_tool_message(name)),
     }
   }

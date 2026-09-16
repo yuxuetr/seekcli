@@ -25,6 +25,28 @@
 依据见 [2026-09-13 基底变更 §3](../evaluation/2026-09-13-substrate-shift.md#3-一处需要先澄清的原则冲突)。
 - **L8 不新增 Rust 工具**：`--run-task` 只是换一套 prompt 驱动同一个 `run_headless` / ReAct 循环。
 
+### 1.2 「改造为 Tool」是本条的后半句，不是可选项（阶段四十三收窄）
+
+阶段七据本条剥离了 MinerU / VLM / Tavily / GLM Search，**但只做了「剥离」，
+没做「改造为 Tool」**。代价见[五评 §1.5](../evaluation/2026-09-15-usage-reality-check.md)：
+真实使用停止在剥离的同一天，因为从那天起 SeekCLI 没有任何东西能触达网络。
+
+所以本条的完整读法是：**拆掉客户端预注入，并把同一能力以 Tool 的形式还回来。**
+只拆不还不是执行本条，是执行了一半。
+
+判断某项能力该做成 **Tool** 还是 **Skill + 脚本**，判据不是「本地 vs 远程」，
+而是：
+
+> **harness 需不需要理解这个结果？**
+
+| | 形态 | 为什么 |
+| --- | --- | --- |
+| `web_search` / `web_fetch` | **内置 Tool** | 不可信输入边界要求 harness **知道**结果来自网络。`run_shell` 返回的网页与 `ls` 的输出类型完全一致，无从判断 |
+| `doc_parser`（MinerU） | **Skill + 脚本** | 带状态机、文件大小限制、轮询的文档流水线；harness 只需要拿到一个 Markdown 路径 |
+
+把安全边界交给提示词自觉，与 L3 整层的立场相反——
+问题从来不是边界画得太小，而是**画出的边界与执行的边界不一致**。
+
 ## 2. 明确排除的复杂度
 
 | 排除项 | 理由 |
@@ -33,7 +55,7 @@
 | 在线自演化 Skill | 模型只能起草 proposal，落地必须人工审核 |
 | 运行时多模型路由 / 负载均衡 | provider 由配置**静态**选择。支持多 wire 协议 ≠ 做调度器 |
 | plan-execute / multi-agent 框架 | 纯 ReAct + 类型化 SubAgent 已足够 |
-| 插件框架 / profile / bundle 组合 | 单人 Rust CLI 上复杂度收益比不成立；扩展需求由 MCP 承担 |
+| 插件框架 / profile / bundle 组合 | 单人 Rust CLI 上复杂度收益比不成立；**进程外扩展**由 MCP 承担，**带脚本的方法论扩展**由 Skill 承担（阶段四十三收窄，见下） |
 | DAG / workflow 编排 | 是另一个产品 |
 | TUI / Web UI | 与「本地 CLI Agent」定位冲突 |
 | 完整 shell AST 解析 | 见 [security-model.md](security-model.md) §2 |

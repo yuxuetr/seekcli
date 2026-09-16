@@ -57,6 +57,10 @@ pub struct Config {
   /// reproduce the fixed 150K threshold this section replaced.
   #[serde(default)]
   pub memory: MemoryConfig,
+  /// Where `web_search` / `web_fetch` get their data. Absent means the tools
+  /// are not offered at all.
+  #[serde(default)]
+  pub research: ResearchConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -334,6 +338,67 @@ pub struct TasksConfig {
   pub dir: Option<String>,
 }
 
+/// The backend behind `web_search` / `web_fetch`.
+///
+/// Absent or `provider = "none"` means the two tools are not registered at
+/// all, rather than registered and failing on every call. A tool the model can
+/// see but never use costs a slot in the schema and a wasted turn each time it
+/// is tried.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ResearchConfig {
+  /// `"tavily"` or `"none"`.
+  #[serde(default = "default_research_provider")]
+  pub provider: String,
+  /// `env:VAR` or `file:PATH`, never a literal key — same rule as `api_key`,
+  /// for the same reason: config files get committed by accident.
+  #[serde(default)]
+  pub api_key: String,
+  #[serde(default = "default_max_results")]
+  pub max_results: usize,
+}
+
+fn default_research_provider() -> String {
+  "none".to_string()
+}
+
+fn default_max_results() -> usize {
+  5
+}
+
+impl Default for ResearchConfig {
+  fn default() -> Self {
+    Self {
+      provider: default_research_provider(),
+      api_key: String::new(),
+      max_results: default_max_results(),
+    }
+  }
+}
+
+impl ResearchConfig {
+  /// Whether the research tools should be offered this run.
+  pub fn is_enabled(&self) -> bool {
+    self.provider != "none" && !self.provider.is_empty()
+  }
+
+  /// Read the key from wherever `api_key` points.
+  pub fn resolve_key(&self) -> Result<String> {
+    if let Some(var) = self.api_key.strip_prefix("env:") {
+      return std::env::var(var).with_context(|| format!("research.api_key: ${} is not set", var));
+    }
+    if let Some(path) = self.api_key.strip_prefix("file:") {
+      let expanded = shellexpand_home(path);
+      let raw = fs::read_to_string(&expanded)
+        .with_context(|| format!("research.api_key: cannot read {}", expanded.display()))?;
+      return Ok(raw.trim().to_string());
+    }
+    anyhow::bail!(
+      "research.api_key must be `env:VAR` or `file:PATH`, not a literal key \
+       (a key in a config file gets committed by accident)"
+    )
+  }
+}
+
 /// When to compact, expressed relative to the model's context window.
 ///
 /// This replaced a bare `const COMPRESSION_THRESHOLD_TOKENS = 150_000`. The
@@ -400,6 +465,7 @@ impl Default for Config {
       security: SecurityConfig::default(),
       tasks: TasksConfig::default(),
       memory: MemoryConfig::default(),
+      research: ResearchConfig::default(),
     }
   }
 }
@@ -638,7 +704,17 @@ fn write_default_config(path: &Path) -> Result<()> {
      [memory]\n\
      context_window_tokens = {window}\n\
      compact_at_ratio = {ratio}\n\
-     keep_tail_messages = {keep_tail}\n",
+     keep_tail_messages = {keep_tail}\n\
+     \n\
+     # web_search / web_fetch. Left as \"none\" the two tools are not offered\n\
+     # at all -- a tool the model can see but never use costs a schema slot\n\
+     # and a wasted turn every time it is tried.\n\
+     #\n\
+     # api_key must be `env:VAR` or `file:PATH`, same rule as above.\n\
+     [research]\n\
+     provider = \"{research_provider}\"       # tavily | none\n\
+     # api_key = \"env:TAVILY_API_KEY\"\n\
+     max_results = {max_results}\n",
     project = PROJECT_CONFIG_FILE,
     env = CONFIG_ENV,
     provider = d.brain.provider,
@@ -652,6 +728,8 @@ fn write_default_config(path: &Path) -> Result<()> {
     window = d.memory.context_window_tokens,
     ratio = d.memory.compact_at_ratio,
     keep_tail = d.memory.keep_tail_messages,
+    research_provider = d.research.provider,
+    max_results = d.research.max_results,
   );
   fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }

@@ -188,6 +188,9 @@ impl App {
         crate::tools::offload::set_blob_dir(self.history.blobs_dir(self.current_session.id()));
         self.current_skill = None;
         self.cost = observability::cost::CostTracker::new();
+        // Sources belong to the conversation that gathered them. Carrying them
+        // into a new one would let a later answer claim evidence it never saw.
+        crate::tools::provenance::reset();
         println!("{}", "Conversation reset.".yellow());
       }
       "/skill" => match parts.get(1).copied() {
@@ -485,6 +488,9 @@ impl App {
             // Restore the loaded session's cost so the bill continues from
             // where it left off rather than mixing with the prior session.
             self.cost = session.meta.cost.clone();
+            // Same rule as /clear: this is a different conversation, and the
+            // previous one's sources are not evidence for it.
+            crate::tools::provenance::reset();
             println!(
               "{} Resumed: {} ({} events)",
               "✦".cyan(),

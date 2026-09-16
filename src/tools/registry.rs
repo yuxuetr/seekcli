@@ -422,6 +422,10 @@ pub fn is_parallel_readonly(tool_name: &str) -> bool {
       | "job_list"
       | "job_output"
       | "harness_inspect"
+      // Network reads. They change nothing locally and are slow, so fanning
+      // several out at once is exactly where concurrency pays.
+      | "web_search"
+      | "web_fetch"
   )
 }
 
@@ -433,6 +437,61 @@ pub fn filter_by_allowed(tools: &[Tool], allowed: &[&str]) -> Vec<Tool> {
     .filter(|t| allowed.contains(&t.function.name.as_str()))
     .cloned()
     .collect()
+}
+
+/// The out-of-network tools, offered only when `[research]` is configured.
+///
+/// Kept out of `system_tools()` on purpose: a tool the model can see but never
+/// use costs a schema slot and a wasted turn every time it reasonably tries
+/// one. Registration is the honest signal that the capability exists.
+pub fn research_tools() -> Vec<Tool> {
+  vec![
+    make_tool(
+      "web_search",
+      "Find candidate sources on the web. Returns titles, URLs, publication \
+       dates and engine-written snippets — NOT the pages themselves. A snippet \
+       is a lead, not evidence: before resting any conclusion on a result, \
+       open it with web_fetch and cite what the page actually says. Prefer \
+       specific queries; for anything time-sensitive, say the date range you \
+       need in the query.",
+      json!({
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "What to search for" },
+          "max_results": {
+            "type": "integer",
+            "description": "How many results to return (1-20); defaults to the configured value"
+          },
+          "recency_days": {
+            "type": "integer",
+            "description": "Only results published within this many days (1-365). \
+                            Sets the publication date on every hit, which is otherwise \
+                            usually unknown. Use it for anything time-sensitive — \
+                            prices, news, releases — and say so in the answer."
+          }
+        },
+        "required": ["query"]
+      }),
+    ),
+    make_tool(
+      "web_fetch",
+      "Read the actual text of one web page, so a conclusion can rest on it \
+       rather than on a search snippet. Returns the extracted content together \
+       with the URL and the time it was fetched — cite both. If the page \
+       cannot be read this FAILS rather than returning nothing: say the source \
+       could not be opened, and do not substitute a snippet for it.",
+      json!({
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Absolute http:// or https:// URL"
+          }
+        },
+        "required": ["url"]
+      }),
+    ),
+  ]
 }
 
 /// Apply a Skill's `allowed_tools` whitelist to the effective tool surface.
