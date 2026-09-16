@@ -35,6 +35,10 @@ pub enum PromptKind {
   Skill,
   /// A compaction summary spliced in by the projection.
   Summary,
+  /// The persistent-memory note (stage 45).
+  Memory,
+  /// The research / citation contract (stage 43).
+  Research,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +81,45 @@ pub enum EventPayload {
   },
   SkillActivated {
     name: String,
+  },
+  /// A system message the harness composed and injected into the request,
+  /// rather than one the conversation produced.
+  ///
+  /// Bookkeeping: it deliberately produces **no message** in the projection.
+  /// The alternative — recording it as a `SystemPrompt` so it re-projects —
+  /// looks tidier and is wrong: the memory note changes as the user's notes
+  /// change, an append-only log cannot retract the old one, and the prompt
+  /// would accumulate stale snapshots of itself.
+  ///
+  /// What it buys is the thing `design-principles.md` §3 asks for — "model
+  /// visible means logged". The content lives in a blob, so a past request is
+  /// reconstructible even though the live state that produced it has moved on.
+  /// `digest` lets a reader see at a glance whether a turn's context differed
+  /// from the previous one's without fetching anything.
+  /// One delegation to a sub-agent, attributed to the tool call that made it.
+  ///
+  /// Bookkeeping: the child's own turns are not the parent's conversation, and
+  /// only its summary crosses back (as the tool result, which is logged
+  /// normally). What was missing was everything *around* that summary — which
+  /// template ran, how it ended, how long it took, how many iterations it
+  /// spent. A delegation that quietly hit its iteration cap used to be
+  /// indistinguishable, in the log, from one that finished.
+  ChildRun {
+    /// The parent's `tool_call` id, so the two join without guessing.
+    call_id: String,
+    template: String,
+    /// `completed` / `interrupted` / `max_iterations` / `failed`.
+    status: String,
+    iterations: usize,
+    duration_ms: u64,
+  },
+  ContextInjected {
+    kind: PromptKind,
+    digest: String,
+    /// Path to the content. `None` when the blob could not be written — the
+    /// record of *what changed when* is still worth keeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blob: Option<String>,
   },
   Usage(UsageInfo),
   Interrupted,
@@ -414,6 +457,8 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
       EventPayload::SkillActivated { .. }
       | EventPayload::Usage(_)
       | EventPayload::Interrupted
+      | EventPayload::ContextInjected { .. }
+      | EventPayload::ChildRun { .. }
       | EventPayload::Compaction { .. } => {}
     }
     index += 1;
@@ -729,6 +774,31 @@ mod tests {
       })
       .collect();
     assert_eq!(roles, ["system", "user", "assistant", "tool", "assistant"]);
+  }
+
+  /// Every bookkeeping variant must stay out of the projection. This is the
+  /// property that lets the log record how a request was assembled without the
+  /// record itself becoming part of the next request.
+  #[test]
+  fn the_stage_47_bookkeeping_events_produce_no_messages() {
+    let mut s = session();
+    let before = s.messages().len();
+    s.record(EventPayload::ContextInjected {
+      kind: PromptKind::Memory,
+      digest: "fnv1a:0".into(),
+      blob: None,
+    });
+    s.record(EventPayload::ChildRun {
+      call_id: "c1".into(),
+      template: "explore".into(),
+      status: "completed".into(),
+      iterations: 2,
+      duration_ms: 10,
+    });
+    assert_eq!(s.messages().len(), before, "neither may become a message");
+    // And the two projection walks must still agree.
+    let (msgs, seqs) = derive_messages_indexed(&s.events);
+    assert_eq!(msgs.len(), seqs.len());
   }
 
   #[test]

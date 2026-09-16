@@ -132,6 +132,29 @@ pub fn persist_image(image: &crate::api::ImagePart) -> anyhow::Result<crate::ses
   })
 }
 
+/// Store a piece of text under a content-derived name, returning its path.
+///
+/// Used for the system prompts the harness composes: the session log records
+/// that a request carried them, and the content lives here rather than in the
+/// log, so a turn stays readable and an unchanged context costs nothing to
+/// re-record.
+///
+/// Content-addressed by the caller's digest, so identical content is written
+/// once however many sessions inject it.
+pub fn persist_text(digest: &str, content: &str) -> anyhow::Result<PathBuf> {
+  let dir = blob_dir()?;
+  std::fs::create_dir_all(&dir)?;
+  let safe: String = digest
+    .chars()
+    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    .collect();
+  let path = dir.join(format!("ctx-{safe}.txt"));
+  if !path.exists() {
+    std::fs::write(&path, content)?;
+  }
+  Ok(path)
+}
+
 /// Delete blobs untouched for longer than `max_age`.
 ///
 /// Content-addressed names mean identical output is written once, so the only

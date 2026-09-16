@@ -42,7 +42,13 @@ fn log_path() -> Option<PathBuf> {
 
 /// Cheap content digest. Not cryptographic — it exists so two identical calls
 /// are recognisably identical, not to resist an attacker.
-fn digest(text: &str) -> String {
+/// FNV-1a, rendered `fnv1a:<hex>`.
+///
+/// Not a security primitive and not used as one: it identifies *which* content
+/// a record refers to, so a reader can tell two turns apart without the record
+/// carrying the content. `pub(crate)` since stage 47, where the session log
+/// needs the same identity for injected system prompts.
+pub(crate) fn digest(text: &str) -> String {
   let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
   for byte in text.as_bytes() {
     hash ^= u64::from(*byte);

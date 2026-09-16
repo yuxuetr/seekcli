@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use std::sync::atomic::Ordering;
 
 use crate::api::{self, Message, StreamItem};
-use crate::session::EventPayload;
+use crate::session::{EventPayload, PromptKind};
 use crate::{App, Skill, ThinkingMode, agent, subagents, tools, ui};
 
 /// How a loop run ended. Distinguished because a caller needs to act on the
@@ -229,6 +229,27 @@ impl App {
       events: self.current_session.events.len(),
       compactions,
       sources: tools::provenance::snapshot(),
+      child_runs: self
+        .current_session
+        .events
+        .iter()
+        .filter_map(|e| match &e.payload {
+          EventPayload::ChildRun {
+            call_id,
+            template,
+            status,
+            iterations,
+            duration_ms,
+          } => Some(tools::inspect::ChildRunEntry {
+            call_id: call_id.clone(),
+            template: template.clone(),
+            status: status.clone(),
+            iterations: *iterations,
+            duration_ms: *duration_ms,
+          }),
+          _ => None,
+        })
+        .collect(),
       memory_scopes: memory_store.map(|m| m.scopes()).unwrap_or_default(),
       memory_dir: memory_store
         .map(|m| m.dir().display().to_string())
@@ -247,19 +268,29 @@ impl App {
   /// Handled in the engine rather than the dispatcher because it re-enters the
   /// loop — the dispatcher deliberately knows nothing about the loop, and
   /// giving it a recursive escape hatch would undo that.
+  /// Returns the summary the parent sees, plus the record of the delegation.
+  ///
+  /// The event is returned rather than recorded here so it joins the same
+  /// journal buffer as everything else in the turn and lands in the right
+  /// order. `None` when the delegation never started — a bad `subagent_type`
+  /// or a depth refusal is a rejected tool call, not a child run.
   async fn delegate_to_subagent(
     &mut self,
+    call_id: &str,
     arguments: &str,
     available: &[api::Tool],
     depth: usize,
     parent_span: Option<usize>,
-  ) -> String {
+  ) -> (String, Option<EventPayload>) {
     let (subagent_type, prompt) = Self::parse_invoke_agent_args(arguments);
     let next_depth = depth + 1;
     if next_depth > agent::MAX_SUBAGENT_DEPTH {
-      return format!(
-        "Cannot spawn sub-agent: max depth {} reached.",
-        agent::MAX_SUBAGENT_DEPTH
+      return (
+        format!(
+          "Cannot spawn sub-agent: max depth {} reached.",
+          agent::MAX_SUBAGENT_DEPTH
+        ),
+        None,
       );
     }
     let Some(template) = subagents::registry::lookup(&subagent_type) else {
@@ -267,10 +298,13 @@ impl App {
         .iter()
         .map(|(name, desc)| format!("  - {}: {}", name, desc))
         .collect();
-      return format!(
-        "Unknown subagent_type '{}'. Available types:\n{}",
-        subagent_type,
-        listing.join("\n")
+      return (
+        format!(
+          "Unknown subagent_type '{}'. Available types:\n{}",
+          subagent_type,
+          listing.join("\n")
+        ),
+        None,
       );
     };
 
@@ -293,6 +327,7 @@ impl App {
       next_depth,
       template.max_iter
     );
+    let started = std::time::Instant::now();
     match Box::pin(self.run_agent_loop(
       sub_messages,
       Some(sub_tools),
@@ -310,17 +345,38 @@ impl App {
       // confusion between "the model stopped" and "the task passed" that
       // `LoopStatus` exists to keep apart.
       Ok(run) => {
-        let verdict = match run.status {
-          LoopStatus::Completed => "completed",
-          LoopStatus::Interrupted => "was interrupted by the user before finishing",
-          LoopStatus::MaxIterations => "hit its iteration cap before finishing",
+        let (verdict, status) = match run.status {
+          LoopStatus::Completed => ("completed", "completed"),
+          LoopStatus::Interrupted => (
+            "was interrupted by the user before finishing",
+            "interrupted",
+          ),
+          LoopStatus::MaxIterations => ("hit its iteration cap before finishing", "max_iterations"),
         };
-        format!(
-          "Sub-agent '{}' {}. Summary:\n{}",
-          template.name, verdict, run.text
+        (
+          format!(
+            "Sub-agent '{}' {}. Summary:\n{}",
+            template.name, verdict, run.text
+          ),
+          Some(EventPayload::ChildRun {
+            call_id: call_id.to_string(),
+            template: template.name.to_string(),
+            status: status.to_string(),
+            iterations: run.iterations,
+            duration_ms: started.elapsed().as_millis() as u64,
+          }),
         )
       }
-      Err(e) => format!("Sub-agent '{}' failed: {}", template.name, e),
+      Err(e) => (
+        format!("Sub-agent '{}' failed: {}", template.name, e),
+        Some(EventPayload::ChildRun {
+          call_id: call_id.to_string(),
+          template: template.name.to_string(),
+          status: "failed".to_string(),
+          iterations: 0,
+          duration_ms: started.elapsed().as_millis() as u64,
+        }),
+      ),
     }
   }
 
@@ -627,13 +683,28 @@ impl App {
       .memory
       .as_ref()
       .and_then(|m| agent::prompt::memory_rules(&m.preferences(), &m.scopes()));
-    Self::ensure_agent_system_prompt(
+    let injected = Self::ensure_agent_system_prompt(
       &mut messages,
       self.plan_mode,
       self.research_enabled,
       memory_note,
     );
+    // Logged before the request goes out, for the same reason tool intent is:
+    // a record written afterwards is a record that a crash can lose.
+    self.record_injected_context(&injected);
     let run_span = self.tracer.start_run();
+    // The join key between the two records. Before this the trace and the
+    // event log were separate identity spaces — spans numbered per run, events
+    // numbered per session — so "which turn produced this span" could only be
+    // guessed at from timestamps. `first_seq` is where this run starts in the
+    // log; a span's `seq` says which event it belongs to.
+    self.tracer.annotate(
+      run_span,
+      serde_json::json!({
+        "session": self.current_session.id(),
+        "first_seq": self.current_session.events.len(),
+      }),
+    );
     let run = self
       .run_agent_loop(
         messages,
@@ -698,7 +769,10 @@ impl App {
       .memory
       .as_ref()
       .and_then(|m| agent::prompt::memory_rules(&m.preferences(), &m.scopes()));
-    Self::ensure_agent_system_prompt(
+    // Headless keeps no session, so there is nothing to record into — the
+    // composed prompt is returned and dropped. `--bench` and `--run-task`
+    // deliberately leave no conversation behind.
+    let _injected = Self::ensure_agent_system_prompt(
       &mut messages,
       self.plan_mode,
       self.research_enabled,
@@ -919,12 +993,21 @@ impl App {
     Ok(())
   }
 
+  /// Compose the system messages a request needs, and report the dynamic ones
+  /// back so the caller can log them.
+  ///
+  /// The kernel is not reported: it is a compile-time constant, so "what did
+  /// the model see" is answerable for it without a record. Everything else
+  /// depends on state outside the log — the workspace's `AGENTS.md`, the user's
+  /// memory directory, the config — and `design-principles.md` §3 says model
+  /// visible means logged.
   fn ensure_agent_system_prompt(
     messages: &mut Vec<Message>,
     plan_mode: bool,
     research: bool,
     memory: Option<String>,
-  ) {
+  ) -> Vec<(PromptKind, String)> {
+    let mut injected: Vec<(PromptKind, String)> = Vec::new();
     // Plan Mode guidance is added/removed as the flag toggles. Marker-prefixed
     // so we can find and drop it without touching other system messages.
     let plan_msg = agent::prompt::plan_mode_rules();
@@ -965,6 +1048,7 @@ impl App {
     if let Ok(cwd) = std::env::current_dir()
       && let Some(rules) = agent::prompt::workspace_rules(&cwd)
     {
+      injected.push((PromptKind::Workspace, rules.clone()));
       let rules_present = messages.iter().any(|m| {
         matches!(
           m,
@@ -999,6 +1083,7 @@ impl App {
     // absent entirely when the web tools are not on the surface.
     if research {
       let rules = agent::prompt::research_rules();
+      injected.push((PromptKind::Research, rules.clone()));
       let present = messages.iter().any(|m| {
         matches!(
           m,
@@ -1027,6 +1112,7 @@ impl App {
     // Persistent memory, on the same terms: a separate message after the
     // kernel, absent entirely when nothing has been recorded.
     if let Some(mem) = memory {
+      injected.push((PromptKind::Memory, mem.clone()));
       let present = messages.iter().any(|m| {
         matches!(
           m,
@@ -1059,6 +1145,7 @@ impl App {
         .iter()
         .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
         .count();
+      injected.push((PromptKind::Skill, plan_msg.clone()));
       messages.insert(
         head_end,
         Message::Simple {
@@ -1069,6 +1156,51 @@ impl App {
           tool_calls: None,
         },
       );
+    }
+    injected
+  }
+
+  /// Log what the harness injected into this request, once per distinct
+  /// content.
+  ///
+  /// Deduplicated by digest against the last record for the same kind: the
+  /// memory note and the workspace rules are usually identical turn after
+  /// turn, and one event each per turn would bury the conversation in
+  /// bookkeeping while telling a reader nothing new. A digest that *has*
+  /// changed is exactly the interesting case, and it gets a fresh blob.
+  fn record_injected_context(&mut self, injected: &[(PromptKind, String)]) {
+    for (kind, content) in injected {
+      let digest = crate::tools::audit::digest(content);
+      let unchanged = self
+        .current_session
+        .events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+          EventPayload::ContextInjected {
+            kind: k, digest: d, ..
+          } if k == kind => Some(d.clone()),
+          _ => None,
+        })
+        .is_some_and(|last| last == digest);
+      if unchanged {
+        continue;
+      }
+      let blob = crate::tools::offload::persist_text(&digest, content).ok();
+      if blob.is_none() {
+        // Visible, not silent: without the blob the record says *that* the
+        // context changed but not to what, and a reader should know which.
+        eprintln!(
+          "{} could not store the injected {:?} context; logging its digest only",
+          "[Session]".yellow(),
+          kind
+        );
+      }
+      self.current_session.record(EventPayload::ContextInjected {
+        kind: *kind,
+        digest,
+        blob: blob.map(|p| p.display().to_string()),
+      });
     }
   }
 
@@ -1185,6 +1317,14 @@ impl App {
         &format!("iter {} (depth {})", iter, depth),
         parent_span,
       );
+      // Where this turn sits in the session log. Only meaningful for the run
+      // that journals — a sub-agent's events never reach the session.
+      if journaling == Journaling::Session {
+        self.tracer.annotate(
+          turn_span,
+          serde_json::json!({ "seq": self.current_session.events.len() + events.len() }),
+        );
+      }
 
       // Compression only at top-level main agent; sub-agents have short focused
       // contexts and their own max_iter cap.
@@ -1402,9 +1542,22 @@ impl App {
           let mut dispatched_failure = false;
           let mut dispatched_images = Vec::new();
           let result_str = if tc.function.name == "invoke_agent" {
-            self
-              .delegate_to_subagent(&tc.function.arguments, &effective_tools, depth, exec_span)
-              .await
+            let (summary, record) = self
+              .delegate_to_subagent(
+                &tc.id,
+                &tc.function.arguments,
+                &effective_tools,
+                depth,
+                exec_span,
+              )
+              .await;
+            // Into the same buffer as the rest of the turn, so it lands between
+            // the assistant message that asked for the delegation and the tool
+            // result that reports it.
+            if let Some(event) = record {
+              events.push(event);
+            }
+            summary
           } else if tc.function.name == "load_skill" {
             self.activate_skill_by_name(
               &tc.function.arguments,
@@ -1774,14 +1927,96 @@ mod tests {
   /// memory directory had anything in it. On a clean machine they would have
   /// stayed green, so the invariant needs its own assertion rather than relying
   /// on the fixtures to notice.
-  #[test]
-  fn a_test_app_reads_no_real_memory() {
-    let app = match App::for_test(Box::new(crate::api::record::Replaying::new(
+  fn test_app() -> App {
+    match App::for_test(Box::new(crate::api::record::Replaying::new(
       std::path::PathBuf::from("tests/fixtures/nonexistent"),
     ))) {
       Ok(a) => a,
       Err(e) => panic!("cannot build test App: {e}"),
-    };
+    }
+  }
+
+  /// The trap this design avoids. Recording an injected prompt as a
+  /// `SystemPrompt` would make it re-project, and since the memory note changes
+  /// as the user's notes do — and an append-only log cannot retract the old one
+  /// — the prompt would accumulate stale snapshots of itself.
+  #[test]
+  fn an_injected_context_is_logged_without_entering_the_projection() {
+    let mut app = test_app();
+    let before = app.current_session.messages().len();
+    app.record_injected_context(&[(PromptKind::Memory, "notes v1".to_string())]);
+    assert_eq!(
+      app.current_session.messages().len(),
+      before,
+      "a bookkeeping event must not become a message"
+    );
+    assert_eq!(
+      app.current_session.events.len(),
+      1,
+      "but it must be in the log — that is the whole point"
+    );
+  }
+
+  /// The memory note and the workspace rules are usually identical turn after
+  /// turn. One event each per turn would bury the conversation in bookkeeping
+  /// while telling a reader nothing new.
+  #[test]
+  fn unchanged_context_is_not_re_recorded_every_turn() {
+    let mut app = test_app();
+    for _ in 0..5 {
+      app.record_injected_context(&[(PromptKind::Memory, "notes v1".to_string())]);
+    }
+    assert_eq!(
+      app.current_session.events.len(),
+      1,
+      "five turns, one record"
+    );
+  }
+
+  /// A digest that *has* changed is the interesting case, and it must land.
+  #[test]
+  fn changed_context_is_recorded_again() {
+    let mut app = test_app();
+    app.record_injected_context(&[(PromptKind::Memory, "notes v1".to_string())]);
+    app.record_injected_context(&[(PromptKind::Memory, "notes v2".to_string())]);
+    assert_eq!(app.current_session.events.len(), 2);
+    let digests: Vec<String> = app
+      .current_session
+      .events
+      .iter()
+      .filter_map(|e| match &e.payload {
+        EventPayload::ContextInjected { digest, .. } => Some(digest.clone()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(digests.len(), 2);
+    assert_ne!(digests[0], digests[1], "the change must be visible");
+  }
+
+  /// Two kinds are tracked independently: memory changing must not suppress a
+  /// workspace-rules record, or a reader would see one and conclude the other
+  /// was unchanged.
+  #[test]
+  fn each_kind_is_deduplicated_against_its_own_history() {
+    let mut app = test_app();
+    app.record_injected_context(&[
+      (PromptKind::Memory, "m1".to_string()),
+      (PromptKind::Workspace, "w1".to_string()),
+    ]);
+    app.record_injected_context(&[
+      (PromptKind::Memory, "m2".to_string()),
+      (PromptKind::Workspace, "w1".to_string()),
+    ]);
+    assert_eq!(
+      app.current_session.events.len(),
+      3,
+      "m1, w1, m2 — w1 unchanged so not repeated"
+    );
+  }
+
+  #[test]
+  fn a_test_app_reads_no_real_memory() {
+    let app = test_app();
     assert!(
       app.memory.is_none(),
       "a replayed prompt must not depend on the developer's memory directory"

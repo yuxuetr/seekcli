@@ -55,9 +55,21 @@ pub struct Snapshot {
   pub memory: MemoryEntry,
   /// What this session searched up versus what it actually read.
   pub sources: Vec<super::provenance::Source>,
+  /// Sub-agent delegations made in this session, with how each ended.
+  pub child_runs: Vec<ChildRunEntry>,
   /// Persistent memory scopes, and where the files live.
   pub memory_scopes: Vec<crate::memory::ScopeSummary>,
   pub memory_dir: String,
+}
+
+/// One delegation, as the session section renders it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChildRunEntry {
+  pub call_id: String,
+  pub template: String,
+  pub status: String,
+  pub iterations: usize,
+  pub duration_ms: u64,
 }
 
 /// The `[memory]` budget as the session section renders it.
@@ -204,7 +216,7 @@ fn mcp(snap: &Snapshot) -> String {
 }
 
 fn session(snap: &Snapshot) -> String {
-  format!(
+  let mut out = format!(
     "# session\nid: {}\nevents: {}\ncompactions: {}\n\
      compact_at: {} tokens (window {} x {})\nkeep_tail: {} messages\n",
     snap.session_id,
@@ -214,7 +226,21 @@ fn session(snap: &Snapshot) -> String {
     snap.memory.window_tokens,
     snap.memory.ratio,
     snap.memory.keep_tail
-  )
+  );
+  // A delegation that quietly hit its iteration cap used to be
+  // indistinguishable from one that finished, because only the summary text
+  // came back. Showing how each ended, and how long it took, is the point of
+  // recording them at all.
+  if !snap.child_runs.is_empty() {
+    out.push_str("sub-agent runs:\n");
+    for c in &snap.child_runs {
+      out.push_str(&format!(
+        "  {} — {} after {} iteration(s), {}ms (call {})\n",
+        c.template, c.status, c.iterations, c.duration_ms, c.call_id
+      ));
+    }
+  }
+  out
 }
 
 /// Where the persistent notes are and what is in them.
@@ -297,6 +323,7 @@ mod tests {
       events: 42,
       compactions: 1,
       sources: Vec::new(),
+      child_runs: Vec::new(),
       memory_scopes: Vec::new(),
       memory_dir: "/tmp/seekcli-test-memory".into(),
       memory: MemoryEntry {
@@ -355,6 +382,51 @@ mod tests {
   fn an_empty_sources_section_says_so_rather_than_rendering_nothing() {
     let out = section("sources", &snap());
     assert!(out.contains("nothing searched or fetched"), "{out}");
+  }
+
+  /// A delegation that quietly hit its iteration cap used to be
+  /// indistinguishable, in the record, from one that finished — only the
+  /// summary text came back.
+  #[test]
+  fn the_session_section_shows_how_each_delegation_ended() {
+    let mut s = snap();
+    s.child_runs = vec![
+      ChildRunEntry {
+        call_id: "call_1".into(),
+        template: "explore".into(),
+        status: "completed".into(),
+        iterations: 3,
+        duration_ms: 1200,
+      },
+      ChildRunEntry {
+        call_id: "call_2".into(),
+        template: "general".into(),
+        status: "max_iterations".into(),
+        iterations: 20,
+        duration_ms: 45000,
+      },
+    ];
+    let out = section("session", &s);
+    assert!(
+      out.contains("explore — completed after 3 iteration(s)"),
+      "{out}"
+    );
+    assert!(
+      out.contains("general — max_iterations after 20 iteration(s)"),
+      "an exhausted delegation must not read as a finished one: {out}"
+    );
+    assert!(out.contains("45000ms"), "{out}");
+    assert!(
+      out.contains("call_2"),
+      "it must join back to the call: {out}"
+    );
+  }
+
+  /// A session with no delegations must not grow an empty heading.
+  #[test]
+  fn the_session_section_omits_delegations_when_there_were_none() {
+    let out = section("session", &snap());
+    assert!(!out.contains("sub-agent runs"), "{out}");
   }
 
   /// A memory the user cannot see how to remove is a rule they did not agree

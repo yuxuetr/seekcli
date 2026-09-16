@@ -117,9 +117,16 @@ fn steps_of(prompt: &str, events: &[EventPayload]) -> Vec<Step> {
       // A compaction replaced part of the projection; the summary is what the
       // model actually saw next, so it belongs in the observation.
       EventPayload::Compaction { summary, .. } => push_line(&mut observation, summary),
+      // Bookkeeping, not observation: none of these is something the model
+      // read as part of the conversation. `ContextInjected` in particular
+      // records *that* a composed system prompt was present, and a trajectory
+      // is about what the agent did with the conversation, not how its prompt
+      // was assembled.
       EventPayload::SystemPrompt { .. }
       | EventPayload::SkillActivated { .. }
       | EventPayload::Usage(_)
+      | EventPayload::ContextInjected { .. }
+      | EventPayload::ChildRun { .. }
       | EventPayload::Interrupted => {}
       EventPayload::AssistantMessage {
         content,

@@ -297,3 +297,36 @@ JSONL，每行一个任务：
 ## 7. 对应路线
 
 **阶段二十五**（LLM 录制/回放——因是三次结构性重构的前置条件，单独提前）、阶段二十九（eval 套件扩容 + CI 覆盖率门禁，P2）。
+
+## 附：trace 与事件日志的 join（L7-9，阶段四十七）
+
+两套记录此前是**互不相识的身份空间**：span 按运行编号（`usize` 计数器），
+事件按会话编号（`seq`）。于是「这个 span 属于哪一轮」只能从时间戳去猜。
+
+阶段四十七给 span 加上 join key，而不是把 trace 改成从事件派生：
+
+| span | 注解 |
+| --- | --- |
+| `run` | `session`（会话 id）+ `first_seq`（本次运行在日志里的起点） |
+| `turn` | `seq`（本轮对应的事件序号） |
+
+**为什么不做成「trace 从事件链派生」**：trace 记的是时长，事件记的是内容。
+要让事件承载足够的计时信息去重建 span 树，就得让每个事件都带起止时刻——
+而 trace 是 `SEEKCLI_TRACE=1` 才开的旁路，零开销正是它的设计前提
+（design-principles §3「可观测性走装饰器 / 旁路」）。**加 join key 花两行，
+拿到同样的可归因性；合并两套记录要动的是所有事件的形状。**
+
+`annotate` 是覆盖而非合并，所以每个 span 只被注解一次——`run` / `turn` /
+`gen` / `execute` 各一处，互不重叠。
+
+### 结束原因 ≠ 验证状态（47.3）
+
+`--output json` 新增 `verification` 字段，与 `status` 并列：
+
+- `status` 说**循环为什么停**（completed / max_iterations / interrupted）。
+- `verification` 说**有没有东西检查过结果**。
+
+`-p` 路径上它恒为 `not_verified`——headless 运行没有验收条件。
+今天唯一产出真实判决的是 benchmark runner，它按验证命令的退出码判定。
+**把 `completed` 读成「成功了」，正是这两个字段要防的那个错误：
+模型答完了不等于任务过了。**

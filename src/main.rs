@@ -482,6 +482,17 @@ async fn run_prompt(app: &mut App, prompt: String, format: OutputFormat) -> Resu
           engine::LoopStatus::MaxIterations => "max_iterations",
           engine::LoopStatus::Interrupted => "interrupted",
         },
+        // Deliberately separate from `status`. `status` says why the loop
+        // stopped; this says whether anything checked the result. A consumer
+        // reading "completed" as "it worked" is making exactly the mistake
+        // these two fields exist to prevent: the model answering is not the
+        // task passing.
+        //
+        // Nothing sets this to passed/failed on this path — `-p` has no
+        // acceptance criterion. The benchmark runner judges by a verification
+        // command's exit code, and that is currently the only producer of a
+        // real verdict.
+        "verification": "not_verified",
         "iterations": outcome.iterations,
         "llm_calls": outcome.llm_calls,
         "usage": {
