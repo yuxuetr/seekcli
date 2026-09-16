@@ -132,6 +132,17 @@ impl ToolDispatcher {
         audit::Outcome::Denied,
         result.kind.prefix().trim(),
       );
+    } else if policy::is_mutating_with(name, declared_read_only) {
+      // The log said it answers "what did this process do to the machine", and
+      // recorded only what the machine refused to let it do. A successful write
+      // — the one event a reader is actually auditing for — left no trace:
+      // `write_file` creating a file added zero lines to a 1789-line log.
+      //
+      // Successes are recorded for mutating tools only. Reads do not change the
+      // machine, and 306 audited `read_file` calls would bury the writes.
+      // `is_mutating_with` is the same predicate the gate above used, so the
+      // two cannot drift apart into disagreeing about what counts as a change.
+      audit::record(name, &args, audit::Outcome::Executed, "ok");
     }
     result
   }

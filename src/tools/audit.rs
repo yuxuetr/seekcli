@@ -107,6 +107,32 @@ fn append(entry: Value) {
 mod tests {
   use super::*;
 
+  /// The gap this closed: the module doc says this log answers "what did this
+  /// process do to the machine", and it recorded only what the machine refused
+  /// to let it do. A `write_file` that actually created a file added zero lines
+  /// to a 1789-line log — the one event a reader audits *for*.
+  ///
+  /// Asserted on the predicate rather than end-to-end, because the predicate is
+  /// what must not drift: the gate and the log have to agree about what counts
+  /// as changing the machine, and they agree by sharing this function.
+  #[test]
+  fn the_audit_predicate_covers_the_tools_that_change_the_machine() {
+    use crate::tools::policy::is_mutating_with;
+    for mutating in ["write_file", "edit_file", "run_shell"] {
+      assert!(
+        is_mutating_with(mutating, None),
+        "{mutating} changes the machine and must be audited on success"
+      );
+    }
+    // Reads do not change the machine, and auditing them would bury the writes.
+    for read_only in ["read_file", "list_dir", "glob", "grep"] {
+      assert!(!is_mutating_with(read_only, None), "{read_only}");
+    }
+    // An MCP tool is classified by what its server declared.
+    assert!(is_mutating_with("mcp__fs__write_file", Some(false)));
+    assert!(!is_mutating_with("mcp__fs__read_text_file", Some(true)));
+  }
+
   #[test]
   fn digest_is_stable_and_distinguishes_inputs() {
     assert_eq!(digest("abc"), digest("abc"));
