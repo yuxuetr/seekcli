@@ -151,6 +151,7 @@ impl App {
     let builtin: std::collections::HashSet<String> = tools::registry::system_tools()
       .into_iter()
       .chain(tools::registry::research_tools())
+      .chain(std::iter::once(tools::registry::memory_tool()))
       .map(|t| t.function.name)
       .collect();
 
@@ -194,6 +195,7 @@ impl App {
       })
       .unwrap_or_default();
 
+    let memory_store = self.memory.as_ref();
     let compactions = self
       .current_session
       .events
@@ -227,6 +229,10 @@ impl App {
       events: self.current_session.events.len(),
       compactions,
       sources: tools::provenance::snapshot(),
+      memory_scopes: memory_store.map(|m| m.scopes()).unwrap_or_default(),
+      memory_dir: memory_store
+        .map(|m| m.dir().display().to_string())
+        .unwrap_or_else(|| "(unavailable)".to_string()),
       memory: tools::inspect::MemoryEntry {
         threshold_tokens: self.memory_budget.threshold_tokens,
         window_tokens: self.memory_budget.window_tokens,
@@ -617,7 +623,16 @@ impl App {
     // One source of truth is what keeps "model-visible means logged" true
     // instead of aspirational.
     let mut messages = self.current_session.messages();
-    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode, self.research_enabled);
+    let memory_note = self
+      .memory
+      .as_ref()
+      .and_then(|m| agent::prompt::memory_rules(&m.preferences(), &m.scopes()));
+    Self::ensure_agent_system_prompt(
+      &mut messages,
+      self.plan_mode,
+      self.research_enabled,
+      memory_note,
+    );
     let run_span = self.tracer.start_run();
     let run = self
       .run_agent_loop(
@@ -679,7 +694,16 @@ impl App {
       });
     }
     messages.push(Message::new_user_text(prompt.to_string()));
-    Self::ensure_agent_system_prompt(&mut messages, self.plan_mode, self.research_enabled);
+    let memory_note = self
+      .memory
+      .as_ref()
+      .and_then(|m| agent::prompt::memory_rules(&m.preferences(), &m.scopes()));
+    Self::ensure_agent_system_prompt(
+      &mut messages,
+      self.plan_mode,
+      self.research_enabled,
+      memory_note,
+    );
     let tools = skill.and_then(|s| s.to_api_tools());
     // Headless runs used to produce no trace at all: this path never opened a
     // run span and never flushed. That left tracing broken in exactly the mode
@@ -895,7 +919,12 @@ impl App {
     Ok(())
   }
 
-  fn ensure_agent_system_prompt(messages: &mut Vec<Message>, plan_mode: bool, research: bool) {
+  fn ensure_agent_system_prompt(
+    messages: &mut Vec<Message>,
+    plan_mode: bool,
+    research: bool,
+    memory: Option<String>,
+  ) {
     // Plan Mode guidance is added/removed as the flag toggles. Marker-prefixed
     // so we can find and drop it without touching other system messages.
     let plan_msg = agent::prompt::plan_mode_rules();
@@ -995,6 +1024,34 @@ impl App {
       }
     }
 
+    // Persistent memory, on the same terms: a separate message after the
+    // kernel, absent entirely when nothing has been recorded.
+    if let Some(mem) = memory {
+      let present = messages.iter().any(|m| {
+        matches!(
+          m,
+          Message::Simple { role, content: t, .. }
+            if role == "system" && t == &mem
+        )
+      });
+      if !present {
+        let head_end = messages
+          .iter()
+          .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
+          .count();
+        messages.insert(
+          head_end,
+          Message::Simple {
+            images: Vec::new(),
+            role: "system".to_string(),
+            content: mem,
+            reasoning_content: None,
+            tool_calls: None,
+          },
+        );
+      }
+    }
+
     // Plan Mode message goes after the leading run of system messages
     // (kernel + workspace rules + any active-skill prompt).
     if plan_mode {
@@ -1060,6 +1117,7 @@ impl App {
       // user happens to have configured, so silently widening it would break
       // the tool-narrowing that makes sub-agents cheap and safe.
       let mut merged = tools::registry::merge_with_skill(tools);
+      merged.push(tools::registry::memory_tool());
       merged.extend(self.mcp.schemas());
       if self.research_enabled {
         merged.extend(tools::registry::research_tools());
@@ -1603,7 +1661,7 @@ mod tests {
   #[test]
   fn the_citation_contract_appears_only_with_the_web_tools() {
     let mut without = vec![Message::new_user_text("hi".to_string())];
-    App::ensure_agent_system_prompt(&mut without, false, false);
+    App::ensure_agent_system_prompt(&mut without, false, false, None);
     assert!(
       !without.iter().any(|m| matches!(
         m,
@@ -1613,7 +1671,7 @@ mod tests {
     );
 
     let mut with = vec![Message::new_user_text("hi".to_string())];
-    App::ensure_agent_system_prompt(&mut with, false, true);
+    App::ensure_agent_system_prompt(&mut with, false, true, None);
     assert!(
       with.iter().any(|m| matches!(
         m,
@@ -1629,7 +1687,7 @@ mod tests {
   fn injecting_the_contract_does_not_disturb_the_cache_prefix() {
     let kernel = agent::prompt::agent_system_prompt();
     let mut messages = vec![Message::new_user_text("hi".to_string())];
-    App::ensure_agent_system_prompt(&mut messages, false, true);
+    App::ensure_agent_system_prompt(&mut messages, false, true, None);
     match messages.first() {
       Some(Message::Simple { role, content, .. }) => {
         assert_eq!(role, "system");
@@ -1645,7 +1703,7 @@ mod tests {
   fn the_contract_is_injected_once_not_once_per_turn() {
     let mut messages = vec![Message::new_user_text("hi".to_string())];
     for _ in 0..3 {
-      App::ensure_agent_system_prompt(&mut messages, false, true);
+      App::ensure_agent_system_prompt(&mut messages, false, true, None);
     }
     let count = messages
       .iter()
@@ -1705,6 +1763,29 @@ mod tests {
       Ok(n) => assert_eq!(n, 0),
       Err(e) => panic!("no-op flush failed: {e}"),
     }
+  }
+
+  /// A recorded run must be reproducible from the recording alone.
+  ///
+  /// The memory note goes into the prompt, so a test `App` that read the real
+  /// `~/.seekcli/memory` would replay differently depending on what the user
+  /// happened to remember last week. That is not hypothetical — it is how this
+  /// was found: five replay fixtures went red the moment the developer's own
+  /// memory directory had anything in it. On a clean machine they would have
+  /// stayed green, so the invariant needs its own assertion rather than relying
+  /// on the fixtures to notice.
+  #[test]
+  fn a_test_app_reads_no_real_memory() {
+    let app = match App::for_test(Box::new(crate::api::record::Replaying::new(
+      std::path::PathBuf::from("tests/fixtures/nonexistent"),
+    ))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {e}"),
+    };
+    assert!(
+      app.memory.is_none(),
+      "a replayed prompt must not depend on the developer's memory directory"
+    );
   }
 
   #[test]

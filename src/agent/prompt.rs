@@ -93,6 +93,52 @@ Rules:
   .to_string()
 }
 
+/// Persistent memory, injected as a system message when there is any.
+///
+/// Two halves, treated differently on purpose:
+///
+/// * **Preferences are inlined.** They are rules about the user, they are few,
+///   and they apply to every answer — making the model fetch them would mean
+///   it sometimes does not.
+/// * **Domain scopes are only indexed.** Injecting every scope's body would put
+///   the IELTS weak points into a finance question and the watchlist into a
+///   study session, which is exactly the cross-contamination this module has to
+///   avoid. The model is told what exists and reads what is relevant.
+///
+/// Returns `None` when nothing has been recorded, so a fresh install pays
+/// nothing.
+const PREFS_PREAMBLE: &str = "These are the user's standing preferences. They were approved by \
+                              the user and apply to every answer:\n\n";
+
+const DOMAIN_GUIDANCE: &str = "\nThese are listed, not loaded. When the conversation touches one, \
+                               read it with the `memory` tool first — do not guess what a scope \
+                               contains, and do not carry one topic's notes into another.\n";
+
+pub fn memory_rules(preferences: &str, scopes: &[crate::memory::ScopeSummary]) -> Option<String> {
+  let prefs = preferences.trim();
+  if prefs.is_empty() && scopes.is_empty() {
+    return None;
+  }
+  let mut out = String::from("# Persistent memory\n\n");
+  if !prefs.is_empty() {
+    out.push_str(PREFS_PREAMBLE);
+    out.push_str(prefs);
+    out.push_str("\n\n");
+  }
+  let domains: Vec<&crate::memory::ScopeSummary> = scopes
+    .iter()
+    .filter(|s| s.name != crate::memory::PREFERENCES)
+    .collect();
+  if !domains.is_empty() {
+    out.push_str("You have notes in these scopes:\n\n");
+    for s in &domains {
+      out.push_str(&format!("- `{}` ({} entries)\n", s.name, s.entries));
+    }
+    out.push_str(DOMAIN_GUIDANCE);
+  }
+  Some(out)
+}
+
 /// Plan Mode guidance, injected as a system message only while `/plan` is on.
 /// Externalizes long-task state to the workspace filesystem (PLAN.md / TODO.md)
 /// so it survives context compression and process restarts — the harness
@@ -239,5 +285,65 @@ mod tests {
     let out = workspace_rules(&dir).expect("should find AGENTS.md");
     assert!(out.contains("truncated"));
     let _ = std::fs::remove_file(&path);
+  }
+
+  fn scope(name: &str, entries: usize) -> crate::memory::ScopeSummary {
+    crate::memory::ScopeSummary {
+      name: name.to_string(),
+      entries,
+    }
+  }
+
+  /// The cross-contamination guard, and the reason domains are indexed rather
+  /// than inlined: IELTS weak points must not be sitting in the prompt during a
+  /// finance question. The prompt says a scope EXISTS; the model reads it if
+  /// the conversation goes there.
+  #[test]
+  fn domain_scopes_are_listed_but_their_contents_are_not_injected() {
+    let out = memory_rules("", &[scope("ielts", 4), scope("finance", 2)])
+      .unwrap_or_else(|| panic!("expected a memory note"));
+    assert!(out.contains("`ielts` (4 entries)"), "{out}");
+    assert!(out.contains("`finance` (2 entries)"), "{out}");
+    assert!(
+      out.contains("listed, not loaded"),
+      "the model must be told to read before relying: {out}"
+    );
+    assert!(
+      out.contains("do not carry one topic's notes into another"),
+      "{out}"
+    );
+  }
+
+  /// Preferences go the other way: few, approved, and relevant to every answer,
+  /// so making the model fetch them would mean it sometimes does not.
+  #[test]
+  fn preferences_are_inlined_rather_than_indexed() {
+    let out =
+      memory_rules("- answer in Chinese", &[]).unwrap_or_else(|| panic!("expected a memory note"));
+    assert!(out.contains("answer in Chinese"), "{out}");
+    assert!(out.contains("approved by the user"), "{out}");
+  }
+
+  /// `preferences` is inlined above, so listing it again as a readable scope
+  /// would invite the model to spend a tool call re-reading what it already has.
+  #[test]
+  fn preferences_is_not_also_listed_as_a_domain_scope() {
+    let out = memory_rules(
+      "- answer in Chinese",
+      &[scope("preferences", 1), scope("cqf", 3)],
+    )
+    .unwrap_or_else(|| panic!("expected a memory note"));
+    assert!(out.contains("`cqf`"), "{out}");
+    assert!(
+      !out.contains("`preferences` ("),
+      "already inlined; listing it invites a wasted read: {out}"
+    );
+  }
+
+  /// A fresh install must pay nothing for a feature it is not using.
+  #[test]
+  fn nothing_recorded_means_nothing_injected() {
+    assert!(memory_rules("", &[]).is_none());
+    assert!(memory_rules("   \n ", &[]).is_none());
   }
 }

@@ -18,6 +18,7 @@ mod config;
 mod engine;
 mod history;
 mod mcp;
+mod memory;
 mod observability;
 mod proposals;
 mod session;
@@ -123,6 +124,14 @@ struct App {
   /// Whether `[research]` resolved to a usable backend. When false the two
   /// web tools are not put on the surface at all.
   research_enabled: bool,
+  /// Persistent notes across conversations.
+  ///
+  /// Held rather than opened per turn, and `None` under test on purpose: the
+  /// memory note goes into the prompt, so reading the real `~/.seekcli/memory`
+  /// would make a replay fixture pass or fail depending on what the user
+  /// happened to remember last week. A recorded run has to be reproducible
+  /// from the recording alone.
+  memory: Option<memory::MemoryStore>,
 }
 
 impl App {
@@ -159,6 +168,15 @@ impl App {
     let mcp = mcp::McpRegistry::connect_all(&config.mcp_servers).await;
     let memory_budget = agent::compressor::Budget::from_config(&config.memory);
     let research_enabled = tools::web::init(&config.research);
+    let memory = match memory::MemoryStore::new() {
+      Ok(m) => Some(m),
+      Err(e) => {
+        // Degrade visibly rather than failing startup: everything else still
+        // works without persistent notes.
+        eprintln!("{} memory unavailable: {e}", "[Memory]".yellow());
+        None
+      }
+    };
 
     let interrupt = Arc::new(AtomicBool::new(false));
     spawn_interrupt_watcher(interrupt.clone());
@@ -183,6 +201,7 @@ impl App {
       interrupt,
       memory_budget,
       research_enabled,
+      memory,
     })
   }
 
@@ -216,6 +235,7 @@ impl App {
       interrupt: Arc::new(AtomicBool::new(false)),
       memory_budget,
       research_enabled: false,
+      memory: None,
     })
   }
 

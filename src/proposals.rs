@@ -35,21 +35,28 @@ pub enum Kind {
   Mcp,
   /// A declarative scheduled task.
   Task,
+  /// One long-term preference: a rule about the user that will shape every
+  /// future conversation. Gated for that reason — see `crate::memory`.
+  Memory,
 }
 
 impl Kind {
-  pub const ALL: &'static [Kind] = &[Kind::Skill, Kind::Mcp, Kind::Task];
+  pub const ALL: &'static [Kind] = &[Kind::Skill, Kind::Mcp, Kind::Task, Kind::Memory];
 
   /// The kinds `propose` accepts. `Skill` is absent on purpose: flattening its
   /// structured fields into one `content` string would force the model to
   /// hand-write SKILL.md frontmatter, which `create_skill` already does better.
-  pub const DRAFTABLE: &'static [Kind] = &[Kind::Mcp, Kind::Task];
+  /// `Memory` is drafted by the `memory` tool rather than by `propose`, but it
+  /// must be listed here: `draft` refuses anything absent, and that refusal is
+  /// what keeps the preferences gate from being bypassed by a second caller.
+  pub const DRAFTABLE: &'static [Kind] = &[Kind::Mcp, Kind::Task, Kind::Memory];
 
   pub fn as_str(self) -> &'static str {
     match self {
       Kind::Skill => "skill",
       Kind::Mcp => "mcp",
       Kind::Task => "task",
+      Kind::Memory => "memory",
     }
   }
 
@@ -104,6 +111,14 @@ impl Pending {
         let (_, body) = crate::skills::split_frontmatter(&text, "TASK.md")?;
         if body.trim().is_empty() {
           anyhow::bail!("the body is empty, and the body is the prompt");
+        }
+        Ok(())
+      }
+      Kind::Memory => {
+        let text = fs::read_to_string(&self.path)
+          .with_context(|| format!("cannot read {}", self.path.display()))?;
+        if text.trim().is_empty() {
+          anyhow::bail!("the preference is empty");
         }
         Ok(())
       }
@@ -220,6 +235,7 @@ impl ProposalStore {
     match kind {
       Kind::Skill => self.dir(kind).join(safe_name),
       Kind::Mcp => self.dir(kind).join(format!("{safe_name}.toml")),
+      Kind::Memory => self.dir(kind).join(format!("{safe_name}.md")),
       Kind::Task => self.dir(kind).join(format!("{safe_name}.md")),
     }
   }
@@ -327,6 +343,13 @@ impl ProposalStore {
         Ok(format!("skill `{}` is now active", pending.name))
       }
       Kind::Mcp => self.land_mcp(&pending),
+      Kind::Memory => {
+        let entry = fs::read_to_string(&pending.path)
+          .with_context(|| format!("cannot read {}", pending.path.display()))?;
+        let landed = crate::memory::MemoryStore::new()?.accept_preference(&entry)?;
+        fs::remove_file(&pending.path).ok();
+        Ok(landed)
+      }
       Kind::Task => {
         let dir = self.home.join("tasks").join(&pending.name);
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -413,6 +436,45 @@ mod tests {
       Err(e) => panic!("cannot build store: {e}"),
     };
     (s, home)
+  }
+
+  /// A preference must be reviewable before it becomes a standing rule. The
+  /// gate is the mechanism; this is the check that a draft survives to reach it.
+  #[test]
+  fn a_preference_draft_waits_for_review_like_every_other_kind() {
+    let (s, home) = store("memory");
+    let drafted = s.draft(
+      Kind::Memory,
+      "answer-in-chinese",
+      "answer in Chinese unless asked",
+    );
+    assert!(drafted.is_ok(), "{:?}", drafted.err());
+    let listed = s.list();
+    assert_eq!(listed.len(), 1, "expected exactly one pending proposal");
+    match listed.first() {
+      Some(p) => {
+        assert_eq!(p.kind, Kind::Memory);
+        assert!(p.validate().is_ok(), "a non-empty preference must validate");
+      }
+      None => panic!("the draft vanished"),
+    }
+    let _ = std::fs::remove_dir_all(home);
+  }
+
+  /// An empty preference would land as a blank bullet nobody can interpret or
+  /// find again to remove.
+  #[test]
+  fn an_empty_preference_is_refused_at_the_gate() {
+    let (s, home) = store("memory-empty");
+    let _ = s.draft(Kind::Memory, "blank", "   \n  ");
+    match s.list().first() {
+      Some(p) => assert!(
+        p.validate().is_err(),
+        "an empty preference must not validate"
+      ),
+      None => panic!("the draft vanished"),
+    }
+    let _ = std::fs::remove_dir_all(home);
   }
 
   #[test]

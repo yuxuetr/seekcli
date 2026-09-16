@@ -55,6 +55,9 @@ pub struct Snapshot {
   pub memory: MemoryEntry,
   /// What this session searched up versus what it actually read.
   pub sources: Vec<super::provenance::Source>,
+  /// Persistent memory scopes, and where the files live.
+  pub memory_scopes: Vec<crate::memory::ScopeSummary>,
+  pub memory_dir: String,
 }
 
 /// The `[memory]` budget as the session section renders it.
@@ -67,7 +70,9 @@ pub struct MemoryEntry {
 }
 
 /// The sections a caller may ask for.
-const SECTIONS: &[&str] = &["tools", "policy", "skills", "mcp", "session", "sources"];
+const SECTIONS: &[&str] = &[
+  "tools", "policy", "skills", "mcp", "session", "sources", "memory",
+];
 
 /// Render the requested section, or every section when `what` is absent.
 pub fn render(args: &Value, snap: &Snapshot) -> Result<String> {
@@ -99,6 +104,7 @@ fn section(name: &str, snap: &Snapshot) -> String {
     "mcp" => mcp(snap),
     "session" => session(snap),
     "sources" => sources(snap),
+    "memory" => memory(snap),
     // `render` only passes values from SECTIONS.
     other => unreachable!("unlisted section `{other}` reached the renderer"),
   }
@@ -211,6 +217,29 @@ fn session(snap: &Snapshot) -> String {
   )
 }
 
+/// Where the persistent notes are and what is in them.
+///
+/// Naming the directory is the point, not decoration: a memory the user cannot
+/// see how to remove is a rule they did not agree to. The path is the answer to
+/// "how do I undo this".
+fn memory(snap: &Snapshot) -> String {
+  let mut out = format!("# memory\ndir: {}\n", snap.memory_dir);
+  if snap.memory_scopes.is_empty() {
+    out.push_str("(nothing recorded yet)\n");
+    return out;
+  }
+  for s in &snap.memory_scopes {
+    let note = if s.name == crate::memory::PREFERENCES {
+      "  <- rules about the user; only the proposal gate writes here"
+    } else {
+      ""
+    };
+    out.push_str(&format!("  {} ({} entries){}\n", s.name, s.entries, note));
+  }
+  out.push_str("Every file is plain Markdown: edit or delete any line by hand.\n");
+  out
+}
+
 /// Searched versus read, kept apart.
 ///
 /// A conclusion supported only by search snippets rests on a page nobody
@@ -268,6 +297,8 @@ mod tests {
       events: 42,
       compactions: 1,
       sources: Vec::new(),
+      memory_scopes: Vec::new(),
+      memory_dir: "/tmp/seekcli-test-memory".into(),
       memory: MemoryEntry {
         threshold_tokens: 150_000,
         window_tokens: 200_000,
@@ -324,6 +355,31 @@ mod tests {
   fn an_empty_sources_section_says_so_rather_than_rendering_nothing() {
     let out = section("sources", &snap());
     assert!(out.contains("nothing searched or fetched"), "{out}");
+  }
+
+  /// A memory the user cannot see how to remove is a rule they did not agree
+  /// to. The section names the directory for exactly that reason.
+  #[test]
+  fn the_memory_section_says_where_the_files_are_and_which_scope_is_gated() {
+    let mut s = snap();
+    s.memory_scopes = vec![
+      crate::memory::ScopeSummary {
+        name: "ielts".into(),
+        entries: 4,
+      },
+      crate::memory::ScopeSummary {
+        name: crate::memory::PREFERENCES.into(),
+        entries: 1,
+      },
+    ];
+    let out = section("memory", &s);
+    assert!(out.contains("/tmp/seekcli-test-memory"), "{out}");
+    assert!(out.contains("ielts (4 entries)"), "{out}");
+    assert!(
+      out.contains("only the proposal gate writes here"),
+      "the gated scope must be marked: {out}"
+    );
+    assert!(out.contains("edit or delete any line by hand"), "{out}");
   }
 
   #[test]

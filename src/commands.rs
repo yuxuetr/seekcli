@@ -33,9 +33,10 @@ impl App {
   ///
   /// Returns `Some(reason)` when the proposal must not land. Only `skill`
   /// proposals are checked: an `mcp` server is not connected until restart and
-  /// a `task` is a prompt for the scheduler, so evaluating either would spend
-  /// the user's money measuring nothing (`docs/architecture/L7-observability.md`
-  /// §4.7.1). Saying so beats skipping silently, which reads as "it passed".
+  /// a `task` is a prompt for the scheduler, and a `memory` preference states
+  /// what the user wants — evaluating any of them would spend the user's money
+  /// measuring nothing (`docs/architecture/L7-observability.md` §4.7.1). Saying
+  /// so beats skipping silently, which reads as "it passed".
   async fn regression_check(
     &mut self,
     kind: crate::proposals::Kind,
@@ -44,10 +45,23 @@ impl App {
   ) -> anyhow::Result<Option<String>> {
     use crate::proposals::Kind;
     if kind != Kind::Skill {
+      // Each kind is unmeasurable for its own reason, and saying the right one
+      // matters: a note that explains someone else's case reads as boilerplate,
+      // and boilerplate is what people stop reading.
+      let why = match kind {
+        Kind::Mcp => "an mcp server is not connected until restart",
+        Kind::Task => "a task is a prompt for the scheduler, which runs later",
+        Kind::Memory => {
+          "a preference states what the user wants, and a suite cannot judge \
+           whether they want it"
+        }
+        Kind::Skill => unreachable!("handled by the branch above"),
+      };
       println!(
-        "{} no eval gate for a {} proposal: an mcp server is not connected until restart, and a task runs on a schedule, so a suite here would measure nothing.",
+        "{} no eval gate for a {} proposal: {}, so a suite here would measure nothing.",
         "Note:".blue(),
-        kind
+        kind,
+        why
       );
       return Ok(None);
     }

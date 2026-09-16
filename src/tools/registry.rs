@@ -439,6 +439,51 @@ pub fn filter_by_allowed(tools: &[Tool], allowed: &[&str]) -> Vec<Tool> {
     .collect()
 }
 
+/// Persistent notes across conversations. Always offered: unlike the web
+/// tools it needs no configuration, and a scope that does not exist reads as
+/// empty rather than failing.
+pub fn memory_tool() -> Tool {
+  make_tool(
+    "memory",
+    "Read and write notes that survive /clear and restarts — study progress, \
+     weak points, a watchlist, a research thread. Scopes are topics you choose \
+     (`ielts`, `cqf`, `finance`); one file each, plain Markdown the user can \
+     edit by hand.\n\
+     Use `list` to see what exists, `read` before relying on anything (do not \
+     assume a scope's contents), `write` to record a durable fact, `forget` to \
+     remove one.\n\
+     Record what will still matter next week — goals, recurring mistakes, \
+     decisions and their reasons. Do not record the transcript, one-off \
+     details, or a guess about the user's ability drawn from a single answer.\n\
+     The `preferences` scope is special: it holds rules about the USER that \
+     apply everywhere, so writing to it drafts a proposal for them to approve \
+     rather than saving directly.",
+    json!({
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["list", "read", "write", "forget"],
+          "description": "What to do"
+        },
+        "scope": {
+          "type": "string",
+          "description": "Topic name: letters, digits, - or _ (e.g. ielts, cqf, finance)"
+        },
+        "entry": {
+          "type": "string",
+          "description": "For write: the fact to record. For forget: text identifying the entry to remove (must match exactly one)"
+        },
+        "source": {
+          "type": "string",
+          "description": "Where this came from — `user`, `practice`, `analysis`. Stored with the entry"
+        }
+      },
+      "required": ["action"]
+    }),
+  )
+}
+
 /// The out-of-network tools, offered only when `[research]` is configured.
 ///
 /// Kept out of `system_tools()` on purpose: a tool the model can see but never

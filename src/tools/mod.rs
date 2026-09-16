@@ -13,6 +13,7 @@ pub mod edit;
 pub mod fs;
 pub mod inspect;
 pub mod jobs;
+pub mod memory_tool;
 pub mod meta;
 pub mod offload;
 pub mod path_security;
@@ -150,6 +151,7 @@ impl ToolDispatcher {
       "create_skill" => meta::create_skill(args).await,
       "propose" => meta::propose(args).await,
       "ask_user_question" => ask::ask_user_question(args).await,
+      "memory" => memory_tool::memory(args).await,
       "web_search" => web::web_search(args).await,
       "web_fetch" => web::web_fetch(args).await,
       _ => anyhow::bail!("{}", registry::unknown_tool_message(name)),
