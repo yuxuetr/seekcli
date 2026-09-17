@@ -595,7 +595,10 @@ impl App {
         &self.model,
         messages.to_vec(),
         self.thinking_mode.as_str(),
-        Some(tools.to_vec()),
+        // An empty slice is not the same as no tools: providers reject or
+        // mishandle `"tools": []`, and withholding is expressed by omitting
+        // the field — the same thing `planning_phase` does.
+        (!tools.is_empty()).then(|| tools.to_vec()),
       )
       .await?;
 
@@ -894,7 +897,45 @@ impl App {
       }
     }
 
-    if status == LoopStatus::MaxIterations && text.is_empty() {
+    // Out of iterations with nothing to say. `text` is only ever assigned when
+    // the model stops calling tools, so a child still working when it hits the
+    // cap returns **nothing at all** — measured, this threw away four runs of
+    // 15 model calls each and handed the parent the placeholder below.
+    //
+    // One more call, with tools withheld so it cannot start another
+    // investigation, turns those calls into the findings they already bought.
+    // Only on the iteration cap: a budget-exhausted child must not spend more,
+    // and an interrupted one was told to stop.
+    if status == LoopStatus::MaxIterations
+      && text.is_empty()
+      && calls_spent.fetch_add(1, AtomicOrd::SeqCst) < self.max_llm_calls
+    {
+      messages.push(Message::new_user_text(
+        "[Out of iterations] You cannot call any more tools. Report what you \
+         found, with file:line citations, and say plainly what you did not get \
+         to. A partial answer is useful; silence is not."
+          .to_string(),
+      ));
+      match self.request_step(&messages, &[]).await {
+        Ok(Response { content, usage, .. }) => {
+          if let Some(u) = usage {
+            cost.record(&u);
+          }
+          if !content.trim().is_empty() {
+            text = content;
+          }
+        }
+        // The child is already over budget in time; failing to salvage it is
+        // not worth failing the parent's tool call over.
+        Err(e) => eprintln!(
+          "{} could not salvage capped sub-agent '{}': {}",
+          "[Agent]".yellow(),
+          template.name,
+          e
+        ),
+      }
+    }
+    if text.is_empty() {
       text = format!("[Stopped at max iterations ({})]", template.max_iter);
     }
     Ok(SubAgentOutcome {
@@ -2157,6 +2198,58 @@ impl App {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Records what `tools` argument it was handed, so a caller's intent to
+  /// withhold tools can be asserted on.
+  struct ToolSpy(std::sync::Arc<std::sync::Mutex<Option<Option<usize>>>>);
+
+  #[async_trait::async_trait]
+  impl crate::api::LlmProvider for ToolSpy {
+    async fn call_api_with_params(
+      &self,
+      _model: &str,
+      _messages: Vec<Message>,
+      _thinking_mode: &str,
+      tools: Option<Vec<api::Tool>>,
+    ) -> anyhow::Result<crate::api::StreamResult> {
+      if let Ok(mut slot) = self.0.lock() {
+        *slot = Some(tools.map(|t| t.len()));
+      }
+      Ok(Box::pin(futures_util::stream::empty()))
+    }
+  }
+
+  /// Withholding tools must omit the field, not send an empty array.
+  ///
+  /// The distinction is invisible in Rust and decisive on the wire: providers
+  /// reject or mishandle `"tools": []`. `planning_phase` always knew this and
+  /// passed `None` directly; `request_step` did not, so the one caller that
+  /// needs to withhold — salvaging a sub-agent that ran out of iterations —
+  /// would have sent an empty array instead.
+  #[tokio::test]
+  async fn an_empty_tool_slice_is_sent_as_no_tools_at_all() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let app = match App::for_test(Box::new(ToolSpy(seen.clone()))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {e}"),
+    };
+    let msgs = vec![Message::new_user_text("hi".to_string())];
+
+    let _ = app.request_step(&msgs, &[]).await;
+    assert_eq!(
+      seen.lock().ok().and_then(|s| *s),
+      Some(None),
+      "an empty slice must reach the provider as `None`"
+    );
+
+    let one = tools::registry::system_tools();
+    let _ = app.request_step(&msgs, &one[..1]).await;
+    assert_eq!(
+      seen.lock().ok().and_then(|s| *s),
+      Some(Some(1)),
+      "a non-empty slice must still be passed through"
+    );
+  }
 
   #[test]
   fn deliberation_triggers_are_independent() {
