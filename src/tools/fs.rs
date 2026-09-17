@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// The third way an image can enter the conversation, and the one that fits
 /// [design-principles §1.1] best: the **agent** decides to look at a file.
@@ -84,6 +87,64 @@ pub async fn read_file(args: &Value) -> Result<String> {
   Ok(super::offload::offload(content, Some(path)).await)
 }
 
+/// Locks held while a path is being read-modified-written.
+///
+/// Only `edit_file` needs this: it reads, computes a replacement, and writes
+/// back, and two of those interleaving on one path loses an update silently.
+/// `write_file` does not read first, so `atomic_replace` alone is enough for it.
+///
+/// Keyed by path, so unrelated files never wait on each other. The map only
+/// grows with distinct paths touched in one process lifetime, which for a CLI
+/// session is small; reclaiming entries would need refcounting for no
+/// measurable gain.
+static EDIT_LOCKS: Mutex<Option<BTreeMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = Mutex::new(None);
+
+fn edit_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+  let key = path.to_path_buf();
+  let mut guard = match EDIT_LOCKS.lock() {
+    Ok(g) => g,
+    Err(poisoned) => poisoned.into_inner(),
+  };
+  guard
+    .get_or_insert_with(BTreeMap::new)
+    .entry(key)
+    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+    .clone()
+}
+
+/// Replace a file's contents so no reader can ever see a half-written one.
+///
+/// `fs::write` truncates and then writes. Anything reading at that moment —
+/// another tool, a background `run_shell` job, the user's editor — sees a
+/// truncated or partial file, and nothing in the result says so. Writing a
+/// sibling temp file and renaming over the target makes the swap atomic:
+/// `rename(2)` within one filesystem is all-or-nothing, so a reader gets the
+/// old contents or the new ones and never a mixture.
+///
+/// The temp file is a sibling rather than in `/tmp` on purpose: `rename` is
+/// only atomic within a filesystem, and a cross-device rename silently
+/// degrades to copy-then-delete, which is exactly the torn window this avoids.
+pub async fn atomic_replace(path: &Path, content: &str) -> Result<()> {
+  let dir = path.parent().unwrap_or(Path::new("."));
+  let tmp = dir.join(format!(
+    ".{}.seekcli-{}.tmp",
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("out"),
+    uuid::Uuid::new_v4()
+  ));
+  tokio::fs::write(&tmp, content)
+    .await
+    .with_context(|| format!("cannot stage {}", tmp.display()))?;
+  match tokio::fs::rename(&tmp, path).await {
+    Ok(()) => Ok(()),
+    Err(e) => {
+      // Leaving a stray dotfile behind would be a second failure on top of the
+      // first, and the user would have no idea where it came from.
+      let _ = tokio::fs::remove_file(&tmp).await;
+      Err(e).with_context(|| format!("cannot replace {}", path.display()))
+    }
+  }
+}
+
 pub async fn write_file(args: &Value) -> Result<String> {
   let path = args
     .get("path")
@@ -105,7 +166,8 @@ pub async fn write_file(args: &Value) -> Result<String> {
       .context("Failed to create parent directories")?;
   }
 
-  tokio::fs::write(path, content)
+  // Atomic: a reader never sees a half-written file. See `atomic_replace`.
+  atomic_replace(std::path::Path::new(path), content)
     .await
     .context(format!("Failed to write to file: {}", path))?;
   Ok(format!("Successfully wrote to {}", path))
@@ -129,6 +191,14 @@ pub async fn edit_file(args: &Value) -> Result<String> {
     return Ok(format!("[PATH DENIED] {e}"));
   }
 
+  // Held across read → apply → write. Two edits interleaving on one path would
+  // otherwise lose an update with nothing to show for it: both read the same
+  // contents, both compute a replacement from it, and the second write erases
+  // the first. Serialised, the second edit instead finds its `old_text` gone
+  // and says so — a loud, correct refusal rather than silent loss.
+  let lock = edit_lock(std::path::Path::new(path));
+  let _serialised = lock.lock().await;
+
   let content = tokio::fs::read_to_string(path)
     .await
     .context(format!("Failed to read file: {}", path))?;
@@ -138,7 +208,7 @@ pub async fn edit_file(args: &Value) -> Result<String> {
       level,
       content: new,
     } => {
-      tokio::fs::write(path, &new)
+      atomic_replace(std::path::Path::new(path), &new)
         .await
         .context(format!("Failed to write to file: {}", path))?;
       let note = if level == 1 {
@@ -189,6 +259,115 @@ pub async fn list_dir(args: &Value) -> Result<String> {
 mod tests {
   use super::*;
   use serde_json::json;
+
+  /// The window `fs::write` leaves open: it truncates, then writes. Anything
+  /// reading at that moment — another tool, a background `run_shell` job, the
+  /// user's editor — sees a truncated file and nothing says so.
+  #[tokio::test]
+  async fn a_replaced_file_is_never_observed_half_written() {
+    let dir = std::env::temp_dir().join("seekcli-atomic-write");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("big.txt");
+    let old = "o".repeat(200_000);
+    let new = "n".repeat(200_000);
+    let _ = std::fs::write(&path, &old);
+
+    let reader = {
+      let path = path.clone();
+      tokio::spawn(async move {
+        let mut seen_partial = false;
+        for _ in 0..400 {
+          if let Ok(text) = std::fs::read_to_string(&path) {
+            // Every observation must be one whole version or the other.
+            let whole = text.len() == 200_000
+              && (text.bytes().all(|b| b == b'o') || text.bytes().all(|b| b == b'n'));
+            if !whole {
+              seen_partial = true;
+              break;
+            }
+          }
+          tokio::task::yield_now().await;
+        }
+        seen_partial
+      })
+    };
+    for _ in 0..40 {
+      let _ = atomic_replace(&path, &new).await;
+      let _ = atomic_replace(&path, &old).await;
+    }
+    let torn = reader.await.unwrap_or(false);
+    assert!(!torn, "a reader observed a partially written file");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// Replacing must not leave its staging file behind — a stray dotfile next to
+  /// the user's source is litter they cannot trace back to anything.
+  #[tokio::test]
+  async fn replacing_leaves_no_temporary_behind() {
+    let dir = std::env::temp_dir().join("seekcli-atomic-clean");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("f.txt");
+    let _ = atomic_replace(&path, "hello").await;
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+      .map(|rd| {
+        rd.flatten()
+          .map(|e| e.file_name().to_string_lossy().into_owned())
+          .filter(|n| n != "f.txt")
+          .collect()
+      })
+      .unwrap_or_default();
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// The lost-update race, run for real: two edits to one file at once.
+  /// Without the per-path lock both read the same contents and the second
+  /// write erases the first.
+  ///
+  /// Runs inside the scratch directory, not merely pointing at it: `edit_file`
+  /// is path-gated to the workspace, so an absolute temp path comes back as
+  /// `[PATH DENIED]` — inside an `Ok`, which is how the first version of this
+  /// test passed its `is_ok()` check while editing nothing at all.
+  /// The guard is held across the awaits deliberately: the whole point is that
+  /// the process cwd stays put for the duration. Safe because only tests take
+  /// this lock, and the test runtime cannot deadlock on it.
+  #[allow(clippy::await_holding_lock)]
+  #[tokio::test]
+  async fn concurrent_edits_to_one_file_cannot_lose_an_update() {
+    let _guard = crate::testsync::lock();
+    let original = std::env::current_dir().unwrap_or_default();
+    let dir = std::env::temp_dir().join("seekcli-edit-race");
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+      panic!("cannot create scratch: {e}");
+    }
+    if let Err(e) = std::env::set_current_dir(&dir) {
+      panic!("cannot enter scratch: {e}");
+    }
+    let _ = std::fs::write("shared.txt", "alpha\nbeta\n");
+
+    let args_a = serde_json::json!({
+      "path": "shared.txt", "old_text": "alpha", "new_text": "ALPHA"
+    });
+    let args_b = serde_json::json!({
+      "path": "shared.txt", "old_text": "beta", "new_text": "BETA"
+    });
+    let (ra, rb) = tokio::join!(edit_file(&args_a), edit_file(&args_b));
+    let (ra, rb) = (ra.unwrap_or_default(), rb.unwrap_or_default());
+    assert!(!ra.contains("DENIED"), "{ra}");
+    assert!(!rb.contains("DENIED"), "{rb}");
+
+    // Disjoint edits: serialising means BOTH land, because the second still
+    // finds its own `old_text` in the file the first wrote. Interleaved, one
+    // would have been silently erased.
+    let text = std::fs::read_to_string("shared.txt").unwrap_or_default();
+    let _ = std::env::set_current_dir(&original);
+    assert!(text.contains("ALPHA"), "first edit lost: {text:?}");
+    assert!(text.contains("BETA"), "second edit lost: {text:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 
   fn png_bytes() -> Vec<u8> {
     // 1x1 PNG: enough to exercise the magic-byte path without a fixture file.
