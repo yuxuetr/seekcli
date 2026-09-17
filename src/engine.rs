@@ -1830,6 +1830,18 @@ impl App {
             && subagents::registry::lookup(&Self::parse_invoke_agent_args(&tc.function.arguments).0)
               .is_some_and(|t| t.parallel_safe)
         });
+      // Computed here rather than at its branch so all three dispatch
+      // strategies are one `if / else if / else` with one shared tail. See the
+      // tail's comment for why that matters.
+      let parallelizable = tool_calls.len() > 1
+        && tool_calls.iter().all(|tc| {
+          if crate::mcp::is_mcp_tool(&tc.function.name) {
+            self.mcp.is_read_only(&tc.function.name)
+          } else {
+            tools::registry::is_parallel_readonly(&tc.function.name)
+          }
+        });
+
       if all_delegations {
         let plans: Vec<(String, ResolvedDelegation)> = tool_calls
           .iter()
@@ -1913,26 +1925,7 @@ impl App {
           };
           Self::push_tool_response(&mut messages, &mut events, id, text, Vec::new());
         }
-        self.tracer.annotate(
-          exec_span,
-          serde_json::json!({ "had_failure": turn_had_failure, "sub_agents": tool_calls.len() }),
-        );
-        self.tracer.end(exec_span);
-        self.tracer.end(turn_span);
-        eprintln!("{} Returning tool results to model...", "Agent:".cyan());
-        continue;
-      }
-
-      let parallelizable = tool_calls.len() > 1
-        && tool_calls.iter().all(|tc| {
-          if crate::mcp::is_mcp_tool(&tc.function.name) {
-            self.mcp.is_read_only(&tc.function.name)
-          } else {
-            tools::registry::is_parallel_readonly(&tc.function.name)
-          }
-        });
-
-      if parallelizable {
+      } else if parallelizable {
         eprintln!(
           "{} {} read-only tools — running concurrently",
           "Agent:".cyan(),
@@ -2030,6 +2023,21 @@ impl App {
           log_push(&mut messages, &mut events, msg);
         }
       }
+
+      // ---- every turn's collective tail. One exit, deliberately. ----
+      //
+      // The three branches above choose *how* to run this turn's calls;
+      // everything below is owed by all of them equally. It used to be
+      // duplicated: the delegation branch ended in its own `continue`, and so
+      // silently skipped journalling, doom-loop detection, and the Two-Stage
+      // micro trigger — `turn_had_failure` was computed on that path and then
+      // never read. A concurrent batch that failed could not force a planning
+      // pass, and the same batch repeated forever was never detected.
+      //
+      // The fix is structural rather than three more lines in that branch:
+      // with a single exit there is no second place to keep in sync. A
+      // `continue` anywhere in this loop reintroduces the bug, which is what
+      // `the_turn_loop_has_one_exit` exists to catch.
       self.tracer.annotate(
         exec_span,
         serde_json::json!({
@@ -2106,6 +2114,76 @@ impl App {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Isolate `run_agent_loop`'s body from the source text, by brace counting
+  /// from its signature. Returns `None` if the shape it relies on has moved —
+  /// the caller must fail loudly rather than pass on an empty haystack.
+  fn run_agent_loop_body(src: &str) -> Option<&str> {
+    let start = src.find("async fn run_agent_loop(")?;
+    let open = start + src[start..].find(" {\n")? + 2;
+    // `open` already sits past the signature's `{`, so the nesting starts at 1.
+    let mut depth = 1usize;
+    for (i, c) in src[open..].char_indices() {
+      match c {
+        '{' => depth += 1,
+        '}' => {
+          depth -= 1;
+          if depth == 0 {
+            return Some(&src[open..open + i]);
+          }
+        }
+        _ => {}
+      }
+    }
+    None
+  }
+
+  /// Every turn of the agent loop owes the same tail: journal the results,
+  /// feed the doom-loop detector, and set the Two-Stage micro trigger. A
+  /// `continue` skips all three.
+  ///
+  /// This is not hypothetical. The concurrent-delegation branch ended in its
+  /// own `continue`, so for that path `turn_had_failure` was computed and
+  /// never read: a batch of sub-agents that all failed could not force a
+  /// planning pass, and the same batch repeated indefinitely was never
+  /// detected. Nothing failed — the features were simply absent on one branch.
+  ///
+  /// The compiler cannot see this (an early `continue` is perfectly valid) and
+  /// no behaviour test noticed, because each branch looks correct in
+  /// isolation. So the invariant is checked where it lives: in the text.
+  #[test]
+  fn the_turn_loop_has_one_exit() {
+    let src = include_str!("engine.rs");
+    let body = match run_agent_loop_body(src) {
+      Some(b) => b,
+      None => panic!("cannot locate `run_agent_loop` body — update the extractor"),
+    };
+    // Guard the extractor itself: an empty or truncated body would make the
+    // assertion below vacuously true, which is the failure mode this whole
+    // test exists to avoid one level up.
+    assert!(
+      body.contains("let mut turn_had_failure") && body.contains("plan_next = depth == 0"),
+      "extracted body does not look like the turn loop ({} bytes)",
+      body.len()
+    );
+
+    let offenders: Vec<usize> = body
+      .match_indices("continue")
+      .filter(|(i, _)| {
+        body[i + "continue".len()..]
+          .trim_start()
+          .starts_with([';', '\''])
+      })
+      .map(|(i, _)| body[..i].lines().count())
+      .collect();
+    assert!(
+      offenders.is_empty(),
+      "`continue` in run_agent_loop at body line(s) {:?} — it skips the turn's \
+       shared tail (journalling, doom-loop detection, Two-Stage micro trigger). \
+       Restructure as `else if` instead.",
+      offenders
+    );
+  }
 
   /// The whole path, not just the renderer: a real `App` builds the snapshot
   /// from its live registries, and the call goes through `execute_with` so the
