@@ -297,7 +297,10 @@ mod tests {
     assert!(JobState::Exited(0).is_finished());
   }
 
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn a_background_job_does_not_block_and_can_be_collected() {
     // The job registry is process-global; without this, a completion from
@@ -335,7 +338,10 @@ mod tests {
     assert!(out.contains("done"), "state should be reported: {}", out);
   }
 
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn stderr_lands_in_the_same_log_as_stdout() {
     // The job registry is process-global; without this, a completion from
@@ -366,7 +372,10 @@ mod tests {
     assert!(out.contains("out") && out.contains("err"), "got: {}", out);
   }
 
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn a_completion_is_announced_exactly_once() {
     // The job registry is process-global; without this, a completion from

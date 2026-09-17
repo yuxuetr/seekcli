@@ -87,6 +87,23 @@ SeekCLI —— DeepSeek + Tools + Harness Agent 核心，单人维护的本地 C
 > **落地的判据**：新增代码里，删掉之后功能就坏掉的部分，应当是主体。
 > 删掉之后只是「少了一层」的部分，本来就不该写。
 
+### 抑制注解用 `#[expect]`，不用 `#[allow]`
+
+`#[allow]` 会**比它的理由活得久**，而且没有任何东西会报。阶段五十三发现
+`Frontmatter::version` 顶着一条 `#[allow(dead_code)] // exposed via /skill
+info in a later UX pass`——那个 pass 早就由 `harness_inspect` 兑现了，
+字段一直是通的，注解和注释描述的是一个不复存在的状态。
+
+`#[expect(lint, reason = "...")]` 在 lint **不会**触发时自己变成警告，
+于是过期的抑制会自己举手。换过去的当次运行就抓到了第二条：
+`loop_tests.rs` 里一条 `await_holding_lock` 抑制——那个测试的锁由
+`Scratch` 结构体字段持有，clippy 根本看不见，所以它从来没生效过。
+
+`reason` 不是装饰：一条没有理由的抑制，下一个人只能选择相信或者全部重查。
+
+反向验证过：把某处的 guard 提前 drop，对应的 `#[expect]` 立刻报
+`this lint expectation is unfulfilled`。
+
 ### 判据也要被验：可执行的重估条件，本身会写歪
 
 判定「当前版本不做」时，要留下**可执行**的重估条件——一条命令的退出码，

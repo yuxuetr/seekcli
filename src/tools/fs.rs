@@ -333,7 +333,10 @@ mod tests {
   /// The guard is held across the awaits deliberately: the whole point is that
   /// the process cwd stays put for the duration. Safe because only tests take
   /// this lock, and the test runtime cannot deadlock on it.
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn concurrent_edits_to_one_file_cannot_lose_an_update() {
     let _guard = crate::testsync::lock();

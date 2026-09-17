@@ -193,7 +193,10 @@ mod tests {
     assert!(out.render().contains("task"), "{}", out.render());
   }
 
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn restricted_mode_denial_is_reported_to_the_model_not_raised_as_an_error() {
     let _guard = crate::testsync::lock();
@@ -212,7 +215,10 @@ mod tests {
     assert!(out.render().starts_with("[MODE DENIED]"), "got: {}", out);
   }
 
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn malformed_arguments_are_reported_rather_than_coerced() {
     let _guard = crate::testsync::lock();
@@ -227,7 +233,10 @@ mod tests {
     assert!(out.render().starts_with("[BAD ARGS]"), "got: {}", out);
   }
 
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn an_unknown_tool_is_a_failure_not_a_panic() {
     let _guard = crate::testsync::lock();
@@ -239,7 +248,10 @@ mod tests {
   /// The deadline must actually fire. A tool that hangs used to hang the whole
   /// agent: no output, no error, and for an unattended run no way to tell it
   /// apart from slow work.
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test(start_paused = true)]
   async fn a_hanging_tool_hits_its_deadline_instead_of_hanging_the_agent() {
     let _guard = crate::testsync::lock();

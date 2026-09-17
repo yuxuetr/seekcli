@@ -313,14 +313,15 @@ fn quote_if_needed(s: &str) -> String {
 /// of YAML to avoid pulling in a full YAML crate.
 ///
 /// `allowed_tools` is consumed since stage 42: it narrows the effective tool
-/// surface at agent-loop entry. `version` is still parsed for validation only,
-/// awaiting the `/skill info` UX pass.
+/// surface at agent-loop entry. `version` reaches the user through
+/// `harness_inspect` (`tools/inspect.rs`), which is the `/skill info` this
+/// comment used to be waiting for — it carried a `#[allow(dead_code)]` and a
+/// promise of a later UX pass for some time after that pass had happened.
 #[derive(Debug, Clone, Default)]
 pub struct Frontmatter {
   pub name: String,
   pub description: String,
   pub allowed_tools: Option<Vec<String>>,
-  #[allow(dead_code)] // exposed via /skill info in a later UX pass
   pub version: Option<String>,
 }
 

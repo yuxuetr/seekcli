@@ -280,7 +280,6 @@ mod tests {
   /// The assertion is on the *trajectory*, not the prose: the model must reach
   /// for `harness_inspect` and then report the real allowlist. Asserting the
   /// wording would break on any reply the model phrases differently.
-  #[allow(clippy::await_holding_lock)]
   #[tokio::test]
   async fn a_denied_agent_inspects_the_policy_instead_of_guessing() {
     let scratch = Scratch::enter("inspect-after-denial");

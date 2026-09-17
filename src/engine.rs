@@ -2403,7 +2403,10 @@ mod tests {
   /// The guard is held across the awaits on purpose: the snapshot describes the
   /// policy mode, so it must not change under the call. Safe because only tests
   /// take this lock and the test runtime cannot deadlock on it.
-  #[allow(clippy::await_holding_lock)]
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn harness_inspect_runs_through_the_one_guarded_path() {
     let _guard = crate::testsync::lock();
