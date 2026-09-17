@@ -152,6 +152,9 @@ struct App {
   /// When on, the agent is instructed to externalize long-task state to
   /// PLAN.md / TODO.md in the workspace. Toggled with `/plan`.
   plan_mode: bool,
+  /// Deliberate before the first tool of every chat turn (Two-Stage macro
+  /// trigger). Seeded from `[planning] on_open`, toggled by `/deliberate`.
+  plan_on_open: bool,
   current_skill: Option<Skill>,
   last_code_blocks: Vec<String>,
   /// Token/cost accounting for the current session (decorator-style). Reset on
@@ -204,6 +207,8 @@ impl App {
       eprintln!("{}", notice.yellow());
     }
     let config = loaded.config;
+    // Read before `config` is moved into `Self` below.
+    let plan_on_open = config.planning.on_open;
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
     observability::cost::set_rates(observability::cost::Rates {
@@ -256,6 +261,7 @@ impl App {
       thinking_mode: ThinkingMode::None,
       max_iter: agent::MAX_ITER,
       plan_mode: false,
+      plan_on_open,
       current_skill: None,
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
@@ -289,6 +295,7 @@ impl App {
     let current_session = history.create_session(model.clone());
     let memory_budget = agent::compressor::Budget::from_config(&config.memory);
     let max_llm_calls = config.limits.max_llm_calls_per_run;
+    let plan_on_open = config.planning.on_open;
     Ok(Self {
       brain,
       config,
@@ -299,6 +306,7 @@ impl App {
       thinking_mode: ThinkingMode::None,
       max_iter: agent::MAX_ITER,
       plan_mode: false,
+      plan_on_open,
       current_skill: None,
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
@@ -343,11 +351,15 @@ impl App {
         .map(|s| format!("|{}", s.name))
         .unwrap_or_default();
       let plan_label = if self.plan_mode { "|plan" } else { "" };
+      // Shown because it changes what every turn costs; an invisible extra
+      // model call per turn is the kind of setting people forget is on.
+      let deliberate_label = if self.plan_on_open { "|deliberate" } else { "" };
       let prompt = format!(
-        "{} ({}{}{}) {} ",
+        "{} ({}{}{}{}) {} ",
         self.model.blue(),
         self.thinking_mode.label().magenta(),
         plan_label.cyan(),
+        deliberate_label.cyan(),
         skill_label.yellow(),
         "❯".green()
       );

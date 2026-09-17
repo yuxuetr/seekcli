@@ -14,7 +14,7 @@ Harness 还有 Two-Stage、Reminders、Recovery、并发编排、迭代上限。
 | 机制 | 位置 | 说明 |
 | --- | --- | --- |
 | ReAct 主循环 | `engine.rs::run_agent_loop` | `for iter in 0..max_iter` |
-| Two-Stage ReAct | `engine.rs::planning_phase` | 宏触发（首轮 + thinking 开）/ 微触发（上轮工具失败） |
+| Two-Stage ReAct | `engine.rs::planning_phase`，触发条件在 `should_plan` | 宏触发（首轮 + `[planning] on_open` / `/deliberate`，默认关）/ 微触发（上轮工具失败，不可关） |
 | 规划轮护栏 | `append_plan_with_bridge` / `planning_only_directive` / `strip_fake_tool_syntax` | 阶段十九根因修复 |
 | System Reminders | `agent/reminders.rs` | 连续 3 次相同轨迹注入 user 消息打断 |
 | Error Recovery | `agent/recovery.rs` | 按工具 + 错误类型追加 `[Recovery]` 建议 |

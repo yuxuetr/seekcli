@@ -64,6 +64,9 @@ pub struct Config {
   /// Ceiling on what one run may spend.
   #[serde(default)]
   pub limits: LimitsConfig,
+  /// When the Two-Stage deliberation pass runs.
+  #[serde(default)]
+  pub planning: PlanningConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -376,6 +379,32 @@ impl Default for LimitsConfig {
   }
 }
 
+/// When the tools-free deliberation pass runs.
+///
+/// It had no switch of its own: the macro trigger read `thinking_mode`, so
+/// "show me the reasoning" and "deliberate before acting" were the same knob —
+/// and since thinking defaults to `None`, the macro trigger could not fire at
+/// all out of the box. Two behaviours on one control, one of them unreachable.
+///
+/// The micro trigger (plan after a failed turn) is not configurable and is not
+/// meant to be: it fires on observed evidence, and turning that off is asking
+/// the loop to repeat a failure it already saw.
+/// `deny_unknown_fields` here and not elsewhere is deliberate: this section
+/// has exactly one field, so a typo in it cannot be noticed any other way —
+/// the value would simply default to `false` and the feature would be silently
+/// off, which is the failure this whole section exists to end.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningConfig {
+  /// Deliberate once at the start of every chat turn, before the first tool.
+  ///
+  /// Off by default because it costs one model call per turn, and most turns
+  /// of a daily-driver CLI do not need it. `/deliberate on` turns it on for
+  /// the task in front of you.
+  #[serde(default)]
+  pub on_open: bool,
+}
+
 /// The backend behind `web_search` / `web_fetch`.
 ///
 /// Absent or `provider = "none"` means the two tools are not registered at
@@ -505,6 +534,7 @@ impl Default for Config {
       memory: MemoryConfig::default(),
       research: ResearchConfig::default(),
       limits: LimitsConfig::default(),
+      planning: PlanningConfig::default(),
     }
   }
 }
@@ -760,7 +790,14 @@ fn write_default_config(path: &Path) -> Result<()> {
      # bounds the product, and one turn may emit any number of tool calls.\n\
      # Counting model calls closes all of them at once.\n\
      [limits]\n\
-     max_llm_calls_per_run = {max_calls}\n",
+     max_llm_calls_per_run = {max_calls}\n\
+     \n\
+     # Deliberate once before acting, with tools withheld, at the start of\n\
+     # every chat turn. Costs one model call per turn, so it is off by\n\
+     # default; `/deliberate on` enables it for the task in front of you.\n\
+     # Planning after a *failed* turn always happens and is not configurable.\n\
+     [planning]\n\
+     on_open = {plan_on_open}\n",
     project = PROJECT_CONFIG_FILE,
     env = CONFIG_ENV,
     provider = d.brain.provider,
@@ -777,6 +814,7 @@ fn write_default_config(path: &Path) -> Result<()> {
     research_provider = d.research.provider,
     max_results = d.research.max_results,
     max_calls = d.limits.max_llm_calls_per_run,
+    plan_on_open = d.planning.on_open,
   );
   fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }
@@ -807,6 +845,30 @@ mod tests {
       let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(path, body);
+  }
+
+  /// A misspelled key in `[planning]` must be an error, not a silent `false`.
+  ///
+  /// This section has one field, so there is no other way to notice: the
+  /// feature would simply stay off and the config file would look like it was
+  /// on. That is why `deny_unknown_fields` is here and nowhere else.
+  #[test]
+  fn a_typo_in_the_planning_section_is_refused() {
+    let good: Config = match toml::from_str(
+      "[brain]\nprovider = \"openai\"\nflash_model = \"f\"\npro_model = \"p\"\n[planning]\non_open = true\n",
+    ) {
+      Ok(c) => c,
+      Err(e) => panic!("valid config rejected: {e}"),
+    };
+    assert!(good.planning.on_open, "on_open = true must be read");
+
+    let typo = toml::from_str::<Config>(
+      "[brain]\nprovider = \"openai\"\nflash_model = \"f\"\npro_model = \"p\"\n[planning]\non_opne = true\n",
+    );
+    assert!(
+      typo.is_err(),
+      "a misspelled key silently left deliberation off"
+    );
   }
 
   /// The generated template must parse back into the very defaults it was

@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 
 use crate::api::{self, Message, StreamItem};
 use crate::session::{EventPayload, PromptKind};
-use crate::{App, Skill, ThinkingMode, agent, subagents, tools, ui};
+use crate::{App, Skill, agent, subagents, tools, ui};
 
 /// How a loop run ended. Distinguished because a caller needs to act on the
 /// difference: an unattended `-p` run must exit non-zero when the agent ran
@@ -906,6 +906,24 @@ impl App {
   }
 }
 
+/// Whether this iteration should open with a tools-free deliberation pass.
+///
+/// Two triggers, and the difference between them is the point:
+///
+/// * **macro** — speculative, so it is opt-in (`[planning] on_open`,
+///   `/deliberate`) and only at the top of a turn. It used to read
+///   `thinking_mode` instead, which made "show me the reasoning" silently also
+///   mean "deliberate first"; and since thinking defaults to `None`, it could
+///   not fire at all with a default config. One knob, two behaviours, one of
+///   them unreachable.
+/// * **micro** — evidence-based: the previous iteration had a tool failure. It
+///   has no switch and is not restricted to `iter == 0`, because a failure can
+///   happen at any depth into a task and "plan before retrying" is exactly the
+///   response to it.
+fn should_plan(iter: usize, plan_on_open: bool, previous_turn_failed: bool) -> bool {
+  (iter == 0 && plan_on_open) || previous_turn_failed
+}
+
 /// Whether this loop level should stop for a user interrupt.
 ///
 /// Every depth *observes* the flag, but only the top level *consumes* it. A
@@ -1667,23 +1685,20 @@ impl App {
       }
 
       // Two-Stage ReAct (dynamic): before acting, run a tools-free planning
-      // pass when (a) opening a task with thinking enabled — macro trigger,
-      // or (b) the previous turn hit a tool failure — micro trigger.
+      // pass when `should_plan` says so — see it for the two triggers and why
+      // only one of them has a switch.
       // Withholding tool schemas forces the model to deliberate instead of
       // reflexively calling a tool. Main agent only.
-      if depth == 0 {
-        let macro_trigger = iter == 0 && self.thinking_mode != ThinkingMode::None;
-        if macro_trigger || plan_next {
-          let pspan = self.tracer.begin("planning", "two-stage", turn_span);
-          if let Err(e) = self.planning_phase(&mut messages, &mut events).await {
-            eprintln!(
-              "{} planning phase failed: {} (continuing)",
-              "[Plan]".yellow(),
-              e
-            );
-          }
-          self.tracer.end(pspan);
+      if depth == 0 && should_plan(iter, self.plan_on_open, plan_next) {
+        let pspan = self.tracer.begin("planning", "two-stage", turn_span);
+        if let Err(e) = self.planning_phase(&mut messages, &mut events).await {
+          eprintln!(
+            "{} planning phase failed: {} (continuing)",
+            "[Plan]".yellow(),
+            e
+          );
         }
+        self.tracer.end(pspan);
       }
 
       // The one ceiling that bounds a whole run rather than one dimension of
@@ -2142,6 +2157,20 @@ impl App {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn deliberation_triggers_are_independent() {
+    // Macro: opt-in, and only at the top of a turn. Mid-turn deliberation on a
+    // healthy trajectory is cost with no signal behind it.
+    assert!(should_plan(0, true, false));
+    assert!(!should_plan(1, true, false));
+    assert!(!should_plan(0, false, false));
+
+    // Micro: fires on observed failure at any iteration, switch or no switch.
+    assert!(should_plan(0, false, true));
+    assert!(should_plan(7, false, true));
+    assert!(should_plan(7, true, true));
+  }
 
   /// Isolate `run_agent_loop`'s body from the source text, by brace counting
   /// from its signature. Returns `None` if the shape it relies on has moved —

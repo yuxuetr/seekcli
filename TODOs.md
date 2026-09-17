@@ -1472,8 +1472,37 @@ Two-Stage 的计划与 bridge 是用 `messages.push` 直接进数组的，不走
 
 反向验证：把 events 换成丢弃用的 `&mut Vec::new()` → 两条断言都红；恢复 → 绿。
 
-实跑（`/thinking h` 触发宏触发）：事件日志里出现 `AssistantMessage`（计划正文）
+实跑（当时用 `/thinking h` 触发宏触发；该耦合已于本阶段解除）：事件日志里出现 `AssistantMessage`（计划正文）
 与 `UserMessage`（`[System] Proceed: …`），此前这两条不存在。
+
+##### ✅ 2026-09-17 修正（阶段五十三）—— 规划的宏触发拿到了自己的开关
+
+宏触发的条件是 `iter == 0 && thinking_mode != None`，而 `thinking_mode`
+默认 `None` 且**没有配置项**（只能 `/thinking` 手动开）。两个后果：
+
+1. **默认配置下宏触发根本不会发生**——L1 文档把它写成常规路径，实际不可达。
+2. **两件事绑在一个旋钮上**：`/thinking` 的本意是「我想看推理过程」，
+   顺带决定了「开局要不要先想」。想要后者而不想要前者的人没有办法。
+
+现在条件提成 `should_plan(iter, plan_on_open, previous_turn_failed)`，
+两个触发器的性质写在它的文档注释里：
+
+| 触发 | 性质 | 开关 |
+| --- | --- | --- |
+| 宏 | **推测性**——赌这个任务值得先想 | `[planning] on_open` / `/deliberate`，**默认关** |
+| 微 | **证据性**——上一轮真的失败了 | 无，也不该有 |
+
+默认关的理由是可量化的：它给**每个**对话轮次加一次模型调用。实测一个数文件
+的简单问题从 2 次调用变 3 次。日常问答占多数的 CLI 不该默认付这笔钱。
+
+`[planning]` 是全项目唯一标了 `deny_unknown_fields` 的 section，因为它只有
+一个字段——拼错了没有任何别的途径能发现，值会默默回落到 `false`，而配置文件
+看起来是开着的。有单测钉着这条。
+
+提示符显示 `|deliberate`：一个每轮多花一次调用的开关，不该是隐形的。
+
+反向验证：把条件改成不看 `iter` → `deliberation_triggers_are_independent` 红。
+实跑：`/thinking h` 单独不再触发规划（0 次）；`/deliberate on` 触发。
 
 #### 48.3 共享预算 —— **要做，但形状与原定不同**
 

@@ -49,6 +49,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     help: "Toggle Plan Mode (externalize state to PLAN.md/TODO.md)",
   },
   SlashCommand {
+    usage: "/deliberate [on|off]",
+    help: "Toggle the tools-free planning pass before each task",
+  },
+  SlashCommand {
     usage: "/readonly [on|off]",
     help: "Toggle read-only mode (refuse all mutating tools)",
   },
@@ -466,6 +470,24 @@ impl App {
           };
         }
         println!("Thinking: {:?}", self.thinking_mode);
+      }
+      // Two-Stage macro trigger. Separate from `/plan` on purpose: Plan Mode
+      // is about externalizing state to PLAN.md, this is about spending one
+      // model call to think before the first tool.
+      "/deliberate" => {
+        self.plan_on_open = match parts.get(1).copied() {
+          Some("on") => true,
+          Some("off") => false,
+          _ => !self.plan_on_open,
+        };
+        println!(
+          "Deliberate before acting: {}",
+          if self.plan_on_open {
+            "on (one extra model call per turn)".green()
+          } else {
+            "off".yellow()
+          }
+        );
       }
       "/plan" => {
         // Optional explicit on/off, else toggle.
