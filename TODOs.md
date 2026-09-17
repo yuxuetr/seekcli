@@ -1408,7 +1408,7 @@ skill + shell 脚本这条路可用，照抄即可，不该占代码排期。
 子代理；最复杂的那次（金融检索，6 轮）它选择的是 4 个并行 `web_fetch`，
 而那条路**已经是并行的**。三个子代理是我明确命令它这么干才发生的。
 
-**重估的确切条件**：在真实使用（不是命令它）中观察到模型一轮内发出 ≥2 个
+**重估的确切条件**（✅ 已于阶段五十三达成，见下）：在真实使用（不是命令它）中观察到模型一轮内发出 ≥2 个
 `invoke_agent`。
 
 ##### ✅ 2026-09-17 已落地（阶段五十二）—— 上面那条「不做」被推翻了
@@ -1544,6 +1544,50 @@ Two-Stage 的计划与 bridge 是用 `messages.push` 直接进数组的，不走
 > arguments 都是空。`$TOOL_NAME` 在源码、文档、skill 里都不存在。harness
 > 的处理是对的——回了 `Unknown tool` 与 `Missing 'path' argument` 两条错误，
 > 模型随后恢复了。不是缺陷。
+
+##### ✅ 2026-09-17 修正（阶段五十三）—— 并发扇出以前没人告诉模型
+
+**并行扇出做完了，却从未在任何模型可见的文字里出现过。** `prompt.rs` 与
+`invoke_agent` 的工具描述里，concurrency 相关零命中——模型没有任何渠道
+知道「一轮里发两个 `invoke_agent` 会同时跑」。
+
+这也解释了 48.2 里那句「模型从未**自发**扇出多个子代理」：它不是不想，
+是不知道这件事存在。
+
+顺带订正一处过期理由。提示原先写的是
+`invoke_agent("explore", ...) (avoids context bloat)`——**offload 落地后这个
+理由已经不是主要的了**。测量（剥离后 70 个会话）：单次工具结果超过 8KB 就
+卸载到临时文件、只回约 3KB 的头尾预览，实测触发 8 次；进过主上下文的工具
+输出最大 16.8KB，P90 只有 3.6KB，压缩只触发过一次而那是专门的压缩测试。
+**上下文膨胀已经在工具层解决了**，委派今天真正的价值是「多步自治」与「并发」。
+
+新的说法把两件事都讲明白：
+
+```
+- For a subtask that needs its own multi-step investigation -> invoke_agent …
+  You get back only its summary, so its intermediate reading never enters
+  your context.
+- Several invoke_agent calls in ONE reply run AT THE SAME TIME. Put independent
+  subtasks in one reply; a subtask that needs another's result goes in a later
+  reply, where you will have that result to write its prompt with.
+```
+
+第二条同时表达了**依赖关系怎么写**——这正是「串行还是并行由谁编排」的答案：
+由模型在写这一轮的时候决定，而它现在知道规则了。
+
+**A/B 实测**（同样的问题、同样的模型与参数，只换提示）：
+
+| 问题 | 提示 | 结果 |
+| --- | --- | --- |
+| 「审批怎么实现 + 会话怎么存盘」 | 新 | **并发扇出 2 个** |
+| 同上 | 旧 | 完全没委派 |
+| 「策略门怎么实现 + 成本怎么统计」×2 | 新 | 1 次并发扇出 |
+| 同上 ×2 | 旧 | 0、0 |
+
+旧提示 0/3，新提示 2/3。不是确定性的，但方向明确。
+
+**48.2 记的重估条件（「在真实使用中观察到模型一轮内发出 ≥2 个 `invoke_agent`」）
+到此达成**——虽然是先补齐了实现、再补齐了告知，才让它有机会发生。
 
 #### 48.3 共享预算 —— **要做，但形状与原定不同**
 

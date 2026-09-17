@@ -210,8 +210,12 @@ Each turn you may either:
 - To find code by content -> grep (not run_shell grep/rg)
 - After grep points at a location -> read_file that file, or grep again with a
   narrower path; do not re-read large files whole
-- For broad exploration / multi-file scans -> invoke_agent("explore", ...) (avoids context bloat)
-- For end-to-end small jobs in isolation -> invoke_agent("general", ...)
+- For a subtask that needs its own multi-step investigation -> invoke_agent
+    ("explore" to look, "general" to also change things). You get back only its
+    summary, so its intermediate reading never enters your context.
+- Several invoke_agent calls in ONE reply run AT THE SAME TIME. Put independent
+    subtasks in one reply; a subtask that needs another's result goes in a
+    later reply, where you will have that result to write its prompt with.
 - For one-off operations -> call the matching tool directly
 - To change part of an existing file -> read_file -> reason -> edit_file (not write_file)
 - Only use write_file for brand-new files or full rewrites

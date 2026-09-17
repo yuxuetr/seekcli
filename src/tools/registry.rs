@@ -234,7 +234,10 @@ pub fn system_tools() -> Vec<Tool> {
          Fastest and safest. Use for code search, repo understanding, locating things.\n\
        - general: full read/write/shell focused subtask. Use when the sub-agent \
          needs to make small edits or run commands end-to-end.\n\
-       Returns only a summary, not the full trace. Maximum nesting depth is 3.",
+       Returns only a summary, not the full trace.\n\
+       Several invoke_agent calls in ONE reply are run concurrently, so batch \
+       independent subtasks together. A subtask that depends on another's \
+       findings must wait for a later reply instead.",
       json!({
         "type": "object",
         "properties": {
