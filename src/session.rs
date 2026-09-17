@@ -125,6 +125,26 @@ pub enum EventPayload {
     blob: Option<String>,
   },
   Usage(UsageInfo),
+  /// The user marked what just happened as wrong.
+  ///
+  /// The roadmap's 阶段零 is "a week of real use, producing a failure list",
+  /// and every B-class phase downstream is calibrated by that list — but there
+  /// was no way to record one. Asking someone to remember which answers were
+  /// bad for a week is asking for a list that will not exist.
+  ///
+  /// Recorded as an event rather than appended to a separate file because the
+  /// note is worth little without the trajectory that earned it: the session
+  /// it sits in replays the whole turn, and `/trace` shows what the loop did.
+  ///
+  /// Bookkeeping: deliberately produces **no message** in the projection. A
+  /// complaint is about the run, not a turn in the conversation, and
+  /// re-injecting it would have the model answer the complaint on resume.
+  MarkedBad {
+    /// Why, in the user's words. Empty is allowed — the trajectory is often
+    /// the whole point, and demanding a reason is friction at the exact moment
+    /// friction loses the datum.
+    note: String,
+  },
   Interrupted,
 }
 
@@ -462,6 +482,9 @@ pub fn derive_messages(events: &[SessionEvent]) -> Vec<Message> {
       | EventPayload::Interrupted
       | EventPayload::ContextInjected { .. }
       | EventPayload::ChildRun { .. }
+      // A complaint is about the run, not a turn in it. Re-projecting it would
+      // have the model answer the complaint on resume instead of the task.
+      | EventPayload::MarkedBad { .. }
       | EventPayload::Compaction { .. } => {}
     }
     index += 1;
@@ -636,6 +659,43 @@ pub fn from_jsonl(text: &str) -> Vec<SessionEvent> {
 
 #[cfg(test)]
 mod tests {
+
+  /// A complaint is about the run, not a turn in it. Re-projecting it would
+  /// have the model answer the complaint instead of the task on the next turn
+  /// and on every `/resume` after — the exact failure `ContextInjected` was
+  /// given bookkeeping-only treatment to avoid.
+  #[test]
+  fn a_marked_failure_never_re_enters_the_conversation() {
+    let mut session = Session::new("t".into(), "m".into());
+    session.record(EventPayload::UserMessage {
+      images: Vec::new(),
+      content: "写个函数".to_string(),
+    });
+    session.record(EventPayload::AssistantMessage {
+      content: "好的".to_string(),
+      reasoning: None,
+      tool_calls: Vec::new(),
+    });
+    let before = session.messages().len();
+    session.record(EventPayload::MarkedBad {
+      note: "写错了".to_string(),
+    });
+
+    assert_eq!(
+      session.messages().len(),
+      before,
+      "the mark must not become a message the model answers"
+    );
+    // But it must still be *in the log*, or the failure list has nothing to
+    // read: invisible to the model and durable on disk are both required.
+    assert!(
+      session
+        .events
+        .iter()
+        .any(|e| matches!(&e.payload, EventPayload::MarkedBad { note } if note == "写错了")),
+      "the mark must survive in the event log"
+    );
+  }
 
   /// Against the RFC 4648 vectors, including both padding lengths. A
   /// hand-written encoder with no test is how a subtly wrong data URI ships.

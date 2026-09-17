@@ -229,6 +229,7 @@ benchmark 3/3 PASS，长对话压缩 + trace 正常。
 | `/readonly [on\|off]`   | 只读模式，拒绝一切写工具          |
 | `/tools`                | 列出当前生效的工具（含 MCP 来源） |
 | `/trace [run-id]`       | 看上一次运行的决策树（含子代理内部） |
+| `/bad [why]`            | 标记「刚才这个不对」，进失败清单       |
 | `/paste [caption]`      | 读剪贴板图片；**Ctrl+V 就是它的快捷键** |
 | `/propose`              | 列出待审提案                      |
 | `/help`                 | 命令清单                          |
@@ -289,6 +290,7 @@ keep = 200       # 超出后删最旧的；0 = 全留
 seekcli --bench examples/benchmarks/basic.json  # Fail-to-Pass 跑分报表
 python3 scripts/delegation-health.py            # 委派怎么结束的、prompt 是否自包含
 python3 scripts/tool-batch-shapes.py            # 一轮里的工具批次形状
+python3 scripts/failure-list.py                 # 你用 /bad 标过的失败，含复现命令
 ```
 
 每轮对话结束打印 `[Cost]` 账单（token + cache 命中率 + ¥ 估算），并随 session 持久化。

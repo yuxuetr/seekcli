@@ -49,6 +49,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     help: "Toggle Plan Mode (externalize state to PLAN.md/TODO.md)",
   },
   SlashCommand {
+    usage: "/bad [why]",
+    help: "Mark what just happened as wrong (feeds the failure list)",
+  },
+  SlashCommand {
     usage: "/trace [run-id]",
     help: "Show the decision tree of the last run (needs SEEKCLI_TRACE=1)",
   },
@@ -474,6 +478,30 @@ impl App {
           };
         }
         println!("Thinking: {:?}", self.thinking_mode);
+      }
+      // Deliberately the shortest thing to type. The moment you notice a bad
+      // answer is the moment any extra step loses the datum — the same reason
+      // pasting an image is one keystroke. A reason is optional for that
+      // reason; the trajectory it points at is often the whole record.
+      "/bad" => {
+        let note = line
+          .split_once(' ')
+          .map(|(_, rest)| rest.trim().to_string())
+          .unwrap_or_default();
+        self
+          .current_session
+          .record(crate::session::EventPayload::MarkedBad { note: note.clone() });
+        // Persisted now, not at the end of the turn: a complaint recorded only
+        // in memory is lost by the crash or the Ctrl-C that often prompts it.
+        match self.history.save_session(&mut self.current_session) {
+          Ok(_) => println!(
+            "{} recorded against session {}. Collect them with {}",
+            "Noted:".green(),
+            &self.current_session.id()[..8],
+            "python3 scripts/failure-list.py".cyan()
+          ),
+          Err(e) => println!("{} could not save the mark: {}", "Warn:".yellow(), e),
+        }
       }
       // Reads the written trace rather than `self.tracer`, which `start_run`
       // clears at the top of every chat turn — by the time anyone asks, the

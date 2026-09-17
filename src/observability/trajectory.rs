@@ -127,6 +127,9 @@ fn steps_of(prompt: &str, events: &[EventPayload]) -> Vec<Step> {
       | EventPayload::Usage(_)
       | EventPayload::ContextInjected { .. }
       | EventPayload::ChildRun { .. }
+      // The verdict on a trajectory is not a step in it. It belongs to the
+      // failure list (`scripts/failure-list.py`), which reads the raw log.
+      | EventPayload::MarkedBad { .. }
       | EventPayload::Interrupted => {}
       EventPayload::AssistantMessage {
         content,
