@@ -15,6 +15,19 @@ pub struct SubAgentTemplate {
   pub system_prompt: &'static str,
   pub allowed_tools: &'static [&'static str],
   pub max_iter: usize,
+  /// Whether several of these may run at the same time.
+  ///
+  /// The line is what the template is *for*: `general` exists to change things,
+  /// so two of them editing the same file is a likely outcome rather than a
+  /// remote one — and `edit_file` is read-modify-write, so interleaving them
+  /// corrupts rather than conflicts. `explore` exists to look.
+  ///
+  /// **Declared, not derived, and the gap is worth naming**: `explore` carries
+  /// `run_shell`, which can write. Its contract and its system prompt both say
+  /// it must not, and `--read-only` enforces it, but in normal mode the harness
+  /// does not. So this flag says "intended for concurrent use", which is a
+  /// weaker claim than "cannot possibly conflict".
+  pub parallel_safe: bool,
 }
 
 const EXPLORE: SubAgentTemplate = SubAgentTemplate {
@@ -38,6 +51,7 @@ Rules:
 ",
   allowed_tools: &["read_file", "list_dir", "glob", "grep", "run_shell"],
   max_iter: 15,
+  parallel_safe: true,
 };
 
 const GENERAL: SubAgentTemplate = SubAgentTemplate {
@@ -71,6 +85,9 @@ Rules:
     "run_shell",
   ],
   max_iter: 20,
+  // Two of these editing the same file is what this template is for, not an
+  // edge case.
+  parallel_safe: false,
 };
 
 pub static SUBAGENTS: &[SubAgentTemplate] = &[EXPLORE, GENERAL];
@@ -89,6 +106,31 @@ pub fn catalog() -> Vec<(&'static str, &'static str)> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The rule that keeps concurrent delegations from corrupting a file: a
+  /// template that exists to write must not be fanned out. `edit_file` is
+  /// read-modify-write, so two of them on one path interleave rather than
+  /// merely conflict.
+  #[test]
+  fn only_the_read_only_template_is_parallel_safe() {
+    for t in SUBAGENTS {
+      let writes = t
+        .allowed_tools
+        .iter()
+        .any(|tool| matches!(*tool, "write_file" | "edit_file"));
+      assert!(
+        !(writes && t.parallel_safe),
+        "`{}` can write and must not be marked parallel_safe",
+        t.name
+      );
+    }
+    // And the read-only one must actually be marked, or the feature is dead
+    // code that silently never triggers.
+    assert!(
+      SUBAGENTS.iter().any(|t| t.parallel_safe),
+      "no template is parallel_safe — fan-out can never happen"
+    );
+  }
 
   #[test]
   fn explore_excludes_write() {

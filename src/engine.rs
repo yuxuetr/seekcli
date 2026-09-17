@@ -1820,10 +1820,16 @@ impl App {
       // It works because `run_sub_agent` takes `&self`: each child keeps its
       // own books and the parent absorbs them below, so nothing needs a shared
       // `&mut App`.
+      // Every call a delegation, and every delegation to a template meant for
+      // concurrent use. The second half is not optional: `general` exists to
+      // change things, and `edit_file` is read-modify-write, so two of them on
+      // one file interleave into corruption rather than merely conflicting.
       let all_delegations = tool_calls.len() > 1
-        && tool_calls
-          .iter()
-          .all(|tc| tc.function.name == "invoke_agent");
+        && tool_calls.iter().all(|tc| {
+          tc.function.name == "invoke_agent"
+            && subagents::registry::lookup(&Self::parse_invoke_agent_args(&tc.function.arguments).0)
+              .is_some_and(|t| t.parallel_safe)
+        });
       if all_delegations {
         let plans: Vec<(String, ResolvedDelegation)> = tool_calls
           .iter()
