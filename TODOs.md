@@ -1504,6 +1504,47 @@ Two-Stage 的计划与 bridge 是用 `messages.push` 直接进数组的，不走
 反向验证：把条件改成不看 `iter` → `deliberation_triggers_are_independent` 红。
 实跑：`/thinking h` 单独不再触发规划（0 次）；`/deliberate on` 触发。
 
+##### ❌ 2026-09-17 不做（阶段五十三）—— 混合工具批次分组并发
+
+一轮里的工具调用只有**全部**合格才并发（全只读，或全是可扇出的委派），
+否则整轮串行。所以 `[explore, explore, grep]` 会因为一个 `grep` 退回全串行。
+这是真实的代码性质，我一度把它列为待修。
+
+**做之前先测量，结论是收益为零。** `scripts/tool-batch-shapes.py` 扫了
+114 个真实会话、39 个多调用回合：
+
+| 形状 | 数量 | 今天的处理 |
+| --- | --- | --- |
+| 全只读 | 15 | 已并发 |
+| 无可并发项（`write_file`×2、`run_shell`×2） | 14 | 串行，且本就该串行 |
+| 全委派 | 5 | 已并发 |
+| **混合** | **5** | 串行 |
+
+关键在那 5 个混合批次的形状：
+
+```
+['load_skill', 'list_dir']      最长可并发段 = 1
+['load_skill', 'read_file']     最长可并发段 = 1
+['list_dir', 'run_shell']       最长可并发段 = 1
+['list_dir', 'run_shell']       最长可并发段 = 1
+['$TOOL_NAME', 'read_file']     最长可并发段 = 1
+```
+
+**分组方案只有在一段里有 ≥2 个可并发调用时才省时间——一个调用没有同伴可并。**
+全部五个都是 1。分组在已观察到的每一个案例上收益都是零。
+
+我当初的判断来自 `[explore, explore, grep]` 这个假想形状，而模型并不产出它。
+**代码性质真实存在 ≠ 它造成过损失。**
+
+**重估条件是可执行的**：`python3 scripts/tool-batch-shapes.py` 退出码非零，
+即出现了含 ≥2 个相邻可并发调用的混合批次。脚本的失败路径反向验证过
+（喂 `['grep','read_file','run_shell']` → 退出 1 并指出最长段=2）。
+
+> 顺带：`['$TOOL_NAME', 'read_file']` 是模型自己编的工具名，两个调用的
+> arguments 都是空。`$TOOL_NAME` 在源码、文档、skill 里都不存在。harness
+> 的处理是对的——回了 `Unknown tool` 与 `Missing 'path' argument` 两条错误，
+> 模型随后恢复了。不是缺陷。
+
 #### 48.3 共享预算 —— **要做，但形状与原定不同**
 
 **测量推翻了原定描述。** 路线图写的是「子代理从父运行继承预算，而不是每启动一个
@@ -1682,6 +1723,7 @@ Two-Stage 的计划与 bridge 是用 `messages.push` 直接进数组的，不走
 | L2-6 | 持久 PTY / `terminal_*` 工具族 | `run_shell` + 后台 job 覆盖 90% 场景 |
 | L2-8 | `todo_write` 工具 | PLAN.md / TODO.md 文件约定已覆盖，且天然跨压缩持久 |
 | — | Code Mode（`run_code`） | 收益在超大工具面时才显现 |
+| — | 混合工具批次分组并发 | **测量过收益为零**，见下方专条 |
 | L5-5 | workflow / DAG 编排 | 是另一个产品 |
 | — | 跨会话语义记忆 | 与 CLI 即时性目标背离 |
 | L5-3 | 插件框架 / profile / bundle | 扩展需求由 MCP 承担 |
