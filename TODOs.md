@@ -1536,9 +1536,34 @@ Two-Stage 的计划与 bridge 是用 `messages.push` 直接进数组的，不走
 我当初的判断来自 `[explore, explore, grep]` 这个假想形状，而模型并不产出它。
 **代码性质真实存在 ≠ 它造成过损失。**
 
-**重估条件是可执行的**：`python3 scripts/tool-batch-shapes.py` 退出码非零，
-即出现了含 ≥2 个相邻可并发调用的混合批次。脚本的失败路径反向验证过
-（喂 `['grep','read_file','run_shell']` → 退出 1 并指出最长段=2）。
+**重估条件是可执行的**：`python3 scripts/tool-batch-shapes.py` 退出码非零。
+
+> **同日订正：第一版的条件是错的，而且错在两个方向。**
+>
+> 它写完当天就红了，触发它的是 A/B 实验对照组里的 `[grep, grep, run_shell]`。
+> 追下去发现两件事：
+>
+> 1. **它数的是机会，不是收益。** 实测两个并发 `grep` 的整个 `execute` span
+>    是 **19ms**，而同一轮的模型调用是 **999ms**。把本地文件工具分组能省的是
+>    个位数毫秒——真实存在，且一文不值。
+> 2. **`invoke_agent` 根本不在它的集合里。** 于是 `[invoke_agent,
+>    invoke_agent, run_shell]`——唯一真正值几秒钟的那种形状——它**结构上就
+>    数不到**。
+>
+> 现在的判据是**时间**而不是**次数**：只有「≥2 个相邻的**慢**可并发调用被
+> 卡在混合批次里」才算（慢 = `explore` 委派、`web_search`、`web_fetch`；本地
+> 读算 `fast`，不打断连续段但也不独立构成理由）。同时排除了剥离日之前的会话
+> （那时 `read_file` 还有 `offset` 参数、还有一个 50KB 截断，都是已经不存在
+> 的代码），并按日期打印分布——某一天的数量远超其他天，通常是测试而不是使用。
+>
+> 四种形状反向验证过：
+>
+> | 批次 | 判定 | 理由 |
+> | --- | --- | --- |
+> | `[grep, grep, run_shell]` | 绿 | 值 ~10ms |
+> | `[explore, explore, run_shell]` | **红** | 值几秒 |
+> | `[general, general, run_shell]` | 绿 | `general` 本就不许扇出，分组也救不了 |
+> | `[explore, grep, explore, run_shell]` | **红** | 中间的快调用不打断连续段 |
 
 > 顺带：`['$TOOL_NAME', 'read_file']` 是模型自己编的工具名，两个调用的
 > arguments 都是空。`$TOOL_NAME` 在源码、文档、skill 里都不存在。harness

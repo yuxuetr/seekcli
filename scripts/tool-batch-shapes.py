@@ -3,19 +3,24 @@
 
 The agent loop runs a turn's tool calls concurrently only when *every* call
 qualifies (all read-only, or all fan-out-safe delegations); otherwise the whole
-turn is sequential. A batch that mixes them therefore loses the concurrency its
-safe calls could have had.
+turn is sequential. A batch that mixes them loses the concurrency its safe
+calls could have had. Whether that costs anything is an empirical question.
 
-Whether that costs anything is an empirical question, and this answers it. The
-grouping fix only pays when a mixed batch contains **two or more adjacent**
-parallel-safe calls: one alone has nobody to run beside.
+**The gate is on time saved, not on opportunities counted.** Measured
+2026-09-17: two concurrent `grep`s take 19ms for the whole execute span, in a
+turn whose model call alone took 999ms. Grouping local file tools would save
+single-digit milliseconds against a ~1s turn — real, and worth nothing. What
+would cost seconds is two *delegations* or two *network* reads stuck behind an
+unrelated call in the same batch, so those are what this fails on.
 
-Measured 2026-09-17 over 114 sessions / 39 multi-call turns: every mixed batch
-had a longest safe run of 1, so grouping would have saved zero. See the "不做"
-entry for 混合批次分组 in TODOs.md. Re-run this before revisiting that decision.
+An earlier version of this script counted any adjacent read-only pair and did
+not include `invoke_agent` at all — so it fired on `[grep, grep, run_shell]`
+(worth ~10ms) while being structurally unable to see `[invoke_agent,
+invoke_agent, run_shell]` (worth seconds). It measured the wrong thing in both
+directions.
 
 Usage:  python3 scripts/tool-batch-shapes.py [sessions-dir]
-Exit 1 if any mixed batch has a safe run of 2+ — i.e. the decision is stale.
+Exit 1 if any mixed batch has 2+ adjacent SLOW parallel-safe calls.
 """
 
 import collections
@@ -24,37 +29,80 @@ import json
 import os
 import sys
 
-# Mirrors tools::registry::is_parallel_readonly.
-READ_ONLY = {
+# Local reads: concurrency-safe, but each costs milliseconds. Mirrors
+# tools::registry::is_parallel_readonly minus the network pair below.
+FAST_SAFE = {
   "read_file", "read_image", "list_dir", "glob", "grep",
-  "job_list", "job_output", "harness_inspect", "web_search", "web_fetch",
+  "job_list", "job_output", "harness_inspect",
 }
+# Safe *and* slow enough that running two at once is worth real time.
+SLOW_SAFE = {"web_search", "web_fetch"}
+# Only templates marked `parallel_safe` in subagents::registry fan out.
+PARALLEL_SAFE_AGENTS = {"explore"}
+# Sessions created on or before the day peripheral sensors were stripped ran a
+# materially different tool surface (mineru PDF extraction, a `read_file` with
+# an `offset` argument, a 50KB truncation that no longer exists). Counting them
+# answers a question about code that is gone.
+STRIP_DAY = "2026-05-16"
 
 
-def longest_safe_run(names: list[str]) -> int:
-  """Longest consecutive stretch of parallel-safe calls, which is what a
-  grouping scheme could actually run together."""
+def safe_kind(call: dict) -> str:
+  """"slow" if this call is both concurrency-safe and worth parallelising,
+  "fast" if safe but negligible, "" if it forces the turn sequential."""
+  name = call["function"]["name"]
+  if name in SLOW_SAFE:
+    return "slow"
+  if name in FAST_SAFE:
+    return "fast"
+  if name == "invoke_agent":
+    try:
+      kind = json.loads(call["function"].get("arguments") or "{}").get("subagent_type")
+    except json.JSONDecodeError:
+      return ""
+    return "slow" if kind in PARALLEL_SAFE_AGENTS else ""
+  return ""
+
+
+def longest_slow_run(kinds: list[str]) -> int:
+  """Longest consecutive stretch a grouping scheme could run together that
+  would actually save time. A `fast` call does not break the stretch — it just
+  does not justify one by itself."""
   best = current = 0
-  for name in names:
-    current = current + 1 if name in READ_ONLY else 0
-    best = max(best, current)
+  for kind in kinds:
+    if kind == "slow":
+      current += 1
+      best = max(best, current)
+    elif kind != "fast":
+      current = 0
   return best
 
 
-def classify(names: list[str]) -> str:
+def classify(names: list[str], kinds: list[str]) -> str:
   if all(n == "invoke_agent" for n in names):
     return "all-delegation (already concurrent)"
-  if all(n in READ_ONLY for n in names):
+  if all(k in ("fast", "slow") for k in kinds):
     return "all-readonly (already concurrent)"
-  if any(n in READ_ONLY or n == "invoke_agent" for n in names):
+  if any(kinds):
     return "mixed (sequential today)"
   return "no parallel candidate"
 
 
 def batches(sessions_dir: str):
-  for path in glob.glob(os.path.join(sessions_dir, "*", "events.jsonl")):
+  """Yields (day, title, calls) for every multi-call turn after STRIP_DAY."""
+  for session in sorted(glob.glob(os.path.join(sessions_dir, "*/"))):
+    meta_path, events_path = (os.path.join(session, f)
+                              for f in ("meta.json", "events.jsonl"))
+    if not (os.path.exists(meta_path) and os.path.exists(events_path)):
+      continue
     try:
-      lines = open(path, encoding="utf-8").read().splitlines()
+      meta = json.load(open(meta_path, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+      continue
+    day = str(meta.get("created", ""))[:10]
+    if not day or day <= STRIP_DAY:
+      continue
+    try:
+      lines = open(events_path, encoding="utf-8").read().splitlines()
     except OSError:
       continue
     for line in lines:
@@ -66,35 +114,42 @@ def batches(sessions_dir: str):
         continue
       calls = payload["AssistantMessage"].get("tool_calls") or []
       if len(calls) > 1:
-        yield [c["function"]["name"] for c in calls]
+        yield day, str(meta.get("title", ""))[:44], calls
 
 
 def main() -> int:
   default = os.path.expanduser("~/.seekcli/sessions")
   sessions_dir = sys.argv[1] if len(sys.argv) > 1 else default
-  kinds: collections.Counter = collections.Counter()
-  wasted: list[list[str]] = []
+  kinds_seen: collections.Counter = collections.Counter()
+  per_day: collections.Counter = collections.Counter()
+  costly: list[tuple[str, str, list[str]]] = []
   total = 0
 
-  for names in batches(sessions_dir):
+  for day, title, calls in batches(sessions_dir):
     total += 1
-    kind = classify(names)
-    kinds[kind] += 1
-    if kind.startswith("mixed") and longest_safe_run(names) >= 2:
-      wasted.append(names)
+    per_day[day] += 1
+    names = [c["function"]["name"] for c in calls]
+    kinds = [safe_kind(c) for c in calls]
+    kind = classify(names, kinds)
+    kinds_seen[kind] += 1
+    if kind.startswith("mixed") and longest_slow_run(kinds) >= 2:
+      costly.append((day, title, names))
 
-  print(f"{total} multi-call turn(s) under {sessions_dir}\n")
-  for kind, count in kinds.most_common():
+  print(f"{total} multi-call turn(s) under {sessions_dir}, created after {STRIP_DAY}\n")
+  for kind, count in kinds_seen.most_common():
     print(f"  {count:4}  {kind}")
+  # Printed because a day that dwarfs the others is usually a testing session,
+  # not usage — and a verdict drawn from it says little about real behaviour.
+  print("\n  by day:", ", ".join(f"{d}={n}" for d, n in sorted(per_day.items())))
 
-  if not wasted:
-    print("\nNo mixed batch had 2+ adjacent parallel-safe calls.")
-    print("Grouping them would save nothing; the decision not to build it holds.")
+  if not costly:
+    print("\nNo mixed batch stranded 2+ adjacent slow parallel-safe calls.")
+    print("Grouping would save milliseconds; the decision not to build it holds.")
     return 0
 
-  print(f"\n{len(wasted)} mixed batch(es) COULD have run part of the turn concurrently:")
-  for names in wasted:
-    print(f"  longest safe run={longest_safe_run(names)}  {names}")
+  print(f"\n{len(costly)} mixed batch(es) stranded concurrency worth real time:")
+  for day, title, names in costly:
+    print(f"  {day}  «{title}»  {names}")
   print("\nThe reassessment condition has been met — revisit 混合批次分组.")
   return 1
 
