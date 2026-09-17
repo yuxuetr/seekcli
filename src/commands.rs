@@ -792,6 +792,27 @@ mod slash_command_tests {
   use super::SLASH_COMMANDS;
   use std::collections::BTreeSet;
 
+  /// The layer doc states how many slash commands exist. That number is hand
+  /// written, and it has already drifted once: the doc said 13 while the REPL
+  /// dispatched 18 — for long enough that a stage was planned around the wrong
+  /// figure.
+  ///
+  /// Checking it here rather than by eye, for the same reason `/help` and the
+  /// completer were collapsed onto one table: a count nobody recomputes is a
+  /// count that is wrong the next time someone adds a command.
+  #[test]
+  fn the_layer_doc_states_the_real_command_count() {
+    let doc = include_str!("../docs/architecture/L6-interface.md");
+    let names: std::collections::BTreeSet<&str> = SLASH_COMMANDS.iter().map(|c| c.name()).collect();
+    let claim = format!("（**{} 条**）", names.len());
+    assert!(
+      doc.contains(&claim),
+      "L6-interface.md does not say {claim}; there are {} distinct commands: {:?}",
+      names.len(),
+      names
+    );
+  }
+
   /// Command names this file's `match` actually dispatches, read out of its own
   /// source.
   ///
