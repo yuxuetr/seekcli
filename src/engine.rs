@@ -1867,28 +1867,37 @@ impl App {
         let budget = std::sync::atomic::AtomicU64::new(
           self.cost.api_calls.saturating_sub(self.run_call_baseline),
         );
-        let started = std::time::Instant::now();
         // Shared reborrows, bound once: the futures only ever read from these,
         // and taking them here is what keeps the closure from trying to move a
         // `&mut self` into several concurrent tasks.
         let me: &Self = self;
         let surface: &[api::Tool] = &effective_tools;
         let budget_ref = &budget;
+        // Each child times itself. The batch's wall clock is already the
+        // `execute` span's own duration, so recording it again on every child
+        // only destroys information: three children all stamped 16000ms cannot
+        // answer "which subtask was the slow one", which is the question this
+        // field exists for. They overlap — that is what the span above says.
         let futs = plans.iter().map(move |(id, resolved)| async move {
           match resolved {
-            Err(msg) => (id.clone(), None, msg.clone()),
+            Err(msg) => (id.clone(), None, msg.clone(), 0),
             Ok((template, prompt)) => {
+              let started = std::time::Instant::now();
               let out = me
                 .run_sub_agent(template, prompt, surface, budget_ref)
                 .await;
-              (id.clone(), Some((*template, out)), String::new())
+              (
+                id.clone(),
+                Some((*template, out)),
+                String::new(),
+                started.elapsed().as_millis() as u64,
+              )
             }
           }
         });
         let results = futures_util::future::join_all(futs).await;
-        let elapsed = started.elapsed().as_millis() as u64;
 
-        for (id, ran, err) in results {
+        for (id, ran, err, child_ms) in results {
           let text = match ran {
             None => err,
             Some((template, Ok(run))) => {
@@ -1899,10 +1908,7 @@ impl App {
                 template: template.name.to_string(),
                 status: Self::child_status_label(run.status).to_string(),
                 iterations: run.iterations,
-                // Wall clock for the batch: concurrent runs overlap, so
-                // attributing the full span to each is the honest reading —
-                // none of them finished sooner by being alone.
-                duration_ms: elapsed,
+                duration_ms: child_ms,
               });
               format!(
                 "Sub-agent '{}' {}. Summary:\n{}",
@@ -1918,7 +1924,7 @@ impl App {
                 template: template.name.to_string(),
                 status: "failed".to_string(),
                 iterations: 0,
-                duration_ms: elapsed,
+                duration_ms: child_ms,
               });
               format!("Sub-agent '{}' failed: {}", template.name, e)
             }

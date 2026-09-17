@@ -111,6 +111,9 @@ pub enum EventPayload {
     /// `completed` / `interrupted` / `max_iterations` / `failed`.
     status: String,
     iterations: usize,
+    /// This child's own wall clock, not the batch's. Concurrent siblings
+    /// overlap, so these sum to more than the `execute` span they sit under —
+    /// that difference is what the concurrency bought.
     duration_ms: u64,
   },
   ContextInjected {
