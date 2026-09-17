@@ -134,7 +134,9 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   // takes longer than SPINNER_DELAY. The spinner clears itself when the
   // main task signals completion via the shared atomic flag.
   let stop_flag = Arc::new(AtomicBool::new(false));
-  let spinner_task = spawn_delayed_spinner(command.to_string(), stop_flag.clone());
+  let spinner_done = Arc::new(tokio::sync::Notify::new());
+  let spinner_task =
+    spawn_delayed_spinner(command.to_string(), stop_flag.clone(), spinner_done.clone());
 
   // Spawned rather than `.output()`ed so the child stays reachable: Ctrl-C
   // used to return control to the REPL while the command kept running with
@@ -187,8 +189,11 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     }
   };
 
-  // Signal the spinner to stop and wait for it to clear cleanly.
+  // Signal the spinner to stop and wait for it to clear cleanly. The notify is
+  // what makes "wait" bounded by how long clearing takes rather than by the
+  // delay the spinner was still sleeping out.
   stop_flag.store(true, Ordering::SeqCst);
+  spinner_done.notify_one();
   let _ = spinner_task.await;
 
   // Draining is bounded when the command was cancelled. The group kill should
@@ -270,9 +275,23 @@ pub async fn run_shell(args: &Value) -> Result<String> {
 fn spawn_delayed_spinner(
   command: String,
   stop_flag: Arc<AtomicBool>,
+  finished: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
   tokio::spawn(async move {
-    tokio::time::sleep(SPINNER_DELAY).await;
+    // The delay must be *interruptible*, not merely checked afterwards. It was
+    // a plain `sleep(SPINNER_DELAY)`, and the caller joins this task before
+    // returning — so every `run_shell` paid the full 800ms even when the
+    // command took 3ms. It was invisible because the number looked like the
+    // command's own cost: a sub-agent's trace showed `run_shell` at 805, 807,
+    // 804, 830ms, a suspiciously flat line that turned out to be this.
+    //
+    // `notify_one` rather than `notify_waiters`: it leaves a permit if this
+    // task has not reached the await yet, so a command that finishes before
+    // the task is first polled still wakes it.
+    tokio::select! {
+      _ = tokio::time::sleep(SPINNER_DELAY) => {}
+      _ = finished.notified() => return,
+    }
     if stop_flag.load(Ordering::SeqCst) {
       // Command finished before the delay; nothing to show.
       return;
@@ -308,6 +327,60 @@ fn truncate_for_spinner(s: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// A fast command must return fast. The spinner is a *progress* affordance;
+  /// making every caller wait for its delay turns it into a tax.
+  ///
+  /// Measured before the fix: a sub-agent's trace showed ten `run_shell` spans
+  /// at 805/807/804/830ms — about 8s of dead time in one delegation, and
+  /// ~800ms on every interactive shell command the user ran.
+  #[tokio::test]
+  async fn a_fast_command_does_not_wait_out_the_spinner_delay() {
+    crate::tools::approval::set_interaction(crate::tools::approval::Interaction::AutoApprove);
+    let started = std::time::Instant::now();
+    let out = run_shell(&serde_json::json!({ "command": "echo hi" })).await;
+    let elapsed = started.elapsed();
+
+    match out {
+      Ok(text) => assert!(text.contains("hi"), "command did not run: {text}"),
+      Err(e) => panic!("run_shell failed: {e}"),
+    }
+    assert!(
+      elapsed < SPINNER_DELAY / 2,
+      "`echo hi` took {:?}; the spinner delay is {:?} and must not be charged \
+       to commands that finish before it",
+      elapsed,
+      SPINNER_DELAY
+    );
+  }
+  /// The other side of the same fix: a command that outlives the delay must
+  /// still take the spinner branch, and must not be cut short by the notify.
+  /// Making the wait interruptible is only correct if the interruption cannot
+  /// arrive early.
+  #[tokio::test]
+  async fn a_slow_command_still_runs_to_completion() {
+    crate::tools::approval::set_interaction(crate::tools::approval::Interaction::AutoApprove);
+    let started = std::time::Instant::now();
+    let out = run_shell(&serde_json::json!({ "command": "sleep 1; echo done" })).await;
+    let elapsed = started.elapsed();
+
+    match out {
+      Ok(text) => assert!(text.contains("done"), "output lost: {text}"),
+      Err(e) => panic!("run_shell failed: {e}"),
+    }
+    assert!(
+      elapsed >= std::time::Duration::from_millis(900),
+      "returned after {elapsed:?}; the command sleeps 1s, so this would mean \
+       the wait was cut short"
+    );
+    // And it must not have paid the delay *on top* of its own second.
+    assert!(
+      elapsed < std::time::Duration::from_millis(1600),
+      "took {elapsed:?} for a 1s command — the spinner delay is being charged \
+       again"
+    );
+  }
+
   /// Platform probe kept as a test: `process_group(0)` must actually put the
   /// child in its own group, or `kill -KILL -<pid>` targets the wrong thing.
   #[tokio::test]
