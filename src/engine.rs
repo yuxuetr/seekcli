@@ -429,6 +429,7 @@ impl App {
     arguments: &str,
     available: &[api::Tool],
     depth: usize,
+    under: Option<usize>,
   ) -> (String, Option<EventPayload>) {
     let (subagent_type, prompt) = Self::parse_invoke_agent_args(arguments);
     let next_depth = depth + 1;
@@ -469,10 +470,16 @@ impl App {
     let outcome = self
       .run_sub_agent(template, &prompt, available, &budget)
       .await;
-    // Fold the child's spend into the parent's books now that it is done.
-    if let Ok(o) = &outcome {
+    // Fold the child's books into the parent's now that it is done — both of
+    // them, for the same reason: neither could be written to while it ran.
+    if let Ok(o) = outcome.as_ref() {
       self.cost.absorb(&o.cost);
     }
+    let outcome = outcome.map(|mut o| {
+      let trace = std::mem::replace(&mut o.trace, self.tracer.child());
+      self.tracer.absorb(trace, under);
+      o
+    });
     match outcome {
       // An interrupted or exhausted sub-agent has not "completed". Saying so
       // would hand the parent a false success to reason from — the same
@@ -741,6 +748,10 @@ pub(crate) struct SubAgentOutcome {
   pub status: LoopStatus,
   pub iterations: usize,
   pub cost: crate::observability::cost::CostTracker,
+  /// The child's own span tree, for the parent to graft in. Same reason the
+  /// cost comes back rather than being recorded as it happens: a `&mut` on the
+  /// parent is exactly what several concurrent children cannot share.
+  pub trace: crate::observability::trace::Trace,
 }
 
 impl App {
@@ -758,10 +769,12 @@ impl App {
   /// Anything a sub-agent would need beyond "think, call tools, answer" is a
   /// reason to reconsider sub-agents, not a reason to grow this function.
   ///
-  /// **No internal trace spans.** `Trace::begin` needs `&mut`, and putting it
-  /// behind a lock to record the inside of a concurrent sub-agent is a poor
-  /// trade: the `ChildRun` event already carries template, status, iterations
-  /// and duration, and the parent's `execute` span still covers the delegation.
+  /// **Traced into a detached recorder.** `Trace::begin` needs `&mut`, which is
+  /// what a concurrent child cannot have — so it records into `Trace::child()`
+  /// and the parent grafts the result in, the same shape as the cost. The
+  /// earlier decision to record nothing at all cost two investigations in one
+  /// day: neither "was that capped run a doom loop?" nor "which subtask was
+  /// slow?" could be answered, because inside a delegation was a blind spot.
   async fn run_sub_agent(
     &self,
     template: &'static subagents::registry::SubAgentTemplate,
@@ -785,18 +798,22 @@ impl App {
     ];
 
     let mut cost = crate::observability::cost::CostTracker::new();
+    let mut tracer = self.tracer.child();
+    let root = tracer.begin("subagent", template.name, None);
     let mut text = String::new();
     let mut status = LoopStatus::MaxIterations;
     let mut iterations = 0usize;
 
     for iter in 0..template.max_iter {
       iterations = iter + 1;
+      let turn = tracer.begin("turn", &format!("iter {}", iter), root);
 
       // Observed, not consumed: the top-level loop is what clears the flag, so
       // the parent still sees it and unwinds too.
       if self.interrupt.load(AtomicOrd::SeqCst) {
         text = "[Interrupted by user]".to_string();
         status = LoopStatus::Interrupted;
+        tracer.end(turn);
         break;
       }
 
@@ -810,9 +827,11 @@ impl App {
           self.max_llm_calls
         );
         status = LoopStatus::BudgetExhausted;
+        tracer.end(turn);
         break;
       }
 
+      let gen_span = tracer.begin("generate", "llm action", turn);
       let Response {
         content,
         reasoning,
@@ -822,6 +841,14 @@ impl App {
       if let Some(u) = usage {
         cost.record(&u);
       }
+      tracer.annotate(
+        gen_span,
+        serde_json::json!({
+          "tool_calls": tool_calls.len(),
+          "content_bytes": content.len(),
+        }),
+      );
+      tracer.end(gen_span);
 
       messages.push(Message::Simple {
         images: Vec::new(),
@@ -842,8 +869,19 @@ impl App {
       if tool_calls.is_empty() {
         text = content;
         status = LoopStatus::Completed;
+        tracer.end(turn);
         break;
       }
+
+      // Named so a doom loop is visible by eye: fifteen `execute` spans all
+      // reading `["grep"]` is the answer to "why did this hit its cap".
+      let exec = tracer.begin("execute", &format!("{} tool(s)", tool_calls.len()), turn);
+      tracer.annotate(
+        exec,
+        serde_json::json!({
+          "tools": tool_calls.iter().map(|t| t.function.name.clone()).collect::<Vec<_>>(),
+        }),
+      );
 
       // Same rule as the main loop: a batch of pure reads fans out, anything
       // that writes or prompts stays sequential.
@@ -895,6 +933,8 @@ impl App {
           ));
         }
       }
+      tracer.end(exec);
+      tracer.end(turn);
     }
 
     // Out of iterations with nothing to say. `text` is only ever assigned when
@@ -916,7 +956,10 @@ impl App {
          to. A partial answer is useful; silence is not."
           .to_string(),
       ));
-      match self.request_step(&messages, &[]).await {
+      let salvage = tracer.begin("generate", "salvage at cap", root);
+      let outcome = self.request_step(&messages, &[]).await;
+      tracer.end(salvage);
+      match outcome {
         Ok(Response { content, usage, .. }) => {
           if let Some(u) = usage {
             cost.record(&u);
@@ -938,11 +981,20 @@ impl App {
     if text.is_empty() {
       text = format!("[Stopped at max iterations ({})]", template.max_iter);
     }
+    tracer.annotate(
+      root,
+      serde_json::json!({
+        "status": Self::child_status_label(status),
+        "iterations": iterations,
+      }),
+    );
+    tracer.end(root);
     Ok(SubAgentOutcome {
       text,
       status,
       iterations,
       cost,
+      trace: tracer,
     })
   }
 }
@@ -1978,8 +2030,10 @@ impl App {
         for (id, ran, err, child_ms) in results {
           let text = match ran {
             None => err,
-            Some((template, Ok(run))) => {
+            Some((template, Ok(mut run))) => {
               self.cost.absorb(&run.cost);
+              let trace = std::mem::replace(&mut run.trace, self.tracer.child());
+              self.tracer.absorb(trace, exec_span);
               turn_had_failure |= run.status != LoopStatus::Completed;
               events.push(EventPayload::ChildRun {
                 call_id: id.clone(),
@@ -2051,7 +2105,13 @@ impl App {
           let mut dispatched_images = Vec::new();
           let result_str = if tc.function.name == "invoke_agent" {
             let (summary, record) = self
-              .delegate_to_subagent(&tc.id, &tc.function.arguments, &effective_tools, depth)
+              .delegate_to_subagent(
+                &tc.id,
+                &tc.function.arguments,
+                &effective_tools,
+                depth,
+                exec_span,
+              )
               .await;
             // Into the same buffer as the rest of the turn, so it lands between
             // the assistant message that asked for the delegation and the tool

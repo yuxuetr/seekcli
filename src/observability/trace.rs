@@ -34,6 +34,10 @@ pub struct Trace {
   enabled: bool,
   run_id: String,
   origin: Option<Instant>,
+  /// Added to every timestamp this recorder produces. Non-zero only for a
+  /// detached child recorder, so that its spans land at the right place on the
+  /// parent's timeline once grafted in.
+  offset_ms: u128,
   spans: Vec<Span>,
 }
 
@@ -44,7 +48,48 @@ impl Trace {
       enabled,
       run_id: String::new(),
       origin: None,
+      offset_ms: 0,
       spans: Vec::new(),
+    }
+  }
+
+  /// A detached recorder for work that cannot borrow this one mutably.
+  ///
+  /// `begin` needs `&mut self`, and a sub-agent runs behind `&self` precisely
+  /// so several can run at once — so it cannot record into the parent while it
+  /// works. It records into one of these instead and the parent grafts the
+  /// result in with [`absorb`](Self::absorb), the same shape as
+  /// `CostTracker::absorb`: the child keeps its own books and hands them over
+  /// when it is done. No lock, and nothing to contend on.
+  ///
+  /// The clock is pinned here rather than in the child so its spans stay on
+  /// *this* recorder's timeline; concurrent children therefore overlap in the
+  /// tree, which is the truth about them.
+  pub fn child(&self) -> Self {
+    Self {
+      enabled: self.enabled,
+      run_id: String::new(),
+      origin: Some(Instant::now()),
+      offset_ms: self.elapsed_ms(),
+      spans: Vec::new(),
+    }
+  }
+
+  /// Graft a detached recorder's spans in under `parent`.
+  ///
+  /// Ids are dense indices assigned by `begin`, so remapping is a single
+  /// shift; a child's root spans (`parent == None`) re-parent to `parent`.
+  pub fn absorb(&mut self, child: Self, parent: Option<usize>) {
+    if !self.enabled {
+      return;
+    }
+    let base = self.spans.len();
+    for span in child.spans {
+      self.spans.push(Span {
+        id: base + span.id,
+        parent: span.parent.map(|p| base + p).or(parent),
+        ..span
+      });
     }
   }
 
@@ -107,7 +152,7 @@ impl Trace {
   }
 
   fn elapsed_ms(&self) -> u128 {
-    self.origin.map(|o| o.elapsed().as_millis()).unwrap_or(0)
+    self.offset_ms + self.origin.map(|o| o.elapsed().as_millis()).unwrap_or(0)
   }
 
   /// Write the span tree to `~/.seekcli/traces/<run_id>.json`. Best-effort: a
@@ -194,6 +239,84 @@ mod tests {
     assert_eq!(turns[0]["kind"], "turn");
     let leaves = turns[0]["children"].as_array().expect("leaves");
     assert_eq!(leaves[0]["kind"], "generate");
+  }
+
+  /// A detached recorder's spans must keep their own nesting *and* land under
+  /// the node the parent grafts them at. Getting the id remap wrong here is
+  /// silent: the tree still renders, just with children hanging off the wrong
+  /// parent — or off the root, which reads as "the sub-agent was the run".
+  #[test]
+  fn an_absorbed_child_keeps_its_shape_under_the_graft_point() {
+    let mut parent = Trace::new(true);
+    let run = parent.start_run();
+    let execute = parent.begin("execute", "1 tool(s)", run);
+
+    let mut child = parent.child();
+    let sub = child.begin("subagent", "explore", None);
+    let turn = child.begin("turn", "iter 0", sub);
+    child.end(turn);
+    child.end(sub);
+
+    parent.absorb(child, execute);
+    parent.end(execute);
+    parent.end(run);
+
+    let roots = parent.tree_for(None);
+    let roots = roots.as_array().expect("array");
+    assert_eq!(
+      roots.len(),
+      1,
+      "the child must not surface as a second root"
+    );
+    let executes = roots[0]["children"].as_array().expect("executes");
+    let subs = executes[0]["children"].as_array().expect("subagents");
+    assert_eq!(subs[0]["kind"], "subagent");
+    assert_eq!(subs[0]["name"], "explore");
+    let turns = subs[0]["children"].as_array().expect("turns");
+    assert_eq!(turns.len(), 1, "the child's own nesting must survive");
+    assert_eq!(turns[0]["kind"], "turn");
+  }
+
+  /// Two children grafted in must not collide. Ids are dense indices, so the
+  /// second absorb has to shift past the first — otherwise its spans re-parent
+  /// onto the first child's.
+  #[test]
+  fn two_absorbed_children_stay_separate() {
+    let mut parent = Trace::new(true);
+    let run = parent.start_run();
+    for name in ["a", "b"] {
+      let mut child = parent.child();
+      let sub = child.begin("subagent", name, None);
+      let turn = child.begin("turn", "iter 0", sub);
+      child.end(turn);
+      child.end(sub);
+      parent.absorb(child, run);
+    }
+    let roots = parent.tree_for(None);
+    let subs = roots.as_array().expect("array")[0]["children"]
+      .as_array()
+      .expect("subagents")
+      .clone();
+    assert_eq!(subs.len(), 2);
+    for (span, expected) in subs.iter().zip(["a", "b"]) {
+      assert_eq!(span["name"], expected);
+      assert_eq!(
+        span["children"].as_array().map(Vec::len),
+        Some(1),
+        "`{expected}` lost or gained a turn"
+      );
+    }
+  }
+
+  /// Tracing off means a child records nothing and absorbing it is free — the
+  /// path a normal run takes, where paying for observability would be a bug.
+  #[test]
+  fn a_disabled_child_absorbs_to_nothing() {
+    let mut parent = Trace::new(false);
+    let mut child = parent.child();
+    assert!(child.begin("subagent", "explore", None).is_none());
+    parent.absorb(child, None);
+    assert!(parent.spans.is_empty());
   }
 
   #[test]
