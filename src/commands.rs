@@ -792,6 +792,41 @@ mod slash_command_tests {
   use super::SLASH_COMMANDS;
   use std::collections::BTreeSet;
 
+  /// The README must mention every command and every tool.
+  ///
+  /// It is the first document anyone reads and the last one anyone updates.
+  /// Measured before this test existed: 7 of 20 commands and 8 of 20 tools
+  /// were missing, `Ctrl+V` — the primary way to paste an image — appeared
+  /// nowhere, and the observability section still told people to set
+  /// `SEEKCLI_TRACE=1` for something that had become the default.
+  ///
+  /// Only *mentioned*, not described: asserting on prose would break on every
+  /// rewording and teach people to work around the test. A name that appears
+  /// nowhere, though, is a feature the user cannot find.
+  #[test]
+  fn the_readme_mentions_every_command_and_tool() {
+    let readme = include_str!("../README.md");
+    let missing_cmds: Vec<&str> = SLASH_COMMANDS
+      .iter()
+      .map(|c| c.name())
+      .filter(|name| !readme.contains(name))
+      .collect();
+    assert!(
+      missing_cmds.is_empty(),
+      "README.md never mentions: {missing_cmds:?}"
+    );
+
+    let missing_tools: Vec<String> = crate::tools::registry::system_tools()
+      .iter()
+      .map(|t| t.function.name.clone())
+      .filter(|name| !readme.contains(name.as_str()))
+      .collect();
+    assert!(
+      missing_tools.is_empty(),
+      "README.md never mentions these tools: {missing_tools:?}"
+    );
+  }
+
   /// The layer doc states how many slash commands exist. That number is hand
   /// written, and it has already drifted once: the doc said 13 while the REPL
   /// dispatched 18 — for long enough that a stage was planned around the wrong

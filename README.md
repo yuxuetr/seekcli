@@ -6,8 +6,8 @@
 默认对接 DeepSeek，也能指向任意 OpenAI / Anthropic 兼容端点。
 能力扩展走 **MCP**，不需要改 Rust。
 
-**看得见图**：截图后 `/paste` 直接交给模型（不用存文件），或让 agent 自己
-`read_image` 读工作区里的图；MCP server 返回的截图也会原样传给模型。
+**看得见图**：截图后直接 **Ctrl+V** 再回车（不用存文件、不用打路径），
+或让 agent 自己 `read_image` 读工作区里的图；MCP server 返回的截图也原样传给模型。
 
 ## 安装
 
@@ -137,6 +137,8 @@ cat bug.log | seekcli -p "分析这个 bug"         # stdin 非 TTY 时作为附
 seekcli -p "..." --read-only                    # 拒绝一切写工具
 seekcli -p "..." --max-iter 10 --cwd /path      # 限制迭代上限 / 指定工作目录
 seekcli -p "..." --yes                          # 危险命令自动批准（默认自动拒绝）
+seekcli -c                                      # 接上最近一次会话进 REPL
+seekcli --resume <id>                           # 接上指定会话（接受 id 前缀）
 ```
 退出码：`0` 完成 ｜ `1` 运行时错误 ｜ `2` 未收敛（达到迭代上限）｜ `3` 被中断。
 
@@ -220,7 +222,17 @@ benchmark 3/3 PASS，长对话压缩 + trace 正常。
 | `/history`              | 查看历史会话列表（含 ¥ 估算）     |
 | `/load <id>`            | 加载并继续历史会话                |
 | `/copy [index]`         | 复制上条回复中的代码块            |
-| `/quit`                 | 退出                              |
+| `/resume [id]`          | 接上最近一次会话，或指定 id（接受前缀） |
+| `/fork <id> [seq]`      | 从历史会话的某一步分叉            |
+| `/search <kw>`          | 全文检索历史会话                  |
+| `/deliberate [on\|off]` | 开工前先想一轮（工具留空），每轮多花一次模型调用 |
+| `/readonly [on\|off]`   | 只读模式，拒绝一切写工具          |
+| `/tools`                | 列出当前生效的工具（含 MCP 来源） |
+| `/trace [run-id]`       | 看上一次运行的决策树（含子代理内部） |
+| `/paste [caption]`      | 读剪贴板图片；**Ctrl+V 就是它的快捷键** |
+| `/propose`              | 列出待审提案                      |
+| `/help`                 | 命令清单                          |
+| `/quit` · `/exit`       | 退出                              |
 
 ### Skill 系统
 | 指令                    | 说明                              |
@@ -234,18 +246,51 @@ benchmark 3/3 PASS，长对话压缩 + trace 正常。
 
 ### 工具能力（自动由模型调用）
 模型在 ReAct 循环中可自主调用：
-- `read_file / write_file / list_dir` —— 文件系统（大输出自动卸载）
-- `edit_file` —— 局部修改现有文件（L1-L4 模糊匹配，优先于 write_file）
+- `read_file / write_file / list_dir` —— 文件系统（大输出自动卸载；写是原子替换）
+- `edit_file` —— 局部修改现有文件（模糊匹配，优先于 write_file；同路径串行）
+- `glob / grep` —— 按路径 / 按内容检索，尊重 `.gitignore`，优先于 shell 里的 find/rg
+- `read_image` —— 读工作区里的图片
 - `run_shell` —— 终端命令（三态 allow/ask/deny 护栏）
-- `invoke_agent` —— 派发类型化子任务（explore / general）
-- `load_skill` —— 会话中激活已保存的 skill
-- `create_skill` —— 起草新技能 proposal
+- `job_list / job_output` —— 后台任务的状态与输出
+- `invoke_agent` —— 派发类型化子任务（explore / general）。**同一轮里发多个会并发跑**
+- `web_search / web_fetch` —— 联网检索与取原文（需配置 `[research]`，否则不注册）
+- `memory` —— 跨会话的长期记忆（偏好走提案闸门）
+- `ask_user_question` —— 需要你拍板时发问，而不是猜
+- `harness_inspect` —— 自描述：当前模式下到底允许什么
+- `load_skill` / `create_skill` / `propose` —— 激活 skill、起草提案
 
 ### 可观测性与评估
-```bash
-SEEKCLI_TRACE=1 seekcli                       # 决策树落盘 ~/.seekcli/traces/<id>.json
-seekcli --bench examples/benchmarks/basic.json  # Fail-to-Pass 跑分报表
+**决策树默认就在记**，因为「出了事再打开」对追踪是没用的——它无法回溯开启。
+
 ```
+> /trace                       # 上一次运行的完整决策树
+> /trace 186e3c44              # 指定 run id（接受前缀）
+```
+
+```
+run 186e3c44…  87441ms
+  turn      iter 1 (depth 0)          1278+52976
+    execute   2 tool(s)               5967+48287  [invoke_agent, invoke_agent]
+      subagent  explore                 5967+46554  max_iterations after 15 iteration(s)
+        turn      iter 0                5967+595
+          execute   2 tool(s)           6539+23     [list_dir, glob]
+```
+
+**子代理内部也在里面**——并发的几个在时间轴上重叠，那正是关于它们的事实。
+落盘在 `~/.seekcli/traces/<run-id>.json`，单次 7–45 KB：
+
+```toml
+[trace]
+enabled = true   # SEEKCLI_TRACE=1 / =0 可临时覆盖
+keep = 200       # 超出后删最旧的；0 = 全留
+```
+
+```bash
+seekcli --bench examples/benchmarks/basic.json  # Fail-to-Pass 跑分报表
+python3 scripts/delegation-health.py            # 委派怎么结束的、prompt 是否自包含
+python3 scripts/tool-batch-shapes.py            # 一轮里的工具批次形状
+```
+
 每轮对话结束打印 `[Cost]` 账单（token + cache 命中率 + ¥ 估算），并随 session 持久化。
 
 ### ⏰ 定时任务（L8 Loop 层，MVP）
