@@ -245,6 +245,10 @@ Each turn you may either:
 # Sub-agent context
 - A sub-agent receives only the prompt you give it. It has no access to your conversation.
 - Pass all required context (file paths, prior findings, goals) in the prompt.
+- A summary starting with `[PROMPT INCOMPLETE]` means your prompt referred to
+  something the sub-agent could not see. Re-issue it with the missing pieces
+  written out inline -- do not repeat the same prompt, and do not treat the
+  refusal as a finding.
 - Sub-agents cannot spawn further sub-agents indefinitely; depth is limited.
 "#,
     max_iter = MAX_ITER,

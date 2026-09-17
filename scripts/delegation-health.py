@@ -10,6 +10,11 @@ delegation. Two questions this answers that nothing else can:
   * **Is delegation being used at all?** Its value is multi-step autonomy and
     concurrency, and neither shows up anywhere else in the log.
 
+It also counts `[PROMPT INCOMPLETE]` refusals: a sub-agent is told to emit that
+marker rather than guess when its prompt refers to something it cannot see. A
+few are the mechanism working; a steady stream means the parent keeps writing
+prompts that assume a conversation the child never had.
+
 It deliberately does **not** try to judge whether a delegation *should* have
 happened — there is no honest proxy for that yet, and a made-up one would read
 as evidence. See the 委派质量反馈闭环 entry in TODOs.md.
@@ -35,8 +40,11 @@ STRIP_DAY = "2026-05-16"
 CAP_SHARE = 1 / 3
 
 
+INCOMPLETE = "[PROMPT INCOMPLETE]"
+
+
 def child_runs(sessions_dir: str):
-  """Yields (day, template, status, iterations, duration_ms)."""
+  """Yields (day, template, status, iterations, duration_ms, incomplete)."""
   for session in sorted(glob.glob(os.path.join(sessions_dir, "*/"))):
     meta_path = os.path.join(session, "meta.json")
     events_path = os.path.join(session, "events.jsonl")
@@ -50,15 +58,25 @@ def child_runs(sessions_dir: str):
     day = str(meta.get("created", ""))[:10]
     if not day or day <= STRIP_DAY:
       continue
+    # The refusal travels back as the delegation's tool result, which is a
+    # separate event from the ChildRun; join them on the call id.
+    refused, runs = set(), []
     for line in lines:
       try:
         payload = json.loads(line).get("payload", {})
       except json.JSONDecodeError:
         continue
-      if isinstance(payload, dict) and "ChildRun" in payload:
-        run = payload["ChildRun"]
-        yield (day, run["template"], run["status"], run["iterations"],
-               run["duration_ms"])
+      if not isinstance(payload, dict):
+        continue
+      if "ChildRun" in payload:
+        runs.append(payload["ChildRun"])
+      elif "ToolResult" in payload:
+        result = payload["ToolResult"]
+        if INCOMPLETE in (result.get("content") or ""):
+          refused.add(result.get("call_id"))
+    for run in runs:
+      yield (day, run["template"], run["status"], run["iterations"],
+             run["duration_ms"], run["call_id"] in refused)
 
 
 def main() -> int:
@@ -86,6 +104,12 @@ def main() -> int:
     median = iters[len(iters) // 2]
     print(f"\n  {template}: {len(rows)} run(s), median {median} iteration(s), "
           f"{capped} at the cap")
+
+  incomplete = sum(1 for r in runs if r[5])
+  if incomplete:
+    print(f"\n  {incomplete} delegation(s) refused with {INCOMPLETE} — the parent "
+          f"wrote a prompt the child could not resolve.")
+    print("  A few is the mechanism working. A steady stream is a prompt problem.")
 
   capped = by_status["max_iterations"]
   share = capped / len(runs)

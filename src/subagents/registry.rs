@@ -48,6 +48,12 @@ Rules:
 - Cite file:line. Be terse. The parent agent will reformat for the user.
 - Stop calling tools as soon as you have enough evidence to answer.
 - Do NOT propose changes; only investigate.
+- The prompt is all you get: you cannot see the conversation that produced it.
+  If it refers to something you have no way to resolve (`the file above`,
+  `the error we just saw`, `continue what you started`), reply immediately
+  with `[PROMPT INCOMPLETE]` and say exactly what is missing. Do NOT guess.
+  Guessing produces a confident summary of the wrong thing, and the parent
+  has no way to tell that from a right one.
 ",
   allowed_tools: &["read_file", "list_dir", "glob", "grep", "run_shell"],
   max_iter: 15,
@@ -74,6 +80,12 @@ Rules:
 - Dangerous shell commands (rm -rf, sudo, ...) require user approval.
 - Cite file:line. Be terse. Parent agent will reformat for the user.
 - Stop calling tools as soon as the subtask is done.
+- The prompt is all you get: you cannot see the conversation that produced it.
+  If it refers to something you have no way to resolve (`the file above`,
+  `the error we just saw`, `continue what you started`), reply immediately
+  with `[PROMPT INCOMPLETE]` and say exactly what is missing. Do NOT guess.
+  Guessing produces a confident summary of the wrong thing, and the parent
+  has no way to tell that from a right one.
 ",
   allowed_tools: &[
     "read_file",
@@ -129,6 +141,35 @@ mod tests {
     assert!(
       SUBAGENTS.iter().any(|t| t.parallel_safe),
       "no template is parallel_safe — fan-out can never happen"
+    );
+  }
+
+  /// `[PROMPT INCOMPLETE]` is a contract between two prompts that live in
+  /// different files: the child is told to emit it, the parent is told what it
+  /// means. Either half alone is worse than neither — a child that refuses
+  /// while the parent reads the refusal as a finding, or a parent waiting for
+  /// a marker nothing produces.
+  ///
+  /// Nothing else can catch this. Both halves are prose in string literals, so
+  /// the compiler sees two unrelated constants, and a behaviour test would
+  /// need the model to actually be handed an unresolvable prompt.
+  #[test]
+  fn both_ends_of_the_incomplete_prompt_contract_exist() {
+    const MARKER: &str = "[PROMPT INCOMPLETE]";
+    for t in SUBAGENTS {
+      assert!(
+        t.system_prompt.contains(MARKER),
+        "`{}` is never told to report an unresolvable prompt; it will guess \
+         instead, and a confident summary of the wrong thing is \
+         indistinguishable from a right one",
+        t.name
+      );
+    }
+    let parent = crate::agent::prompt::agent_system_prompt();
+    assert!(
+      parent.contains(MARKER),
+      "the parent is never told what `{MARKER}` means, so it would treat a \
+       refusal as a finding"
     );
   }
 
