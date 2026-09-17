@@ -1167,11 +1167,13 @@ impl App {
     if !self.cost.is_empty() {
       eprintln!("{}", self.cost.summary());
     }
-    // Flush the decision-path trace (no-op unless SEEKCLI_TRACE is set).
-    match self.tracer.flush() {
-      Ok(Some(path)) => eprintln!("{} trace written to {}", "[Trace]".dimmed(), path.display()),
-      Ok(None) => {}
-      Err(e) => eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e),
+    // Flush the decision-path trace. Silent on success: tracing is on by
+    // default now, so announcing a file nobody asked for would put a line of
+    // noise under every single answer. `/trace` is the way to find it, and a
+    // failure still speaks up — a trace that silently was not written is the
+    // one you discover by needing it.
+    if let Err(e) = self.tracer.flush() {
+      eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e);
     }
     Ok(())
   }
@@ -1233,10 +1235,8 @@ impl App {
       )
       .await?;
     self.tracer.end(run_span);
-    match self.tracer.flush() {
-      Ok(Some(path)) => eprintln!("{} trace written to {}", "[Trace]".dimmed(), path.display()),
-      Ok(None) => {}
-      Err(e) => eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e),
+    if let Err(e) = self.tracer.flush() {
+      eprintln!("{} trace write failed: {}", "[Trace]".yellow(), e);
     }
     Ok(HeadlessOutcome {
       text: run.text,

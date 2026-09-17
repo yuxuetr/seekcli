@@ -67,6 +67,9 @@ pub struct Config {
   /// When the Two-Stage deliberation pass runs.
   #[serde(default)]
   pub planning: PlanningConfig,
+  /// Decision-path tracing and how much of it to keep.
+  #[serde(default)]
+  pub trace: TraceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -379,6 +382,43 @@ impl Default for LimitsConfig {
   }
 }
 
+/// Decision-path tracing.
+///
+/// On by default, which is the whole point: tracing answers questions that
+/// only arise *after* something looked wrong, and it cannot be turned on
+/// retroactively. Opt-in tracing is available exactly when you already knew
+/// you would need it.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TraceConfig {
+  /// `SEEKCLI_TRACE` overrides this either way (`0` / `off` / `false` to
+  /// disable, any other value to enable).
+  #[serde(default = "default_trace_enabled")]
+  pub enabled: bool,
+  /// How many traces to keep. Measured at 7-45 KB each, so the default is a
+  /// few MB — enough to still have last week's run, bounded so the directory
+  /// cannot grow without limit. `0` keeps everything.
+  #[serde(default = "default_trace_keep")]
+  pub keep: usize,
+}
+
+fn default_trace_enabled() -> bool {
+  true
+}
+
+fn default_trace_keep() -> usize {
+  200
+}
+
+impl Default for TraceConfig {
+  fn default() -> Self {
+    Self {
+      enabled: default_trace_enabled(),
+      keep: default_trace_keep(),
+    }
+  }
+}
+
 /// When the tools-free deliberation pass runs.
 ///
 /// It had no switch of its own: the macro trigger read `thinking_mode`, so
@@ -535,6 +575,7 @@ impl Default for Config {
       research: ResearchConfig::default(),
       limits: LimitsConfig::default(),
       planning: PlanningConfig::default(),
+      trace: TraceConfig::default(),
     }
   }
 }
@@ -797,7 +838,16 @@ fn write_default_config(path: &Path) -> Result<()> {
      # default; `/deliberate on` enables it for the task in front of you.\n\
      # Planning after a *failed* turn always happens and is not configurable.\n\
      [planning]\n\
-     on_open = {plan_on_open}\n",
+     on_open = {plan_on_open}\n\
+     \n\
+     # Decision-path tracing: one JSON span tree per run under\n\
+     # ~/.seekcli/traces, viewable with `/trace`. On by default because it\n\
+     # answers questions that only arise after something looked wrong, and\n\
+     # it cannot be turned on retroactively. 7-45 KB per run; `keep` bounds\n\
+     # the directory (0 = keep everything). SEEKCLI_TRACE overrides `enabled`.\n\
+     [trace]\n\
+     enabled = {trace_enabled}\n\
+     keep = {trace_keep}\n",
     project = PROJECT_CONFIG_FILE,
     env = CONFIG_ENV,
     provider = d.brain.provider,
@@ -815,6 +865,8 @@ fn write_default_config(path: &Path) -> Result<()> {
     max_results = d.research.max_results,
     max_calls = d.limits.max_llm_calls_per_run,
     plan_on_open = d.planning.on_open,
+    trace_enabled = d.trace.enabled,
+    trace_keep = d.trace.keep,
   );
   fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }

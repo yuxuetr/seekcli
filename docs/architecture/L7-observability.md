@@ -13,7 +13,7 @@
 | 模块 | 位置 | 说明 |
 | --- | --- | --- |
 | Cost Tracker | `observability/cost.rs` | 装饰器式累加 prompt/completion/cache token + 调用数；`estimated_cny` + `cache_hit_pct`；随 session 持久化 |
-| Tracing | `observability/trace.rs` | Run → Turn → Generate/Execute/Planning/Compaction span 树 → `~/.seekcli/traces/<run_id>.json`；`SEEKCLI_TRACE` 开关，关闭时零成本 no-op |
+| Tracing | `observability/trace.rs` | Run → Turn → Generate/Execute/Planning/Compaction span 树，**委派下再挂子代理自己的整棵树** → `~/.seekcli/traces/<run_id>.json`；**默认开**（`[trace] enabled`，`SEEKCLI_TRACE` 双向覆盖），`[trace] keep` 限制保留数，`/trace` 查看，关闭时零成本 no-op |
 | 录制 / 回放 | `api/record.rs` | `SEEKCLI_RECORD` / `SEEKCLI_REPLAY`，fixture 在 `tests/fixtures/` |
 | Benchmark | `observability/bench.rs` | Testsuite JSON → seed 靶机 → chdir 沙箱 AgentRun → eval 命令 → 报表（成功率 / CNY / 耗时 / 调用数） |
 
@@ -312,7 +312,7 @@ JSONL，每行一个任务：
 
 **为什么不做成「trace 从事件链派生」**：trace 记的是时长，事件记的是内容。
 要让事件承载足够的计时信息去重建 span 树，就得让每个事件都带起止时刻——
-而 trace 是 `SEEKCLI_TRACE=1` 才开的旁路，零开销正是它的设计前提
+而 trace 是旁路（阶段五十三起默认开，`[trace] enabled = false` 可关），零开销正是它的设计前提
 （design-principles §3「可观测性走装饰器 / 旁路」）。**加 join key 花两行，
 拿到同样的可归因性；合并两套记录要动的是所有事件的形状。**
 

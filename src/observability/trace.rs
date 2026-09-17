@@ -38,6 +38,8 @@ pub struct Trace {
   /// detached child recorder, so that its spans land at the right place on the
   /// parent's timeline once grafted in.
   offset_ms: u128,
+  /// How many trace files to keep on disk; `0` means keep everything.
+  keep: usize,
   spans: Vec<Span>,
 }
 
@@ -49,6 +51,7 @@ impl Trace {
       run_id: String::new(),
       origin: None,
       offset_ms: 0,
+      keep: 0,
       spans: Vec::new(),
     }
   }
@@ -71,6 +74,8 @@ impl Trace {
       run_id: String::new(),
       origin: Some(Instant::now()),
       offset_ms: self.elapsed_ms(),
+      // A detached recorder never writes, so retention is not its business.
+      keep: 0,
       spans: Vec::new(),
     }
   }
@@ -93,9 +98,24 @@ impl Trace {
     }
   }
 
-  /// Read the `SEEKCLI_TRACE` env var to decide whether tracing is on.
-  pub fn from_env() -> Self {
-    Self::new(std::env::var("SEEKCLI_TRACE").is_ok())
+  /// Decide from config, letting `SEEKCLI_TRACE` override in either direction.
+  ///
+  /// Both directions matter: `SEEKCLI_TRACE=1` turns it on for one command
+  /// when the config says off, and `SEEKCLI_TRACE=0` turns it off for a run
+  /// whose trace would be noise — a benchmark sweep, say. The env var used to
+  /// mean "on" for *any* value including empty, so `SEEKCLI_TRACE=0` enabled
+  /// it; that reading is now the one people expect.
+  pub fn from_config(cfg: &crate::config::TraceConfig) -> Self {
+    let enabled = match std::env::var("SEEKCLI_TRACE") {
+      Ok(v) => !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "0" | "off" | "false" | ""
+      ),
+      Err(_) => cfg.enabled,
+    };
+    let mut t = Self::new(enabled);
+    t.keep = cfg.keep;
+    t
   }
 
   /// Begin a new run: assign a fresh id, clear prior spans, start the clock.
@@ -180,7 +200,38 @@ impl Trace {
       "tree": self.tree_for(None),
     });
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    // Prune *after* writing, so the newest trace is never the one deleted.
+    // Best-effort: a run that produced a good trace must not fail because the
+    // directory could not be tidied afterwards.
+    Self::prune(&dir, self.keep);
     Ok(Some(path))
+  }
+
+  /// Keep the `keep` newest traces, by modification time. `0` keeps all.
+  ///
+  /// Concurrency-safe by construction rather than by locking: another process
+  /// writing right now produces the newest file, which is never a deletion
+  /// candidate.
+  fn prune(dir: &std::path::Path, keep: usize) {
+    if keep == 0 {
+      return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+      return;
+    };
+    let mut traces: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+      .flatten()
+      .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+      .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+      .collect();
+    if traces.len() <= keep {
+      return;
+    }
+    // Newest first, so `skip(keep)` is exactly the tail to drop.
+    traces.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in traces.into_iter().skip(keep) {
+      let _ = std::fs::remove_file(path);
+    }
   }
 
   /// Locate a written trace: the newest, or the one whose run id starts with
@@ -484,6 +535,100 @@ mod tests {
       turn_line.len() - turn_line.trim_start().len() > sub_line.len() - sub_line.trim_start().len(),
       "a turn must be indented under its sub-agent:\n{text}"
     );
+  }
+
+  /// Retention keeps the newest and, critically, never the *oldest* — an
+  /// off-by-one in the sort direction would silently delete the run you just
+  /// made while the directory still looked bounded and healthy.
+  #[test]
+  fn pruning_keeps_the_newest_and_drops_the_rest() {
+    let dir = std::env::temp_dir().join(format!("seekcli-prune-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+      panic!("cannot create {}: {e}", dir.display());
+    }
+    // Written oldest-first with distinct mtimes; `keep` must retain c and d.
+    for name in ["a", "b", "c", "d"] {
+      let path = dir.join(format!("{name}.json"));
+      if let Err(e) = std::fs::write(&path, "{}") {
+        panic!("cannot write {}: {e}", path.display());
+      }
+      std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // A non-trace file must be left alone: this directory is ours, but
+    // deleting something we did not write is not a tidy-up.
+    let stray = dir.join("notes.txt");
+    let _ = std::fs::write(&stray, "keep me");
+
+    Trace::prune(&dir, 2);
+
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+      .into_iter()
+      .flatten()
+      .flatten()
+      .filter_map(|e| e.file_name().into_string().ok())
+      .collect();
+    left.sort();
+    assert_eq!(
+      left,
+      vec!["c.json", "d.json", "notes.txt"],
+      "wrong survivors"
+    );
+
+    // `0` is "keep everything", not "delete everything" — the difference is
+    // the whole user's history.
+    Trace::prune(&dir, 0);
+    let count = std::fs::read_dir(&dir).into_iter().flatten().count();
+    assert_eq!(count, 3, "keep = 0 must not delete anything");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// `SEEKCLI_TRACE` must override the config in **both** directions. The old
+  /// reading was `is_ok()`, so `SEEKCLI_TRACE=0` turned tracing *on*.
+  ///
+  /// Serialised with the other env-touching test via the process-wide test
+  /// lock, since `set_var` is global.
+  #[test]
+  fn the_env_var_overrides_the_config_both_ways() {
+    let _guard = crate::testsync::lock();
+    let on = crate::config::TraceConfig {
+      enabled: true,
+      keep: 5,
+    };
+    let off = crate::config::TraceConfig {
+      enabled: false,
+      keep: 5,
+    };
+
+    // SAFETY: the test lock serialises every test that touches the env.
+    unsafe { std::env::remove_var("SEEKCLI_TRACE") };
+    assert!(
+      Trace::from_config(&on).enabled,
+      "config on must be honoured"
+    );
+    assert!(
+      !Trace::from_config(&off).enabled,
+      "config off must be honoured"
+    );
+    assert_eq!(
+      Trace::from_config(&on).keep,
+      5,
+      "keep must come from config"
+    );
+
+    unsafe { std::env::set_var("SEEKCLI_TRACE", "1") };
+    assert!(
+      Trace::from_config(&off).enabled,
+      "env must be able to turn it on"
+    );
+
+    for value in ["0", "off", "false", ""] {
+      unsafe { std::env::set_var("SEEKCLI_TRACE", value) };
+      assert!(
+        !Trace::from_config(&on).enabled,
+        "`SEEKCLI_TRACE={value}` must turn tracing off"
+      );
+    }
+    unsafe { std::env::remove_var("SEEKCLI_TRACE") };
   }
 
   #[test]

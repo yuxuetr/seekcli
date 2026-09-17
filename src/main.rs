@@ -207,8 +207,9 @@ impl App {
       eprintln!("{}", notice.yellow());
     }
     let config = loaded.config;
-    // Read before `config` is moved into `Self` below.
+    // Both read before `config` is moved into `Self` below.
     let plan_on_open = config.planning.on_open;
+    let tracer = observability::trace::Trace::from_config(&config.trace);
     // Install the user's shell-command allow/deny policy (three-state approval).
     tools::approval::init_policy(config.security.allow.clone(), config.security.deny.clone());
     observability::cost::set_rates(observability::cost::Rates {
@@ -265,7 +266,7 @@ impl App {
       current_skill: None,
       last_code_blocks: Vec::new(),
       cost: observability::cost::CostTracker::new(),
-      tracer: observability::trace::Trace::from_env(),
+      tracer,
       mcp,
       interrupt,
       memory_budget,
