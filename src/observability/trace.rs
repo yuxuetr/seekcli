@@ -183,6 +183,82 @@ impl Trace {
     Ok(Some(path))
   }
 
+  /// Locate a written trace: the newest, or the one whose run id starts with
+  /// `prefix`.
+  ///
+  /// Newest is by **modification time**, not by name — run ids are v4 UUIDs,
+  /// so sorting them lexically returns an arbitrary run while looking
+  /// deliberate.
+  fn locate(dir: &std::path::Path, prefix: Option<&str>) -> Option<std::path::PathBuf> {
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+      let path = entry.path();
+      if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        continue;
+      }
+      let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+      if let Some(p) = prefix
+        && !stem.starts_with(p)
+      {
+        continue;
+      }
+      let modified = entry.metadata().and_then(|m| m.modified()).ok()?;
+      if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+        best = Some((modified, path));
+      }
+    }
+    best.map(|(_, p)| p)
+  }
+
+  /// Render a written trace as an indented tree.
+  ///
+  /// Exists because reading the raw JSON does not work: answering "was that
+  /// capped sub-agent a doom loop" means comparing fifteen `execute` spans'
+  /// tool lists at a glance, and in pretty-printed JSON those are hundreds of
+  /// lines apart. This was hand-written as a throwaway script three times in
+  /// one day before it earned a place here.
+  pub fn show(prefix: Option<&str>) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let dir = std::path::PathBuf::from(home)
+      .join(".seekcli")
+      .join("traces");
+    let Some(path) = Self::locate(&dir, prefix) else {
+      return Err(match prefix {
+        Some(p) => format!(
+          "no trace whose run id starts with `{p}` in {}",
+          dir.display()
+        ),
+        // The likeliest reason by far, so say what to do rather than just
+        // reporting an empty directory.
+        None => format!(
+          "no traces in {}. Tracing is opt-in and cannot be turned on after \
+           the fact — re-run with `SEEKCLI_TRACE=1`.",
+          dir.display()
+        ),
+      });
+    };
+    let text =
+      std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let doc: Value = serde_json::from_str(&text)
+      .map_err(|e| format!("{} is not valid trace JSON: {e}", path.display()))?;
+    Ok(Self::render(&doc))
+  }
+
+  /// Pure renderer, so the layout is testable without touching the filesystem.
+  pub fn render(doc: &Value) -> String {
+    let mut out = format!(
+      "run {}  {}ms  {}\n",
+      doc["run_id"].as_str().unwrap_or("?"),
+      doc["total_ms"].as_u64().unwrap_or(0),
+      doc["workspace"].as_str().unwrap_or("")
+    );
+    render_nodes(&doc["tree"], 0, &mut out);
+    out
+  }
+
   /// Recursively build the JSON subtree for the given parent.
   fn tree_for(&self, parent: Option<usize>) -> Value {
     let children: Vec<Value> = self
@@ -201,6 +277,42 @@ impl Trace {
       })
       .collect();
     Value::Array(children)
+  }
+}
+
+/// One line per span: `kind`, name, `start+duration`, and the few meta fields
+/// that carry the answer. Meta is rendered selectively rather than dumped —
+/// the whole reason this exists is that the full JSON hides the signal.
+fn render_nodes(nodes: &Value, depth: usize, out: &mut String) {
+  let Some(items) = nodes.as_array() else {
+    return;
+  };
+  for n in items {
+    let meta = &n["meta"];
+    let note = if let Some(tools) = meta["tools"].as_array() {
+      let names: Vec<&str> = tools.iter().filter_map(|t| t.as_str()).collect();
+      format!("[{}]", names.join(", "))
+    } else if let Some(status) = meta["status"].as_str() {
+      format!(
+        "{status} after {} iteration(s)",
+        meta["iterations"].as_u64().unwrap_or(0)
+      )
+    } else if let Some(calls) = meta["tool_calls"].as_u64() {
+      format!("{calls} call(s)")
+    } else {
+      String::new()
+    };
+    out.push_str(&format!(
+      "{:indent$}{:<9} {:<26} {:>6}+{:<6} {}\n",
+      "",
+      n["kind"].as_str().unwrap_or("?"),
+      n["name"].as_str().unwrap_or(""),
+      n["start_ms"].as_u64().unwrap_or(0),
+      n["dur_ms"].as_u64().unwrap_or(0),
+      note,
+      indent = depth * 2,
+    ));
+    render_nodes(&n["children"], depth + 1, out);
   }
 }
 
@@ -317,6 +429,61 @@ mod tests {
     assert!(child.begin("subagent", "explore", None).is_none());
     parent.absorb(child, None);
     assert!(parent.spans.is_empty());
+  }
+
+  /// The renderer must surface the thing the raw JSON buries: which tools each
+  /// turn called, on adjacent lines, so a repeated trajectory is visible by
+  /// eye. That is the whole reason it exists.
+  #[test]
+  fn rendering_puts_each_turns_tools_on_its_own_line() {
+    let mut t = Trace::new(true);
+    let run = t.start_run();
+    let execute = t.begin("execute", "1 tool(s)", run);
+    let mut child = t.child();
+    let sub = child.begin("subagent", "explore", None);
+    for i in 0..2 {
+      let turn = child.begin("turn", &format!("iter {i}"), sub);
+      let ex = child.begin("execute", "1 tool(s)", turn);
+      child.annotate(ex, json!({ "tools": ["grep"] }));
+      child.end(ex);
+      child.end(turn);
+    }
+    child.annotate(sub, json!({ "status": "max_iterations", "iterations": 2 }));
+    child.end(sub);
+    t.absorb(child, execute);
+    t.end(execute);
+    t.end(run);
+
+    let doc = json!({
+      "run_id": "abc", "workspace": "/w",
+      "total_ms": 1, "tree": t.tree_for(None),
+    });
+    let text = Trace::render(&doc);
+
+    assert!(text.starts_with("run abc"), "header missing:\n{text}");
+    assert!(
+      text.contains("max_iterations after 2 iteration(s)"),
+      "a sub-agent's outcome must be on its own line:\n{text}"
+    );
+    assert_eq!(
+      text.matches("[grep]").count(),
+      2,
+      "each turn's tools must be rendered separately, so a repeat is visible \
+       by eye:\n{text}"
+    );
+    // Nesting has to survive into the text, or "which agent did this" is lost.
+    let sub_line = text
+      .lines()
+      .find(|l| l.contains("subagent"))
+      .unwrap_or_default();
+    let turn_line = text
+      .lines()
+      .find(|l| l.contains("iter 0"))
+      .unwrap_or_default();
+    assert!(
+      turn_line.len() - turn_line.trim_start().len() > sub_line.len() - sub_line.trim_start().len(),
+      "a turn must be indented under its sub-agent:\n{text}"
+    );
   }
 
   #[test]

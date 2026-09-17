@@ -49,6 +49,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     help: "Toggle Plan Mode (externalize state to PLAN.md/TODO.md)",
   },
   SlashCommand {
+    usage: "/trace [run-id]",
+    help: "Show the decision tree of the last run (needs SEEKCLI_TRACE=1)",
+  },
+  SlashCommand {
     usage: "/deliberate [on|off]",
     help: "Toggle the tools-free planning pass before each task",
   },
@@ -471,6 +475,13 @@ impl App {
         }
         println!("Thinking: {:?}", self.thinking_mode);
       }
+      // Reads the written trace rather than `self.tracer`, which `start_run`
+      // clears at the top of every chat turn — by the time anyone asks, the
+      // interesting run is the *previous* one.
+      "/trace" => match observability::trace::Trace::show(parts.get(1).copied()) {
+        Ok(tree) => println!("{tree}"),
+        Err(why) => println!("{}", why.yellow()),
+      },
       // Two-Stage macro trigger. Separate from `/plan` on purpose: Plan Mode
       // is about externalizing state to PLAN.md, this is about spending one
       // model call to think before the first tool.
