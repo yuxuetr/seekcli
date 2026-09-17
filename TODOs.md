@@ -1453,6 +1453,28 @@ skill + shell 脚本这条路可用，照抄即可，不该占代码排期。
 的注解 `{"had_failure":false,"tools":["invoke_agent","invoke_agent"]}`，
 而不是原分支自己的 `{"sub_agents":2}`。
 
+##### ✅ 2026-09-17 修正（阶段五十三）—— 规划产物没进事件日志
+
+Two-Stage 的计划与 bridge 是用 `messages.push` 直接进数组的，不走 `log_push`。
+于是**投影重建不出模型当时看到的请求**——缺的恰好是「为什么这么做」那一段：
+下一轮 `chat()` 从日志重投影，计划消失；`/resume` 恢复的会话里没有它；
+`/search` 也搜不到。
+
+`everything_the_model_saw_is_reconstructable_from_the_log` 这条测试没能发现，
+因为它拿投影跟**同一份日志**对账（`projected.len() == 1 + assistants + tool_results`）
+—— 两边同样缺两条，自洽而无效。
+
+现在两条消息都走 `log_push`（与死循环提醒同一待遇：harness 写的 user 消息
+也是 user 消息）。测试改成与 **录制的请求形状** 交叉验证：
+`two-stage-recovery/003.request.json` 记着模型当时实际收到 8 条消息，
+断言日志重建出的条数与它相等，并显式命名两处偏移（系统提示每次重新派生、
+最后那条回答是该请求的产物而非内容）。另加一条断言 bridge 必须出现在投影里。
+
+反向验证：把 events 换成丢弃用的 `&mut Vec::new()` → 两条断言都红；恢复 → 绿。
+
+实跑（`/thinking h` 触发宏触发）：事件日志里出现 `AssistantMessage`（计划正文）
+与 `UserMessage`（`[System] Proceed: …`），此前这两条不存在。
+
 #### 48.3 共享预算 —— **要做，但形状与原定不同**
 
 **测量推翻了原定描述。** 路线图写的是「子代理从父运行继承预算，而不是每启动一个

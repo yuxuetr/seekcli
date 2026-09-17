@@ -1190,20 +1190,38 @@ impl App {
   /// no error, model reports false success. Restoring the normal
   /// assistant→user→assistant alternation (same idiom as the doom-loop
   /// reminder in `agent::reminders`) fixes it.
-  fn append_plan_with_bridge(messages: &mut Vec<Message>, plan: String) {
+  ///
+  /// Both messages go through `log_push`, not `messages.push`. They are part of
+  /// what the model saw when it chose its next action, so a log without them
+  /// cannot reconstruct that request — and the plan, which is the *reason* for
+  /// the action, was exactly the part missing. Same treatment as the doom-loop
+  /// reminder: a harness-authored user message is still a user message.
+  fn append_plan_with_bridge(
+    messages: &mut Vec<Message>,
+    events: &mut Vec<EventPayload>,
+    plan: String,
+  ) {
     if plan.trim().is_empty() {
       return;
     }
-    messages.push(Message::Simple {
-      images: Vec::new(),
-      role: "assistant".to_string(),
-      content: plan,
-      reasoning_content: None,
-      tool_calls: None,
-    });
-    messages.push(Message::new_user_text(
-      "[System] Proceed: call the tool(s) needed to execute the plan above now.".to_string(),
-    ));
+    log_push(
+      messages,
+      events,
+      Message::Simple {
+        images: Vec::new(),
+        role: "assistant".to_string(),
+        content: plan,
+        reasoning_content: None,
+        tool_calls: None,
+      },
+    );
+    log_push(
+      messages,
+      events,
+      Message::new_user_text(
+        "[System] Proceed: call the tool(s) needed to execute the plan above now.".to_string(),
+      ),
+    );
   }
 
   /// System directive scoped to a single tools-withheld planning call —
@@ -1267,7 +1285,11 @@ impl App {
   /// failing turn triggers one of these, so the under-count grew exactly when
   /// a run was going badly. Found by the stage 25 replay tests: the recorded
   /// trajectory made four requests but only three were billed.
-  async fn planning_phase(&mut self, messages: &mut Vec<Message>) -> Result<()> {
+  async fn planning_phase(
+    &mut self,
+    messages: &mut Vec<Message>,
+    events: &mut Vec<EventPayload>,
+  ) -> Result<()> {
     eprintln!("\n{}", "[Plan] deliberating (tools withheld)...".dimmed());
     let mut planning_request = messages.clone();
     planning_request.push(Self::planning_only_directive());
@@ -1317,7 +1339,7 @@ impl App {
         "[Plan] discarded suspected fake tool-call syntax from plan text".yellow()
       );
     }
-    Self::append_plan_with_bridge(messages, sanitized);
+    Self::append_plan_with_bridge(messages, events, sanitized);
     Ok(())
   }
 
@@ -1653,7 +1675,7 @@ impl App {
         let macro_trigger = iter == 0 && self.thinking_mode != ThinkingMode::None;
         if macro_trigger || plan_next {
           let pspan = self.tracer.begin("planning", "two-stage", turn_span);
-          if let Err(e) = self.planning_phase(&mut messages).await {
+          if let Err(e) = self.planning_phase(&mut messages, &mut events).await {
             eprintln!(
               "{} planning phase failed: {} (continuing)",
               "[Plan]".yellow(),
@@ -2295,7 +2317,11 @@ mod tests {
       content: "some result".to_string(),
       tool_call_id: "t1".to_string(),
     }];
-    App::append_plan_with_bridge(&mut messages, "I should read the file next.".to_string());
+    App::append_plan_with_bridge(
+      &mut messages,
+      &mut Vec::new(),
+      "I should read the file next.".to_string(),
+    );
 
     assert_eq!(messages.len(), 3);
     match &messages[1] {
@@ -2381,7 +2407,7 @@ mod tests {
   #[test]
   fn plan_bridge_skips_empty_plan() {
     let mut messages = vec![Message::new_user_text("hi".to_string())];
-    App::append_plan_with_bridge(&mut messages, "   ".to_string());
+    App::append_plan_with_bridge(&mut messages, &mut Vec::new(), "   ".to_string());
     assert_eq!(messages.len(), 1, "blank plan must not append anything");
   }
 

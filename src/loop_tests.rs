@@ -207,22 +207,11 @@ mod tests {
     assert_eq!(outcome.status, LoopStatus::Completed);
     assert!(scratch.path("notes.md").exists());
 
-    // The recorded trajectory: assistant(read_file) -> tool result ->
-    // assistant(write_file) -> tool result -> assistant(final).
     let events = outcome.events.clone();
-    let assistants = events
-      .iter()
-      .filter(|e| matches!(e, EventPayload::AssistantMessage { .. }))
-      .count();
     let tool_results = events
       .iter()
       .filter(|e| matches!(e, EventPayload::ToolResult { .. }))
       .count();
-    assert!(
-      assistants >= 3,
-      "expected three assistant turns, got {}",
-      assistants
-    );
     assert_eq!(
       tool_results, 2,
       "read_file and write_file each returned once"
@@ -230,8 +219,59 @@ mod tests {
 
     session.extend(events);
     let projected = session.messages();
-    // user + every assistant turn + every tool result.
-    assert_eq!(projected.len(), 1 + assistants + tool_results);
+
+    // The Two-Stage planning pass is why this fixture exists: `read_file`
+    // fails, the micro trigger fires, and the model plans with tools withheld
+    // before writing. The plan and its bridge were in the request the model
+    // answered (`002.request.json`, message_count 6) but were pushed straight
+    // into `messages` without being logged, so the projection came back two
+    // messages short and the *reason* for the write was the part missing.
+    assert!(
+      projected.iter().any(|m| message_text(m).contains(BRIDGE)),
+      "the Two-Stage bridge is absent from the projection — the planning pass \
+       was not journalled"
+    );
+
+    // Checked against the model's own view rather than against the same log
+    // that produced the projection. `003.request.json` records how many
+    // messages went out for the final completion; two offsets separate that
+    // from the projection, and naming them is the point:
+    let recorded = recorded_shape("two-stage-recovery", 3);
+    let system_prompt = 1; // re-derived every run, never a logged turn
+    let final_answer = 1; // produced *by* that request, so not *in* it
+    assert_eq!(
+      projected.len() + system_prompt - final_answer,
+      recorded.message_count,
+      "the log reconstructs {} message(s); the model actually saw {}",
+      projected.len() + system_prompt - final_answer,
+      recorded.message_count
+    );
+  }
+
+  /// The bridge message `append_plan_with_bridge` appends after a planning
+  /// pass. Matched as a prefix so rewording the rest of it does not break the
+  /// test.
+  const BRIDGE: &str = "[System] Proceed:";
+
+  fn message_text(m: &crate::api::Message) -> &str {
+    match m {
+      crate::api::Message::Simple { content, .. } => content,
+      crate::api::Message::ToolResponse { content, .. } => content,
+    }
+  }
+
+  /// The request shape recorded for call `seq` of a fixture — what the model
+  /// was actually sent, independent of anything the loop reconstructs today.
+  fn recorded_shape(name: &str, seq: usize) -> crate::api::record::RequestShape {
+    let path = fixture(name).join(format!("{:03}.request.json", seq));
+    let text = match std::fs::read_to_string(&path) {
+      Ok(t) => t,
+      Err(e) => panic!("cannot read {}: {}", path.display(), e),
+    };
+    match serde_json::from_str(&text) {
+      Ok(shape) => shape,
+      Err(e) => panic!("cannot parse {}: {}", path.display(), e),
+    }
   }
 
   /// L7-6's point: after a refusal the model can ask what IS allowed instead of
