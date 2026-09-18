@@ -616,6 +616,9 @@ impl App {
       usage: None,
     };
     let mut is_reasoning = false;
+    // One per call, because the `/copy` index it prints is scoped to one
+    // call -- `last_code_blocks` is refilled from each assistant message.
+    let mut md = crate::render::Renderer::new();
 
     while let Some(item) = stream.next().await {
       // Mid-stream interrupt check, at every depth. Don't reset the flag here
@@ -638,10 +641,16 @@ impl App {
             eprintln!();
             is_reasoning = false;
           }
-          ui::content(&c);
+          ui::content(&md.push(&c));
+          // The *raw* markdown is what goes into history and `/copy`.
+          // Rendering is a property of the terminal, not of the answer.
           out.content.push_str(&c);
         }
         StreamItem::ToolCall(tc) => {
+          // Drain the half-written line first: the renderer holds a line
+          // until its newline, and a notice printed in between would land
+          // above text that was already on its way out.
+          ui::content(&md.finish());
           eprintln!(
             "\n{} Called: {} {}",
             "Agent:".cyan(),
@@ -651,6 +660,7 @@ impl App {
           out.tool_calls.push(tc);
         }
         StreamItem::Finish(reason) => {
+          ui::content(&md.finish());
           eprintln!();
           if let Some(r) = reason
             && r == "length"
@@ -680,6 +690,11 @@ impl App {
       }
       ui::flush_content()?;
     }
+    // A stream can stop without a `Finish` -- an interrupt breaks out above,
+    // and not every provider sends one. `finish` is idempotent, so the common
+    // path pays nothing for this.
+    ui::content(&md.finish());
+    ui::flush_content()?;
     Ok(out)
   }
 
@@ -2258,6 +2273,37 @@ impl App {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The `/copy N` printed beside a block must be the N that copies it.
+  ///
+  /// Two fence scanners exist and neither knows about the other: the
+  /// renderer's, which numbers blocks on screen, and `extract_code_blocks`,
+  /// which fills the buffer `/copy` indexes into. A label pointing at the
+  /// wrong block is worse than no label, so the agreement gets a gate rather
+  /// than a comment.
+  #[test]
+  fn copy_labels_match_the_blocks_copy_hands_out() {
+    colored::control::set_override(false);
+    let text = "a\n```rust\nONE\n```\nb\n```\nTWO\n```\nc\n```py\nTHREE\n```\n";
+    let blocks = App::extract_code_blocks(text);
+    let mut r = crate::render::Renderer::new();
+    let screen = r.push(text) + &r.finish();
+
+    assert_eq!(blocks.len(), 3, "{blocks:?}");
+    let mut cursor = 0;
+    for (i, block) in blocks.iter().enumerate() {
+      let label = format!("/copy {}", i + 1);
+      let Some(at_label) = screen[cursor..].find(&label) else {
+        panic!("block {} has no label on screen:\n{screen}", i + 1);
+      };
+      let Some(at_body) = screen[cursor + at_label..].find(block.trim_end()) else {
+        panic!("block {} body does not follow its label:\n{screen}", i + 1);
+      };
+      // Each label precedes its own body and both precede the next label,
+      // which is what "same order" means when the indices are just counters.
+      cursor += at_label + at_body;
+    }
+  }
 
   /// Records what `tools` argument it was handed, so a caller's intent to
   /// withhold tools can be asserted on.

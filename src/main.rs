@@ -21,6 +21,7 @@ mod mcp;
 mod memory;
 mod observability;
 mod proposals;
+mod render;
 mod session;
 mod skills;
 mod subagents;
