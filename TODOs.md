@@ -2077,10 +2077,13 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       它就开始约三次一红，报的还是一个与 `propose` 毫无关系的 `[MODE DENIED]`。
       改动前 6/6 绿、未修时 3 次红 1 次、补锁后 10/10 绿。
 
-**顺带发现、本阶段未改**：`run_shell` 的工具描述仍写着「In a later release,
-dangerous commands (rm -rf, sudo, curl|sh, etc.) **will prompt** for user
-confirmation」——审批门阶段八就落地了，这句话对**模型**说安全机制还不存在。
-没有一并改是因为改工具描述等于改 prompt，应当过一遍 eval 再动，不该搭车。
+- [ ] **55.7 `run_shell` 的工具描述对模型说谎**（顺带发现，本阶段未改）。
+      它仍写着「In a later release, dangerous commands (rm -rf, sudo,
+      curl|sh, etc.) **will prompt** for user confirmation」——审批门阶段八
+      就落地了，这句话对**模型**说安全机制还不存在。
+      没有一并改是因为改工具描述等于改 prompt，应当过一遍 eval 再动，不该搭车。
+      **写成正文是我的错**：按本文件开头的约定，`grep '- [ ]'` 数出来的才算
+      待办，写成正文等于它不存在——正是这条约定当初要防的事。2026-09-18 补勾。
 
 ---
 
