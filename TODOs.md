@@ -31,7 +31,7 @@ crates.io 发布已于 2026-09-12 定为不做；多平台 release 已于 2026-0
 
 | 指标 | 阶段十九 | 现在 |
 | --- | --- | --- |
-| 单测 | 87 | **396**（阶段五十四后，另 1 个 `#[ignore]` 观察入口；阶段五十三时为 369，阶段三十三时为 269） |
+| 单测 | 87 | **397**（阶段五十五后，另 1 个 `#[ignore]` 观察入口；阶段五十三时为 369，阶段三十三时为 269） |
 | 行覆盖率 | 46.3% | **70.9%** |
 | 内置工具 | 8 | **17** + 任意 MCP |
 | eval 任务 | 3 | **30** |
@@ -2012,6 +2012,51 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
 **明确不做**：语法高亮（判据未变）；单星号斜体（模型把星号当乘号写得够多，
 吞掉它是静默改写正文）；`planning_phase` 的渲染（整段 dimmed 是它自己的样式，
 与行内着色相冲）。
+
+---
+
+### 🟤 阶段五十五：前台命令的 stdin —— agent 被一个看不见的提问挂死
+
+*来源：一次真实使用。`raco pkg install rackunit` 的 spinner 转了 17 分钟，
+用户问「这个是卡住了还是一直在测试」。*
+
+- [x] **55.1** `run_shell` 前台路径给子进程 `Stdio::null()`。
+      此前它**继承真实 tty**，于是在 tty 上提问的命令会等一个永远不会来的回答。
+      诊断靠的是三个数而不是猜：17 分钟累计 CPU **0.36 秒**、**零 socket**、
+      `fd 0 = /dev/ttys000`。它问的 `Would you like to install these
+      dependencies? [Y/n/a/c/?]` **永远不会上屏**——stdout 是管道，本函数要等
+      子进程退出才读，问题和答案互相死锁。
+      修后同一条命令 **2 秒**结束，并留下 `Treating end-of-file input as
+      "cancel"` ——**快速失败比超时好，因为它顺带告诉模型该加 `--auto`**。
+- [x] **55.2** `bench.rs` 的 setup 是同一缺陷的另一个现场。实测 `.output()` 与
+      `.status()` 的默认 stdin **不同**（活 stdin 下 inode 336 vs 3873630804），
+      所以 `run_eval` / `run_cleanup` 本来就安全，只有 setup 需要修。
+- [x] **55.3** 订正 L2 §4.2 的一条**假的「已落地」**：「`timeout` 默认 120s，
+      可由参数覆盖至 600s」——schema 里没有这个参数，`select!` 里没有这个分支。
+      **从未实现过。**
+
+**判据本身是歪的，这次被抓住了。** 第一版门用「`cat` 阻塞多久」计时，在 stdin
+已是 `/dev/null` 的 runner 上**无修复也绿**——一条空门。改成断言子进程 fd 0 与
+`/dev/null` 的 device+inode 相同。两种环境各测：`sleep 20 | cargo test` 无修复
+0.02 秒红、有修复 0.02 秒绿；裸 `cargo test` 两种都绿。
+**这条门在 CI 里仍然是盲的**（继承与重定向只有「有东西可继承」时才可区分），
+注释里写明了，没有假装它全能。
+
+**明确不做：墙钟超时**（当前版本）。超时值多少都是拍脑袋的，且会误杀合法长命令
+——那正是 `background=true` 的职责。挂死的主因已从根上消除。
+重估条件可执行，两边验过（真实轨迹退出 0，造一个 11 分钟 span 退出 1）：
+
+```sh
+jq -e -s '[.[] | .. | objects
+  | select(.kind=="execute"
+           and ((.meta.tools // []) | index("run_shell"))
+           and .dur_ms > 600000)] | length == 0' ~/.seekcli/traces/*.json
+```
+
+**顺带发现、本阶段未改**：`run_shell` 的工具描述仍写着「In a later release,
+dangerous commands (rm -rf, sudo, curl|sh, etc.) **will prompt** for user
+confirmation」——审批门阶段八就落地了，这句话对**模型**说安全机制还不存在。
+没有一并改是因为改工具描述等于改 prompt，应当过一遍 eval 再动，不该搭车。
 
 ---
 
