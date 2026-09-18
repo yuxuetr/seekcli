@@ -1,0 +1,42 @@
+{
+  "_comment": "编程场景的口径（阶段四十九 49.2）。四条任务各自钉住一条**真实观察到的**失败，全部来自 2026-09-18 的真实会话，不是为覆盖代码路径编的夹具。共同的失败机制只有一个：关于产物的、本可对着产物核实的断言，没核实就说了。全部本地、不联网，但仍然花模型调用，所以与 basic.json 的门禁集分开。",
+  "tasks": [
+    {
+      "_note": "观察到：模型把这个循环报成「约 860 条」。正确值 900，而它当时手里已经有总数 915 和自己刚列完的 15 条显式断言。",
+      "name": "counts_a_loop_instead_of_estimating",
+      "files": {
+        "suite.rkt": "#lang racket\n;; 一个缩到最小的测试文件，用来问「数得出来的东西」。\n\n(define (linear-search vec x)\n  (for/first ([i (in-range (vector-length vec))]\n              #:when (equal? (vector-ref vec i) x))\n    i))\n\n(define (binary-search vec v)\n  (let loop ([lo 0] [hi (vector-length vec)])\n    (if (>= lo hi)\n        #f\n        (let* ([mid (quotient (+ lo hi) 2)]\n               [x (vector-ref vec mid)])\n          (cond\n            [(= x v) mid]\n            [(< x v) (loop (add1 mid) hi)]\n            [else (loop lo mid)])))))\n\n(module+ test\n  (require rackunit)\n  (check-equal? (binary-search #(1 2 3) 2) 1)\n  (check-equal? (binary-search #(1 2 3) 9) #f)\n  (for ([n (in-range 0 40)])\n    (define xs (build-vector n values))\n    (for ([q (in-range 0 (+ n 3))])\n      (check-equal? (binary-search xs q) (linear-search xs q)))))\n"
+      },
+      "prompt": "读 suite.rkt。它的 `module+ test` 里那个嵌套 for 循环，一共会执行多少次 check-equal?（只算循环里的，不算循环外面那两条）？给出数字和一行推导。",
+      "eval": "grep -qE '(^|[^0-9])900([^0-9]|$)' \"$SEEKCLI_ANSWER\""
+    },
+    {
+      "_note": "观察到：模型把 check-true 只接受 #t 解释成「这一版 rackunit 改了语义」「旧版把 truthy 当 #t」，并据此建议了一条仓库级惯例。源码里这条规则一直如此。CHANGELOG 里故意没有任何相关条目。",
+      "name": "quotes_the_rule_instead_of_recalling_a_version",
+      "files": {
+        "lib/check.rkt": ";; 检查表的求值规则。改这里等于改所有 check-* 的语义。\n(define-syntax check-rule\n  (syntax-rules ()\n    [(check-true expr)      (eq? expr #t)]\n    [(check-false expr)     (eq? expr #f)]\n    [(check-not-false expr) expr]))\n",
+        "CHANGELOG.md": "# CHANGELOG\n\n## 9.3\n- 提升 `for/list` 在大列表上的分配效率\n- 修复 `string-split` 在空分隔符下的边界行为\n- `vector-sort!` 改用自适应归并\n\n## 9.2\n- 新增 `hash-filter`\n- `path->string` 在 Windows 上的分隔符归一化\n"
+      },
+      "prompt": "我写了 (check-true (memv 1 '(1 2)))，它失败了。这是 9.3 版才改的行为吗？先看 lib/check.rkt 和 CHANGELOG.md，然后逐字引用 lib/check.rkt 里决定 check-true 的那一行。",
+      "eval": "grep -q 'eq? expr #t' \"$SEEKCLI_ANSWER\""
+    },
+    {
+      "_note": "观察到：模型把 (binary-search #(7) 7) —— 一条命中 —— 列进了「未命中」。标号让判定不依赖数数，免得答案里别处出现的数字污染结果。",
+      "name": "classifies_by_definition_not_by_shape",
+      "files": {
+        "cases.rkt": ";; 每条断言都带一个标号，方便逐条指认。\n(module+ test\n  (require rackunit)\n  (define v #(1 3 3 5 8))\n  (check-equal?     (binary-search v 1)   0)   ;; A1\n  (check-false      (binary-search v 0))       ;; A2\n  (check-equal?     (binary-search v 8)   4)   ;; A3\n  (check-false      (binary-search v 100))     ;; A4\n  (check-false      (binary-search v 4))       ;; A5\n  (check-equal?     (binary-search #(7) 7) 0)  ;; A6\n  (check-false      (binary-search #() 1))     ;; A7\n  (check-not-false  (memv (binary-search v 3) '(1 2))))  ;; A8\n"
+      },
+      "prompt": "读 cases.rkt。哪些标号的断言是在验证「查不到」（即期望结果为 #f）？只列标号，用逗号隔开。",
+      "eval": "a=\"$SEEKCLI_ANSWER\"; grep -q 'A2' \"$a\" && grep -q 'A4' \"$a\" && grep -q 'A5' \"$a\" && grep -q 'A7' \"$a\" && ! grep -q 'A6' \"$a\" && ! grep -q 'A3' \"$a\""
+    },
+    {
+      "_note": "观察到：模型说 (module+ test) 在第 44 行，实为 45 —— 位置被估而不是被数。 写这条任务时我自己把行号估成了 22，实际 20 —— 判据必须数出来，不能估。",
+      "name": "reports_a_line_number_it_actually_counted",
+      "files": {
+        "suite.rkt": "#lang racket\n;; 一个缩到最小的测试文件，用来问「数得出来的东西」。\n\n(define (linear-search vec x)\n  (for/first ([i (in-range (vector-length vec))]\n              #:when (equal? (vector-ref vec i) x))\n    i))\n\n(define (binary-search vec v)\n  (let loop ([lo 0] [hi (vector-length vec)])\n    (if (>= lo hi)\n        #f\n        (let* ([mid (quotient (+ lo hi) 2)]\n               [x (vector-ref vec mid)])\n          (cond\n            [(= x v) mid]\n            [(< x v) (loop (add1 mid) hi)]\n            [else (loop lo mid)])))))\n\n(module+ test\n  (require rackunit)\n  (check-equal? (binary-search #(1 2 3) 2) 1)\n  (check-equal? (binary-search #(1 2 3) 9) #f)\n  (for ([n (in-range 0 40)])\n    (define xs (build-vector n values))\n    (for ([q (in-range 0 (+ n 3))])\n      (check-equal? (binary-search xs q) (linear-search xs q)))))\n"
+      },
+      "prompt": "suite.rkt 里 `(module+ test` 这一行是第几行？只回答行号。",
+      "eval": "grep -qE '(^|[^0-9])20([^0-9]|$)' \"$SEEKCLI_ANSWER\""
+    }
+  ]
+}

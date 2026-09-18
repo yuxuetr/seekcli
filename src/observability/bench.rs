@@ -348,6 +348,55 @@ impl Report {
 
 #[cfg(test)]
 mod tests {
+  /// Every shipped suite must parse — not only the embedded one.
+  ///
+  /// `basic.json` is `include_str!`d and so fails the build if it rots.
+  /// The others are loose files that nothing reads until a human runs them,
+  /// **with an API key and real money**, and `deny_unknown_fields` means one
+  /// stray key is a hard failure discovered at exactly that moment. Checking
+  /// here costs nothing and moves the discovery to CI.
+  ///
+  /// `CARGO_MANIFEST_DIR` is deliberate *here* and was the bug in stage 49.4
+  /// *there*: a build-time path is wrong for shipped runtime code, and right
+  /// for a test, which only ever runs from the source tree.
+  #[test]
+  fn every_shipped_suite_parses() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/benchmarks");
+    let entries = match std::fs::read_dir(&dir) {
+      Ok(e) => e,
+      Err(e) => panic!("cannot read {}: {e}", dir.display()),
+    };
+
+    let mut seen = 0;
+    for entry in entries.flatten() {
+      let path = entry.path();
+      if path.extension().is_none_or(|ext| ext != "json") {
+        continue;
+      }
+      let suite = match super::TestSuite::load(&path) {
+        Ok(s) => s,
+        Err(e) => panic!("{} does not parse: {e:#}", path.display()),
+      };
+      assert!(
+        !suite.tasks.is_empty(),
+        "{} has no tasks, so running it would report a vacuous pass",
+        path.display()
+      );
+      // Names become directory names in the testbed, and a duplicate would
+      // have two tasks silently sharing one.
+      let mut names = std::collections::BTreeSet::new();
+      for task in &suite.tasks {
+        assert!(
+          names.insert(task.name.as_str()),
+          "{} repeats the task name {:?}",
+          path.display(),
+          task.name
+        );
+      }
+      seen += 1;
+    }
+    assert!(seen >= 3, "expected at least three suites, found {seen}");
+  }
 
   fn report(rows: &[(&str, bool)]) -> Report {
     let mut r = Report::default();
