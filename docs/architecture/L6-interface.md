@@ -17,7 +17,7 @@
 | slash 命令 | `commands.rs::handle_command`（**21 条**）；`SLASH_COMMANDS` 是唯一清单，`/help` 与 Tab 补全都从它派生，见 §4.5 |
 | 答案渲染 | `render.rs::Renderer`（按行流式；代码块顶格 + `/copy` 序号），见 §4.7 |
 | 状态指示 | prompt 显示 `model (thinking\|plan\|skill) ❯`；`run_shell` >800ms 显示 spinner |
-| Ctrl-C | `spawn_interrupt_watcher` + 循环轮询 |
+| Ctrl-C | `spawn_interrupt_watcher` + 循环轮询；**审批提示单独走 rustyline**（阶段五十五），见 §4.8 |
 | Ctrl-V 贴图 | `main.rs::PasteKey`（rustyline 条件绑定 → `/paste`），见 §4.4 |
 | 通用 headless | `-p <prompt>` / stdin 管道 / `--output json` / `--max-iter` / `--read-only` / `--yes` / `--cwd` |
 | 会话续接 | `-c` / `--continue`（最近一次）、`--resume <id>`（指定），与 REPL 的 `/resume [id]` 共用 `App::resume_session` |
@@ -207,6 +207,25 @@ markdown 原文**：围栏与 `**` 直接打给人看。`render.rs` 补上这半
 
 序号一致性有门（`engine::tests::copy_labels_match_the_blocks_copy_hands_out`）：
 两个围栏扫描器互不知情，而**标签指错块比没有标签更糟**。
+
+### 4.8 审批提示为什么不用 `read_line`（阶段五十五）
+
+`approval.rs` 的 `[y/N]` 曾是主线程上的同步 `io::stdin().read_line()`。中断
+监视器只设一个 flag，而**阻塞的 read 不会被打断**（EINTR 被重试），于是在这个
+提示上按 Ctrl-C 只会让终端回显一个 `^C`——用户的原话是「Ctrl+C 就是多增加了
+一行展示，不能终止」。
+
+改用 rustyline：它已经是依赖、本来就是 REPL 的行编辑器，并把这个键报成
+`Interrupted`。
+
+**Ctrl-C 语义是「停止本回合」，不是「拒绝这一条命令」**：只返回 `false` 会让
+模型拿着一条拒绝直接去试下一个主意，所以它还要抬起 `shell::request_interrupt`
+——即 agent 循环轮询的那个标志。Ctrl-D 与「没有可用终端」都只是拒绝，因为这个
+提示的职责就是拦住危险命令，失败方向必须是「别跑」。
+
+读终端的那半边**不进测试**：在开发者机器上它会真的阻塞等输入，在 CI 里又空过。
+所以决策逻辑抽成纯函数 `verdict_for` 单独钉住，按键行为在真 pty 里验证
+（`y`→true、Ctrl-C→中断+false、Ctrl-D→false）。
 
 ## 5. 明确不做
 

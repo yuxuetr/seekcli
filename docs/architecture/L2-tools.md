@@ -224,7 +224,7 @@ WEB_CONTENT>>>
 `/dev/null`，`.status()` 则把父进程的 stdin 直接递过去，所以只有走 `.status()`
 的 setup 需要修。
 
-#### 超时会跳过清理（已知缺口，2026-09-18）
+#### 超时会跳过清理（2026-09-18 已修复）
 
 `tools/mod.rs` 的超时是 `tokio::time::timeout(limit, run(args))`，**靠 drop
 future 生效**。于是 `run_shell` 里 `select!` 之后的清理一行都不跑：
@@ -238,8 +238,15 @@ future 生效**。于是 `run_shell` 里 `select!` 之后的清理一行都不�
 **17 分 33 秒**时仍然存活——超时早已触发，子进程却没被杀。屏幕上同时有一个
 显示着十几分钟前那条命令的 spinner 在重画。
 
-**判据不能是「有没有超时」**——有；是「超时后清理有没有发生」。`Drop` 守卫
-是修法，因为 drop 是 future 被丢弃时唯一保证会跑的东西。
+**判据不能是「有没有超时」**——有；是「超时后清理有没有发生」。
+
+修法是 `shell.rs::Cleanup`：drop 是 future 被丢弃时唯一保证会跑的东西，所以
+清理放在 `Drop` 里，而不是放在一行「必须被到达」的代码中。守卫持 pid 而非
+`&Child`（`Drop` 借不到已被丢弃的 future 拥有的东西），并在子进程收割后
+disarm，使正常路径不为一次注定 `ESRCH` 的 kill 付费。
+
+门：`a_dropped_command_does_not_outlive_its_future`，去掉 `Drop` 里的 kill
+即红。
 
 ## 5. 明确不做
 

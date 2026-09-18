@@ -31,7 +31,7 @@ crates.io 发布已于 2026-09-12 定为不做；多平台 release 已于 2026-0
 
 | 指标 | 阶段十九 | 现在 |
 | --- | --- | --- |
-| 单测 | 87 | **397**（阶段五十五后，另 1 个 `#[ignore]` 观察入口；阶段五十三时为 369，阶段三十三时为 269） |
+| 单测 | 87 | **401**（阶段五十五后，另 1 个 `#[ignore]` 观察入口；阶段五十三时为 369，阶段三十三时为 269） |
 | 行覆盖率 | 46.3% | **70.9%** |
 | 内置工具 | 8 | **17** + 任意 MCP |
 | eval 任务 | 3 | **30** |
@@ -2046,19 +2046,36 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
 **这条门在 CI 里仍然是盲的**（继承与重定向只有「有东西可继承」时才可区分），
 注释里写明了，没有假装它全能。
 
-- [ ] **55.4 超时跳过清理**（由 55.3 的更正牵出的真缺口）。
+- [x] **55.4 超时跳过清理**（由 55.3 的更正牵出的真缺口）✅ 2026-09-18
       `tools/mod.rs` 的超时是 `tokio::time::timeout(limit, run(args))`，
       **靠 drop future 生效**，于是 `run_shell` 中 `select!` 之后的清理全被跳过：
       spinner（独立 `tokio::spawn` 任务）**永远转下去**并每 120ms 重画 stderr，
       覆盖其后的一切输出；`kill_process_group` 不执行，子进程树变成孤儿。
       **证据**：那条 raco 的上限是 600 秒，实测 **17 分 33 秒**仍存活。
       用户看到的「输出乱码 + spinner 显示着十几分钟前的命令」就是这个。
-      修法是 `Drop` 守卫——drop 是 future 被丢弃时唯一保证会跑的东西。
-- [ ] **55.5 Ctrl-C 无法中断审批提示**。`approval.rs:233` 是主线程上的同步
+      修法是 `Cleanup` 守卫——drop 是 future 被丢弃时唯一保证会跑的东西，
+      所以清理不能放在一行「必须被到达」的代码里。守卫持 pid 而非 `&Child`，
+      并在收割后 disarm，使正常路径不为一次注定 ESRCH 的 kill 付费。
+      反向验证：去掉 Drop 里的 kill，`a_dropped_command_does_not_outlive_its_future`
+      立刻红。探针用 `sleep 45; echo <marker>` 而非裸 sleep——`sh` 对简单命令会
+      exec 掉自己，marker 就不在任何人的 argv 里了。
+- [x] **55.5 Ctrl-C 无法中断审批提示** ✅ 2026-09-18。`approval.rs:233` 是主线程上的同步
       `io::stdin().read_line()`；中断监视器只设一个 flag，而阻塞的 read 不会被
       打断（EINTR 被重试）。用户描述得很准：「Ctrl+C 就是多增加了一行展示，
       不能终止」——那一行是终端回显的 `^C`。Ctrl-D 当前可用（读到 0 字节视为
-      拒绝），但**屏幕上没有任何地方说这件事**。
+      拒绝），但屏幕上没有任何地方说这件事。
+      改用 rustyline（已是依赖，本就是 REPL 的行编辑器），它把这个键报成
+      `Interrupted`。**Ctrl-C 语义是「停止本回合」而不是「拒绝这一条命令」**，
+      所以还要抬起 agent 循环轮询的中断标志——只返回 false 会让模型拿着拒绝
+      直接去试下一个主意。读终端的那半边**不能**进测试（开发者机器上会真的
+      阻塞等输入，CI 里又空过），所以决策逻辑抽成纯函数 `verdict_for` 单独钉住，
+      按键行为在真 pty 里验：`y`→true、Ctrl-C→中断+false、Ctrl-D→false。
+- [x] **55.6 一条被 55.4 暴露出来的既有测试竞态** ✅ 2026-09-18。
+      `proposing_an_unknown_kind_names_the_valid_ones` 走 dispatcher 因而**读**
+      策略模式，却不拿 `testsync::lock()`；同模块另外三个 execute 测试都拿了。
+      **一把只有写者持有的锁不是锁。** 新测试跑 ~800ms 把时序推进重叠区间，
+      它就开始约三次一红，报的还是一个与 `propose` 毫无关系的 `[MODE DENIED]`。
+      改动前 6/6 绿、未修时 3 次红 1 次、补锁后 10/10 绿。
 
 **顺带发现、本阶段未改**：`run_shell` 的工具描述仍写着「In a later release,
 dangerous commands (rm -rf, sudo, curl|sh, etc.) **will prompt** for user
