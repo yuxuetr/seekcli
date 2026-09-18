@@ -637,24 +637,18 @@ impl App {
           out.reasoning.push_str(&r);
         }
         StreamItem::Content(c) => {
-          if is_reasoning {
-            eprintln!();
-            is_reasoning = false;
-          }
+          // Only closes the reasoning line. Draining here would call `finish`
+          // on every chunk, which is the same as having no line buffer at all:
+          // each chunk would render as though it were a whole line, and a fence
+          // split across two chunks would stop being a fence.
+          Self::end_reasoning(&mut is_reasoning);
           ui::content(&md.push(&c));
           // The *raw* markdown is what goes into history and `/copy`.
           // Rendering is a property of the terminal, not of the answer.
           out.content.push_str(&c);
         }
         StreamItem::ToolCall(tc) => {
-          // Drain the half-written line *and flush it*. Content goes to one
-          // stream and this notice to the other, and the drained tail has no
-          // newline of its own -- so without the flush it sits in stdout's
-          // buffer and surfaces *after* the notice, reordering the answer.
-          // Found by looking at real output: a test that inspects the
-          // returned `Response` cannot see this at all.
-          ui::content(&md.finish());
-          ui::flush_content()?;
+          Self::drain_in_flight(&mut md, &mut is_reasoning)?;
           eprintln!(
             "\n{} Called: {} {}",
             "Agent:".cyan(),
@@ -664,8 +658,7 @@ impl App {
           out.tool_calls.push(tc);
         }
         StreamItem::Finish(reason) => {
-          ui::content(&md.finish());
-          ui::flush_content()?;
+          Self::drain_in_flight(&mut md, &mut is_reasoning)?;
           eprintln!();
           if let Some(r) = reason
             && r == "length"
@@ -674,6 +667,7 @@ impl App {
           }
         }
         StreamItem::Usage(info) => {
+          Self::drain_in_flight(&mut md, &mut is_reasoning)?;
           let pct = info
             .prompt_cache_hit_tokens
             .checked_mul(100)
@@ -701,6 +695,50 @@ impl App {
     ui::content(&md.finish());
     ui::flush_content()?;
     Ok(out)
+  }
+
+  /// End whatever line is still in flight, before printing anything that is
+  /// not the answer.
+  ///
+  /// Two different things can be mid-line, and both are written to the content
+  /// stream while every notice goes to the other one: the renderer holds a line
+  /// until its newline arrives, and reasoning is streamed raw and simply ends
+  /// without one. An unterminated tail is not merely untidy — it surfaces
+  /// *after* the notice, so the answer comes out reordered.
+  ///
+  /// Three call sites is why this is a function rather than three copies. At
+  /// two it *was* three copies minus one: `Usage` was missed, and a real
+  /// session printed `[Usage] prompt=...` between the two halves of one
+  /// paragraph. Nothing that inspects the returned `Response` can see this,
+  /// because the bug is entirely in what reached the terminal and when.
+  fn drain_in_flight(
+    md: &mut crate::render::Renderer,
+    is_reasoning: &mut bool,
+  ) -> std::io::Result<()> {
+    let tail = md.finish();
+    if !tail.is_empty() {
+      ui::content(&tail);
+      // Leave the cursor at column 0. The notice about to be printed goes to
+      // the other stream and has no way to know a line was still open, so it
+      // would otherwise be appended to the end of the answer's last sentence.
+      ui::content("\n");
+    }
+    Self::end_reasoning(is_reasoning);
+    ui::flush_content()
+  }
+
+  /// Close the reasoning line, which is streamed raw and ends without one.
+  ///
+  /// Separate from [`Self::drain_in_flight`] because content needs *only* this
+  /// half: reasoning must be terminated before the answer starts, but the
+  /// renderer has to go on holding its partial line.
+  fn end_reasoning(is_reasoning: &mut bool) {
+    if *is_reasoning {
+      // Reasoning shares the content stream, so its terminator belongs there
+      // too — an `eprintln!` here would put the break on the other stream.
+      ui::content("\n");
+      *is_reasoning = false;
+    }
   }
 
   /// Truncate tool arguments for the console line, on a char boundary.
@@ -2348,17 +2386,29 @@ mod tests {
     colored::control::set_override(true);
     // Chunk boundaries deliberately land mid-word and mid-fence.
     let script = vec![
-      S::Content("先看 `qsort`:\n\n``".into()),
-      S::Content("`racket\n(define (qsort ls".into()),
-      S::Content("t)\n  (cond\n    [(empty? lst) empty]))\n```\n\n**要点**".into()),
-      S::Content("：`partition` 返回两个值。".into()),
+      // Reasoning ends without a newline, and a notice follows it.
+      S::Reasoning("先确认 rackunit 在不在".into()),
       S::ToolCall(api::ToolCall {
         id: "1".into(),
         tool_type: "function".into(),
         function: api::FunctionCall {
           name: "run_shell".into(),
-          arguments: "{\"command\":\"racket /tmp/q.rkt\"}".into(),
+          arguments: "{\"command\":\"raco test binary-search.rkt\"}".into(),
         },
+      }),
+      // Chunk boundaries deliberately land mid-word and mid-fence.
+      S::Content("先看 `qsort`:\n\n``".into()),
+      S::Content("`racket\n(define (qsort ls".into()),
+      S::Content("t)\n  (cond\n    [(empty? lst) empty]))\n```\n\n**要点**".into()),
+      // No trailing newline: this tail is what used to come out *below* the
+      // `[Usage]` line instead of above it.
+      S::Content("：`partition` 返回两个值。".into()),
+      // Usage before Finish, which is where every provider puts it.
+      S::Usage(crate::api::UsageInfo {
+        prompt_tokens: 11886,
+        completion_tokens: 488,
+        prompt_cache_hit_tokens: 11648,
+        prompt_cache_miss_tokens: 238,
       }),
       S::Finish(Some("stop".into())),
     ];
