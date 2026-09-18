@@ -144,6 +144,13 @@ impl Task {
         .arg("-c")
         .arg(cmd)
         .current_dir(&testbed)
+        // `status()` inherits stdin where `output()` nulls it, so this is the
+        // one spawn here that could stop on a prompt and wait forever. Measured
+        // both: under a live stdin, `output()` gives the child /dev/null and
+        // `status()` hands it the parent's pipe. Same reasoning as
+        // `run_shell` -- a setup command that asks a question must fail, not
+        // hang a bench run nobody is watching.
+        .stdin(std::process::Stdio::null())
         .status()
         .with_context(|| format!("running setup `{cmd}`"))?;
       if !status.success() {

@@ -145,6 +145,19 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   let mut child = tokio::process::Command::new("sh")
     .arg("-c")
     .arg(command)
+    // EOF, not the terminal. An inherited stdin is a tty, and a command that
+    // asks a question on it waits for an answer that can never come: nobody is
+    // typing, and the question itself is invisible because stdout is a pipe
+    // this function only reads after the child exits. `run_shell` has no
+    // timeout, so that wait is unbounded -- measured on `raco pkg install
+    // rackunit`, which stopped at its dependency prompt and sat there for 11
+    // minutes having consumed 0.36 seconds of CPU.
+    //
+    // With `/dev/null` the read returns EOF immediately and the command fails
+    // with its own diagnostic, which is the one thing the model can act on. The
+    // background path (`jobs::spawn`) has always done this; the difference was
+    // an oversight, not a decision.
+    .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     // Its own process group, so cancelling can reach the whole command tree.
@@ -378,6 +391,61 @@ mod tests {
       elapsed < std::time::Duration::from_millis(1600),
       "took {elapsed:?} for a 1s command — the spinner delay is being charged \
        again"
+    );
+  }
+
+  /// A command that reads stdin must see EOF, never the terminal.
+  ///
+  /// What this guards is unbounded: the `select!` below has no timeout arm, so
+  /// a child blocked on an inherited tty hangs the agent until a human presses
+  /// Ctrl-C. Measured on `raco pkg install rackunit`, which stopped at its
+  /// `--deps search-ask` prompt and had consumed 0.36s of CPU after 11 minutes.
+  /// The prompt was never visible: stdout is a pipe this function only reads
+  /// once the child exits, so the question and the answer deadlocked on each
+  /// other.
+  ///
+  /// `stat` both paths and compare: device+inode differs for a pipe or a tty
+  /// and matches for `/dev/null`. GNU spells it `-c`, BSD `-f`, and the release
+  /// ships both platforms.
+  ///
+  /// **This door is blind when the runner's own stdin is already `/dev/null`**,
+  /// which is the case under CI and under most non-interactive shells — the
+  /// child then inherits `/dev/null` and looks correct without the fix. No
+  /// black-box test can do better: inheriting and redirecting are only
+  /// distinguishable when there is something to inherit. It does red, in
+  /// 0.02s, whenever `cargo test` is run with a live stdin — a developer's
+  /// terminal, which is where the line would get deleted in the first place.
+  ///
+  /// Both halves measured with the fix reverted: `sleep 20 | cargo test` reds,
+  /// a plain `cargo test` here does not. An earlier version asserted on how
+  /// long `cat` blocked instead; it reds in 24.86s under the pipe and is
+  /// equally blind without it, so it cost 24 seconds and bought nothing.
+  #[tokio::test]
+  async fn a_command_reading_stdin_gets_dev_null_not_the_terminal() {
+    crate::tools::approval::set_interaction(crate::tools::approval::Interaction::AutoApprove);
+    let out = run_shell(&serde_json::json!({
+      "command":
+        "for f in /dev/fd/0 /dev/null; \
+         do stat -c '%d %i' $f 2>/dev/null || stat -f '%d %i' $f; done"
+    }))
+    .await;
+
+    let text = match out {
+      Ok(t) => t,
+      Err(e) => panic!("run_shell failed: {e}"),
+    };
+    let ids: Vec<&str> = text
+      .lines()
+      .map(str::trim)
+      .filter(|l| !l.is_empty())
+      .rev()
+      .take(2)
+      .collect();
+    assert_eq!(ids.len(), 2, "probe produced no ids:\n{text}");
+    assert_eq!(
+      ids[0], ids[1],
+      "the child's stdin is not /dev/null -- it inherited ours, and any \
+       command that asks a question on it will block forever:\n{text}"
     );
   }
 
