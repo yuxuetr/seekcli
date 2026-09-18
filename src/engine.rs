@@ -647,10 +647,14 @@ impl App {
           out.content.push_str(&c);
         }
         StreamItem::ToolCall(tc) => {
-          // Drain the half-written line first: the renderer holds a line
-          // until its newline, and a notice printed in between would land
-          // above text that was already on its way out.
+          // Drain the half-written line *and flush it*. Content goes to one
+          // stream and this notice to the other, and the drained tail has no
+          // newline of its own -- so without the flush it sits in stdout's
+          // buffer and surfaces *after* the notice, reordering the answer.
+          // Found by looking at real output: a test that inspects the
+          // returned `Response` cannot see this at all.
           ui::content(&md.finish());
+          ui::flush_content()?;
           eprintln!(
             "\n{} Called: {} {}",
             "Agent:".cyan(),
@@ -661,6 +665,7 @@ impl App {
         }
         StreamItem::Finish(reason) => {
           ui::content(&md.finish());
+          ui::flush_content()?;
           eprintln!();
           if let Some(r) = reason
             && r == "length"
@@ -2303,6 +2308,69 @@ mod tests {
       // which is what "same order" means when the indices are just counters.
       cursor += at_label + at_body;
     }
+  }
+
+  /// Streams a fixed script, so the loop can be driven with no API key.
+  struct Scripted(Vec<crate::api::StreamItem>);
+
+  #[async_trait::async_trait]
+  impl crate::api::LlmProvider for Scripted {
+    async fn call_api_with_params(
+      &self,
+      _m: &str,
+      _msgs: Vec<Message>,
+      _t: &str,
+      _tools: Option<Vec<api::Tool>>,
+    ) -> anyhow::Result<crate::api::StreamResult> {
+      let items: Vec<anyhow::Result<crate::api::StreamItem>> =
+        self.0.clone().into_iter().map(Ok).collect();
+      Ok(Box::pin(futures_util::stream::iter(items)))
+    }
+  }
+
+  /// Print one rendered answer through the real loop, to be *looked at*.
+  ///
+  /// ```sh
+  /// cargo test eyeball_the_rendered_stream -- --ignored --nocapture
+  /// ```
+  ///
+  /// `#[ignore]` because it asserts nothing — its output is the point, and a
+  /// test with no assertion would otherwise be noise in the suite. It earns
+  /// its place by what it caught: the fence markers and `**` reaching the
+  /// screen inside a bold span, and — the one no unit test could see — the
+  /// half-written line surfacing *after* a tool-call notice, because content
+  /// and notices go to different streams and stdout had not been flushed.
+  /// Both were invisible to a green suite.
+  #[tokio::test]
+  #[ignore = "prints for a human to read; asserts nothing"]
+  async fn eyeball_the_rendered_stream() {
+    use crate::api::StreamItem as S;
+    colored::control::set_override(true);
+    // Chunk boundaries deliberately land mid-word and mid-fence.
+    let script = vec![
+      S::Content("先看 `qsort`:\n\n``".into()),
+      S::Content("`racket\n(define (qsort ls".into()),
+      S::Content("t)\n  (cond\n    [(empty? lst) empty]))\n```\n\n**要点**".into()),
+      S::Content("：`partition` 返回两个值。".into()),
+      S::ToolCall(api::ToolCall {
+        id: "1".into(),
+        tool_type: "function".into(),
+        function: api::FunctionCall {
+          name: "run_shell".into(),
+          arguments: "{\"command\":\"racket /tmp/q.rkt\"}".into(),
+        },
+      }),
+      S::Finish(Some("stop".into())),
+    ];
+    let app = match App::for_test(Box::new(Scripted(script))) {
+      Ok(a) => a,
+      Err(e) => panic!("{e}"),
+    };
+    println!("--------8<-------- screen --------8<--------");
+    let _ = app
+      .request_step(&[Message::new_user_text("hi".into())], &[])
+      .await;
+    println!("\n--------8<-------- end --------8<--------");
   }
 
   /// Records what `tools` argument it was handed, so a caller's intent to
