@@ -379,6 +379,65 @@ const WRITE_VERBS: &[&str] = &[
   "truncate", "shred", "rsync",
 ];
 
+/// Where a command's writes land, tracked across `cd`.
+///
+/// Without this the gate only ever saw *absolute* targets, so
+/// `cat > /tmp/probe.rkt` prompted and `cd /tmp && cat > probe.rkt` did not.
+/// That is not a bypass someone had to look for: it is how a model writes a
+/// scratch file, and it was observed doing exactly that four times in one
+/// session while an absolute-path write in the same session prompted.
+///
+/// `security-model.md` §2 declines full shell parsing and says the goal is to
+/// raise the cost of leaving the workspace rather than to make it impossible.
+/// Missing the most common real form is not a raised cost, which is why this
+/// case is worth the twenty lines and subshell scoping still is not.
+enum Cwd {
+  At(std::path::PathBuf),
+  /// A `cd` whose destination cannot be known without running it.
+  Unknown,
+}
+
+impl Cwd {
+  /// `Some(reason)` when a write from here leaves the workspace.
+  fn escape_label(&self) -> Option<String> {
+    match self {
+      Self::At(dir) => super::path_security::ensure_within_cwd(&dir.to_string_lossy())
+        .is_err()
+        .then(|| format!("{} (after `cd`)", dir.display())),
+      Self::Unknown => Some("a directory `cd` reached that cannot be resolved".to_string()),
+    }
+  }
+}
+
+/// Where a `cd` lands, or `Unknown` when that cannot be decided statically.
+///
+/// Erring towards `Unknown` is deliberate: a write whose destination depends on
+/// `$VAR`, `cd -`, or a command substitution cannot be cleared by reading the
+/// string, and this gate exists to make a human look. It costs nothing when the
+/// command does not write, which is the only time it is consulted.
+fn next_cwd(current: &Cwd, arg: Option<&str>) -> Cwd {
+  let Some(arg) = arg else {
+    // Bare `cd` goes home -- outside any workspace that is not itself `$HOME`.
+    return match std::env::var("HOME") {
+      Ok(home) => Cwd::At(std::path::PathBuf::from(home)),
+      Err(_) => Cwd::Unknown,
+    };
+  };
+  if arg == "-" || arg.contains('$') || arg.contains('`') {
+    return Cwd::Unknown;
+  }
+  let expanded = expand_home(arg);
+  let target = std::path::Path::new(&expanded);
+  if target.is_absolute() {
+    return Cwd::At(target.to_path_buf());
+  }
+  match current {
+    // `..` and friends are left for `ensure_within_cwd`, which normalises.
+    Cwd::At(base) => Cwd::At(base.join(target)),
+    Cwd::Unknown => Cwd::Unknown,
+  }
+}
+
 /// Paths a command would write to that lie outside the workspace.
 ///
 /// Deliberately shallow: it looks for a write verb or a redirect, then for an
@@ -406,15 +465,42 @@ fn is_bit_bucket(token: &str) -> bool {
 
 pub fn escaping_write_targets(cmd: &str) -> Vec<String> {
   let mut out = Vec::new();
+  let mut cwd = Cwd::At(std::env::current_dir().unwrap_or_default());
   for part in split_subcommands(cmd) {
     let argv = shlex::split(&part).unwrap_or_default();
     let program = argv
       .first()
-      .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+      // `(` for a subshell: `(cd /tmp && ...)` splits with the paren still
+      // attached to the program word.
+      .map(|p| {
+        p.trim_start_matches('(')
+          .rsplit('/')
+          .next()
+          .unwrap_or(p)
+          .to_string()
+      })
       .unwrap_or_default();
+
+    if program == "cd" {
+      cwd = next_cwd(&cwd, argv.get(1).map(String::as_str));
+      continue;
+    }
+
     let writes = has_redirect(&part) || WRITE_VERBS.contains(&program.as_str());
     if !writes {
       continue;
+    }
+
+    // A write that happens *after* a `cd` out of the workspace escapes no
+    // matter what its target is called, so the directory is what gets named.
+    // Naming the file instead would mean picking the redirect's target out of
+    // the raw text -- shell parsing, which this module declines to do, and
+    // which a relative name gives no strong signal for: the candidates for
+    // `cat > probe.rkt` include `cat` and `>` themselves.
+    if let Some(label) = cwd.escape_label()
+      && !out.contains(&label)
+    {
+      out.push(label);
     }
     // Redirect targets are not argv words once shlex splits `>`, so scan the
     // raw text for candidates too.
@@ -795,6 +881,65 @@ mod tests {
     // `/dev/fd/<n>` is allowed; a name that merely starts that way is not.
     assert!(!escaping_write_targets("cmd > /dev/fdsomething").is_empty());
     assert!(!escaping_write_targets("cmd > /dev/disk0").is_empty());
+  }
+
+  /// `cd` was the whole hole. The gate only ever saw *absolute* targets, so the
+  /// most natural way to write a scratch file walked straight through it —
+  /// observed four times in one session while an absolute-path write in that
+  /// same session prompted. All four of these returned empty before the fix.
+  ///
+  /// The lock: this reads the process cwd, and `loop_tests::Scratch` changes it.
+  #[test]
+  fn a_cd_out_of_the_workspace_makes_later_writes_escape() {
+    let _guard = crate::testsync::lock();
+    for cmd in [
+      "cd /tmp && cat > probe.rkt",
+      "cd /tmp; cat > probe.rkt",
+      "(cd /tmp && echo x > y.txt)",
+      "cd /tmp && tee probe.txt",
+    ] {
+      assert!(
+        !escaping_write_targets(cmd).is_empty(),
+        "walked out of the workspace unflagged: {cmd}"
+      );
+    }
+  }
+
+  /// The other half, and the one that decides whether the gate is usable: it
+  /// has to stay quiet everywhere it was quiet before, or the prompt becomes
+  /// noise people learn to click through.
+  #[test]
+  fn staying_inside_the_workspace_still_prompts_for_nothing() {
+    let _guard = crate::testsync::lock();
+    for cmd in [
+      "cd src && echo x > y.txt",
+      "cd src && cd .. && echo x > y.txt",
+      "cd /tmp && ls",
+      "echo x > y.txt",
+    ] {
+      assert!(
+        escaping_write_targets(cmd).is_empty(),
+        "false alarm on {cmd}: {:?}",
+        escaping_write_targets(cmd)
+      );
+    }
+  }
+
+  /// A destination that cannot be read out of the string is not cleared by it.
+  /// Only reached when the command also writes, so the conservatism is bounded.
+  #[test]
+  fn an_unresolvable_cd_is_treated_as_outside() {
+    let _guard = crate::testsync::lock();
+    for cmd in [
+      "cd $HOME && echo x > y",
+      "cd - && echo x > y",
+      "cd && echo x > y",
+    ] {
+      assert!(
+        !escaping_write_targets(cmd).is_empty(),
+        "an unplaceable write was cleared: {cmd}"
+      );
+    }
   }
 
   /// Raw-device writes belong to the *command* gate, not this one: `dd` passes
