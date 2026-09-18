@@ -2031,9 +2031,13 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
 - [x] **55.2** `bench.rs` 的 setup 是同一缺陷的另一个现场。实测 `.output()` 与
       `.status()` 的默认 stdin **不同**（活 stdin 下 inode 336 vs 3873630804），
       所以 `run_eval` / `run_cleanup` 本来就安全，只有 setup 需要修。
-- [x] **55.3** 订正 L2 §4.2 的一条**假的「已落地」**：「`timeout` 默认 120s，
-      可由参数覆盖至 600s」——schema 里没有这个参数，`select!` 里没有这个分支。
-      **从未实现过。**
+- [x] **55.3** ~~订正 L2 §4.2 的一条假「已落地」~~ —— **这条判断本身是错的，
+      2026-09-18 当天推翻。** 超时**确实存在**，只是不在 `shell.rs` 而在
+      `tools/mod.rs::timeout_for`（默认 120s / `run_shell` 600s）。
+      我只读了 `shell.rs` 的 `select!` 就断言「没有超时」，把一条基本正确的
+      记载改成了「假的」。文档里只有「可由参数覆盖」半句不准（是按工具固定的）。
+      **教训不是「要多读一个文件」，是「断言某个机制不存在，比断言它存在需要
+      更强的证据」**——前者要求遍历所有可能的位置，而我只看了最像的那一个。
 
 **判据本身是歪的，这次被抓住了。** 第一版门用「`cat` 阻塞多久」计时，在 stdin
 已是 `/dev/null` 的 runner 上**无修复也绿**——一条空门。改成断言子进程 fd 0 与
@@ -2042,16 +2046,19 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
 **这条门在 CI 里仍然是盲的**（继承与重定向只有「有东西可继承」时才可区分），
 注释里写明了，没有假装它全能。
 
-**明确不做：墙钟超时**（当前版本）。超时值多少都是拍脑袋的，且会误杀合法长命令
-——那正是 `background=true` 的职责。挂死的主因已从根上消除。
-重估条件可执行，两边验过（真实轨迹退出 0，造一个 11 分钟 span 退出 1）：
-
-```sh
-jq -e -s '[.[] | .. | objects
-  | select(.kind=="execute"
-           and ((.meta.tools // []) | index("run_shell"))
-           and .dur_ms > 600000)] | length == 0' ~/.seekcli/traces/*.json
-```
+- [ ] **55.4 超时跳过清理**（由 55.3 的更正牵出的真缺口）。
+      `tools/mod.rs` 的超时是 `tokio::time::timeout(limit, run(args))`，
+      **靠 drop future 生效**，于是 `run_shell` 中 `select!` 之后的清理全被跳过：
+      spinner（独立 `tokio::spawn` 任务）**永远转下去**并每 120ms 重画 stderr，
+      覆盖其后的一切输出；`kill_process_group` 不执行，子进程树变成孤儿。
+      **证据**：那条 raco 的上限是 600 秒，实测 **17 分 33 秒**仍存活。
+      用户看到的「输出乱码 + spinner 显示着十几分钟前的命令」就是这个。
+      修法是 `Drop` 守卫——drop 是 future 被丢弃时唯一保证会跑的东西。
+- [ ] **55.5 Ctrl-C 无法中断审批提示**。`approval.rs:233` 是主线程上的同步
+      `io::stdin().read_line()`；中断监视器只设一个 flag，而阻塞的 read 不会被
+      打断（EINTR 被重试）。用户描述得很准：「Ctrl+C 就是多增加了一行展示，
+      不能终止」——那一行是终端回显的 `^C`。Ctrl-D 当前可用（读到 0 字节视为
+      拒绝），但**屏幕上没有任何地方说这件事**。
 
 **顺带发现、本阶段未改**：`run_shell` 的工具描述仍写着「In a later release,
 dangerous commands (rm -rf, sudo, curl|sh, etc.) **will prompt** for user

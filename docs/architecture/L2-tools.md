@@ -101,10 +101,10 @@ parse args → policy gate(L3：模式/路径/命令) → deadline → execute �
 
 - `ToolKind` 正式兑现阶段八 8.3 的推迟项，取代 `[USER DENIED]` 等字符串前缀约定；
   字符串前缀作为**给模型看的呈现层**保留，但**程序内部不再靠 `contains` 判断**。
-- ~~`timeout` 默认 120s，`run_shell` 可由参数覆盖至 600s~~ —— **2026-09-18 订正：
-  这条从未实现**，写在「✅ 已落地」标题下是错的。`run_shell` 的 schema 里没有
-  `timeout` 参数，`shell.rs` 的 `select!` 也只有 `child.wait()` 与 `cancelled()`
-  两个分支。阶段五十五评估后**决定不加**，理由与重估条件见下方 §4.8。
+- `timeout` 默认 120s，`run_shell` 600s（`tools/mod.rs::timeout_for`）。
+  **2026-09-18 小订正**：是**按工具固定**的，不是「可由参数覆盖」——
+  `run_shell` 的 schema 里没有 `timeout` 参数。超时的**实现方式**有代价，
+  见 §4.7。
 
 ### 4.3 后台任务（L2-5）✅ 阶段三十已落地
 
@@ -208,11 +208,11 @@ WEB_CONTENT>>>
 两者分开计数。这让「结论是否有依据」从一句提示词要求变成可被检查的事实——
 与阶段三十五让 policy 分区从 `policy.rs` 同一份常量渲染是同一个手法。
 
-### 4.7 前台命令的 stdin 与「没有超时」（阶段五十五）
+### 4.7 前台命令的 stdin，以及超时靠 drop 实现的代价（阶段五十五）
 
 `run_shell` 的前台路径此前没有配置 stdin，于是子进程**继承真实 tty**。这不是
 理论风险：`raco pkg install rackunit` 停在 `--deps search-ask` 的依赖询问上，
-17 分钟累计 CPU 0.36 秒、零 socket、`fd 0 = /dev/ttys000`。而它问的那句
+累计 CPU 0.36 秒、零 socket、`fd 0 = /dev/ttys000`。而它问的那句
 `Would you like to install these dependencies? [Y/n/a/c/?]` **永远不会出现在
 屏幕上**——stdout 是一根管道，本函数要等子进程退出后才读。问题和答案互相死锁。
 
@@ -224,20 +224,22 @@ WEB_CONTENT>>>
 `/dev/null`，`.status()` 则把父进程的 stdin 直接递过去，所以只有走 `.status()`
 的 setup 需要修。
 
-**不加墙钟超时**（当前版本）。超时值多少都是拍脑袋的，而它会误杀合法的长命令
-（构建、测试套件）——那正是 `background=true` 存在的理由。**挂死的主因是交互式
-提示，已经从根上消除。**
+#### 超时会跳过清理（已知缺口，2026-09-18）
 
-重估条件（可执行，两边都验过：真实轨迹退出 0，造一个 11 分钟的 span 退出 1）：
+`tools/mod.rs` 的超时是 `tokio::time::timeout(limit, run(args))`，**靠 drop
+future 生效**。于是 `run_shell` 里 `select!` 之后的清理一行都不跑：
 
-```sh
-jq -e -s '[.[] | .. | objects
-  | select(.kind=="execute"
-           and ((.meta.tools // []) | index("run_shell"))
-           and .dur_ms > 600000)] | length == 0' ~/.seekcli/traces/*.json
-```
+| 被跳过 | 后果 |
+| --- | --- |
+| `stop_flag` + `spinner_done` | spinner 是独立 `tokio::spawn` 任务，`while !stop_flag` **永远转下去**，每 120ms 重画 stderr，覆盖其后的一切输出 |
+| `kill_process_group(&child)` | 子进程树**变成孤儿**继续运行 |
 
-退出码非 0 就说明真实使用中出现过超过 10 分钟的 `run_shell`，届时再评估超时。
+**证据不是推理**：那条 raco 的 `SHELL_TIMEOUT` 是 600 秒，而实测它在
+**17 分 33 秒**时仍然存活——超时早已触发，子进程却没被杀。屏幕上同时有一个
+显示着十几分钟前那条命令的 spinner 在重画。
+
+**判据不能是「有没有超时」**——有；是「超时后清理有没有发生」。`Drop` 守卫
+是修法，因为 drop 是 future 被丢弃时唯一保证会跑的东西。
 
 ## 5. 明确不做
 

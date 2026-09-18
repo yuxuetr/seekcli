@@ -148,10 +148,14 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     // EOF, not the terminal. An inherited stdin is a tty, and a command that
     // asks a question on it waits for an answer that can never come: nobody is
     // typing, and the question itself is invisible because stdout is a pipe
-    // this function only reads after the child exits. `run_shell` has no
-    // timeout, so that wait is unbounded -- measured on `raco pkg install
-    // rackunit`, which stopped at its dependency prompt and sat there for 11
-    // minutes having consumed 0.36 seconds of CPU.
+    // this function only reads after the child exits. Measured on `raco pkg
+    // install rackunit`, which stopped at its dependency prompt having consumed
+    // 0.36 seconds of CPU.
+    //
+    // The wait is bounded -- `tools::mod::timeout_for` caps `run_shell` at 600s
+    // -- but 600 seconds of a turn is spent for nothing, and the timeout path
+    // drops this future, which orphans the child (see `kill_process_group`'s
+    // caller below: it never runs on that path).
     //
     // With `/dev/null` the read returns EOF immediately and the command fails
     // with its own diagnostic, which is the one thing the model can act on. The
@@ -396,13 +400,14 @@ mod tests {
 
   /// A command that reads stdin must see EOF, never the terminal.
   ///
-  /// What this guards is unbounded: the `select!` below has no timeout arm, so
-  /// a child blocked on an inherited tty hangs the agent until a human presses
-  /// Ctrl-C. Measured on `raco pkg install rackunit`, which stopped at its
-  /// `--deps search-ask` prompt and had consumed 0.36s of CPU after 11 minutes.
-  /// The prompt was never visible: stdout is a pipe this function only reads
-  /// once the child exits, so the question and the answer deadlocked on each
-  /// other.
+  /// What this guards costs a full `SHELL_TIMEOUT` (600s) per occurrence, and
+  /// leaves an orphan behind: the timeout lives in `tools::mod` and works by
+  /// dropping this future, so the kill below never runs on that path. Measured
+  /// on `raco pkg install rackunit`, which stopped at its `--deps search-ask`
+  /// prompt having consumed 0.36s of CPU -- and was still running 17 minutes
+  /// later, long past the 10-minute cap that had already fired. The prompt was
+  /// never visible: stdout is a pipe this function only reads once the child
+  /// exits, so the question and the answer deadlocked on each other.
   ///
   /// `stat` both paths and compare: device+inode differs for a pipe or a tty
   /// and matches for `/dev/null`. GNU spells it `-c`, BSD `-f`, and the release
