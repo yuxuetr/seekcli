@@ -8,6 +8,13 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use crate::session::{EventPayload, PromptKind};
+
+/// Ceiling on what `/output` prints at once.
+///
+/// A tool result can be a whole build log; `offload` exists because they get
+/// large. Printing the tail of a very long one keeps the command usable
+/// without turning it into a way to flood the terminal.
+const OUTPUT_MAX_LINES: usize = 200;
 use crate::{App, Skill, ThinkingMode, observability};
 
 /// One line of `/help`.
@@ -103,6 +110,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
   SlashCommand {
     usage: "/paste [说明]",
     help: "把剪贴板里的图交给模型（截图后 Ctrl+V 即可，不用存文件）",
+  },
+  SlashCommand {
+    usage: "/output [n]",
+    help: "Show a tool call's full output verbatim (1 = most recent)",
   },
   SlashCommand {
     usage: "/copy [index]",
@@ -758,10 +769,62 @@ impl App {
           }
         }
       },
+      "/output" => self.handle_output(&parts)?,
       "/copy" => self.handle_copy(&parts)?,
       _ => println!("Unknown command. Try /help"),
     }
     Ok(false)
+  }
+
+  /// Print one tool call's output exactly as the tool produced it.
+  ///
+  /// `run_shell` echoes only a tail, and the model's summary of a tool result
+  /// is a summary. The full text was already in the session log — recorded,
+  /// never shown, and reachable only by grepping `events.jsonl` by hand. This
+  /// is that grep, as a command.
+  ///
+  /// Reads the in-memory session rather than the file, so it costs no I/O and
+  /// works the same after `/resume` (which loads the log into the same place).
+  fn handle_output(&self, parts: &[&str]) -> Result<()> {
+    let n = match parts.get(1) {
+      None => 1,
+      Some(raw) => match raw.parse::<usize>() {
+        Ok(v) if v >= 1 => v,
+        _ => {
+          println!("{} /output expects a positive number.", "Error:".red());
+          return Ok(());
+        }
+      },
+    };
+
+    let events = &self.current_session.events;
+    let Some((tool, content)) = nth_tool_output(events, n) else {
+      let total = tool_output_count(events);
+      if total == 0 {
+        println!("{} No tool output in this session yet.", "Info:".blue());
+      } else {
+        println!("{} Only {total} tool call(s) so far.", "Error:".red());
+      }
+      return Ok(());
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let shown = lines.len().min(OUTPUT_MAX_LINES);
+    let note = if shown < lines.len() {
+      format!(", showing last {shown}")
+    } else {
+      String::new()
+    };
+    println!(
+      "{}",
+      format!("[Output] #{n} {tool} — {} lines{note}", lines.len()).dimmed()
+    );
+    // Verbatim and flush left: this exists so the output can be read and
+    // copied, and a prefix would defeat both.
+    for line in &lines[lines.len() - shown..] {
+      println!("{line}");
+    }
+    Ok(())
   }
 
   fn handle_copy(&self, parts: &[&str]) -> Result<()> {
@@ -812,6 +875,118 @@ impl App {
       println!("{} /copy is only implemented on macOS.", "Info:".blue());
     }
     Ok(())
+  }
+}
+
+/// The nth-most-recent tool result, and the tool that produced it.
+///
+/// `n` counts back from the newest and is 1-based. Separate from the printing
+/// because the join is the part with a decision in it: the log records a call
+/// and its result as two events linked by `call_id`, so the *name* has to be
+/// recovered from the assistant turn that asked for it.
+fn nth_tool_output(events: &[crate::session::SessionEvent], n: usize) -> Option<(&str, &str)> {
+  let results: Vec<(&str, &str)> = events
+    .iter()
+    .filter_map(|ev| match &ev.payload {
+      EventPayload::ToolResult {
+        call_id, content, ..
+      } => Some((call_id.as_str(), content.as_str())),
+      _ => None,
+    })
+    .collect();
+  let (call_id, content) = results.len().checked_sub(n).and_then(|i| results.get(i))?;
+
+  let name = events
+    .iter()
+    .filter_map(|ev| match &ev.payload {
+      EventPayload::AssistantMessage { tool_calls, .. } => Some(tool_calls),
+      _ => None,
+    })
+    .flatten()
+    .find(|tc| tc.id == *call_id)
+    .map(|tc| tc.function.name.as_str())
+    // A result whose call is not in the log is still worth printing: the
+    // output is the point, and the name is the label on it.
+    .unwrap_or("(unknown tool)");
+  Some((name, content))
+}
+
+fn tool_output_count(events: &[crate::session::SessionEvent]) -> usize {
+  events
+    .iter()
+    .filter(|ev| matches!(ev.payload, EventPayload::ToolResult { .. }))
+    .count()
+}
+
+#[cfg(test)]
+mod output_tests {
+  use super::*;
+  use crate::api::{FunctionCall, ToolCall};
+  use crate::session::SessionEvent;
+
+  fn ev(seq: u64, payload: EventPayload) -> SessionEvent {
+    SessionEvent {
+      seq,
+      ts: chrono::Utc::now(),
+      payload,
+    }
+  }
+
+  fn call(id: &str, name: &str) -> EventPayload {
+    EventPayload::AssistantMessage {
+      content: String::new(),
+      reasoning: None,
+      tool_calls: vec![ToolCall {
+        id: id.into(),
+        tool_type: "function".into(),
+        function: FunctionCall {
+          name: name.into(),
+          arguments: "{}".into(),
+        },
+      }],
+    }
+  }
+
+  fn result(id: &str, content: &str) -> EventPayload {
+    EventPayload::ToolResult {
+      call_id: id.into(),
+      content: content.into(),
+      images: Vec::new(),
+    }
+  }
+
+  /// `/output 1` is the newest, not the first — the whole point is reaching the
+  /// thing that just scrolled past.
+  #[test]
+  fn n_counts_back_from_the_newest() {
+    let events = vec![
+      ev(1, call("a", "run_shell")),
+      ev(2, result("a", "first")),
+      ev(3, call("b", "read_file")),
+      ev(4, result("b", "second")),
+    ];
+    assert_eq!(nth_tool_output(&events, 1), Some(("read_file", "second")));
+    assert_eq!(nth_tool_output(&events, 2), Some(("run_shell", "first")));
+    assert_eq!(nth_tool_output(&events, 3), None);
+    assert_eq!(tool_output_count(&events), 2);
+  }
+
+  /// The name lives in a different event than the output, joined by id. A
+  /// result whose call is missing — a log truncated by a crash, an older
+  /// format — must still print: the output is the point, the name is a label.
+  #[test]
+  fn a_result_without_its_call_still_yields_the_output() {
+    let events = vec![ev(1, result("orphan", "still useful"))];
+    assert_eq!(
+      nth_tool_output(&events, 1),
+      Some(("(unknown tool)", "still useful"))
+    );
+  }
+
+  #[test]
+  fn an_empty_session_has_nothing_to_show() {
+    assert_eq!(nth_tool_output(&[], 1), None);
+    assert_eq!(tool_output_count(&[]), 0);
   }
 }
 

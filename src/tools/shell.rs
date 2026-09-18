@@ -16,6 +16,12 @@ const SPINNER_DELAY: Duration = Duration::from_millis(800);
 /// How often a running command checks whether the user pressed Ctrl-C.
 const CANCEL_POLL: Duration = Duration::from_millis(120);
 
+/// How many trailing lines of a command's output to echo to the terminal.
+///
+/// The tail rather than the head: `cargo build` and `raco test` are the long
+/// ones people actually watch, and their verdict is at the end.
+const OUTPUT_TAIL: usize = 15;
+
 /// The interrupt flag the REPL's Ctrl-C watcher sets.
 ///
 /// Shared rather than passed down: cancellation has to reach the innermost
@@ -331,6 +337,7 @@ pub async fn run_shell(args: &Value) -> Result<String> {
 
   let stdout = String::from_utf8_lossy(&output.stdout);
   let stderr = String::from_utf8_lossy(&output.stderr);
+  echo_output_tail(&stdout, &stderr);
 
   let mut result = String::new();
   if !stdout.is_empty() {
@@ -362,6 +369,58 @@ pub async fn run_shell(args: &Value) -> Result<String> {
       output.status, result
     ))
   }
+}
+
+/// Echo the tail of a command's output to the operator.
+///
+/// Until now a `run_shell` printed the command and then nothing: the model saw
+/// the output, the user saw a claim about it. That is backwards for exactly the
+/// commands people run an agent for — a test suite's verdict reached the screen
+/// only as the model's paraphrase, and a paraphrase is where a wrong number
+/// comes from. (Observed: a run reported "约 860 断言" for a suite whose own
+/// total, 915, it had just printed; 900 was derivable from what it already had.)
+///
+/// Flush left and uncoloured, for the reason code blocks are: everything a
+/// mouse selection picks up here has to be the output and nothing else. stderr,
+/// because this is what the operator watches, not the turn's result.
+fn echo_output_tail(stdout: &str, stderr: &str) {
+  let (shown, total) = output_tail(stdout, stderr);
+  if shown.is_empty() {
+    return;
+  }
+  if shown.len() < total {
+    // Only when something was withheld: a header over three lines of output
+    // costs more attention than it saves.
+    eprintln!(
+      "{}",
+      format!(
+        "[Output] {} lines, showing last {} — /output for all",
+        total,
+        shown.len()
+      )
+      .dimmed()
+    );
+  }
+  for line in shown {
+    eprintln!("{line}");
+  }
+}
+
+/// The lines [`echo_output_tail`] will print, and how many it chose from.
+///
+/// Split from the printing because this is where every decision is, and the
+/// printing needs a terminal to observe.
+fn output_tail<'a>(stdout: &'a str, stderr: &'a str) -> (Vec<&'a str>, usize) {
+  let lines: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
+  // Trailing blank lines are the command's formatting, not information, and
+  // they would spend the budget the verdict needs.
+  let end = lines
+    .iter()
+    .rposition(|l| !l.trim().is_empty())
+    .map_or(0, |i| i + 1);
+  let lines = &lines[..end];
+  let shown = lines.len().min(OUTPUT_TAIL);
+  (lines[lines.len() - shown..].to_vec(), lines.len())
 }
 
 /// Spawn a task that, after `SPINNER_DELAY`, displays a progress spinner
@@ -529,6 +588,37 @@ mod tests {
       "the child's stdin is not /dev/null -- it inherited ours, and any \
        command that asks a question on it will block forever:\n{text}"
     );
+  }
+
+  /// Short output prints whole; long output keeps the *end*, which is where a
+  /// build's or a test suite's verdict is.
+  #[test]
+  fn the_tail_keeps_the_end_and_reports_the_true_total() {
+    assert_eq!(output_tail("a\nb\nc\n", ""), (vec!["a", "b", "c"], 3));
+
+    let long: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+    let (shown, total) = output_tail(&long, "");
+    assert_eq!(total, 40, "the header must report what was produced");
+    assert_eq!(shown.len(), OUTPUT_TAIL);
+    assert_eq!(shown.first().copied(), Some("line 26"));
+    assert_eq!(shown.last().copied(), Some("line 40"));
+  }
+
+  /// Trailing blank lines are the command's formatting, and a `raco test` that
+  /// ends with two of them would otherwise spend two of the fifteen lines the
+  /// verdict needs.
+  #[test]
+  fn trailing_blank_lines_do_not_spend_the_window() {
+    assert_eq!(output_tail("ok\n\n\n\n", ""), (vec!["ok"], 1));
+    assert_eq!(output_tail("", ""), (Vec::new(), 0));
+    assert_eq!(output_tail("\n\n", ""), (Vec::new(), 0));
+  }
+
+  /// stderr after stdout: a command that fails prints its diagnosis on stderr,
+  /// and that is the line the operator is looking for.
+  #[test]
+  fn stderr_follows_stdout() {
+    assert_eq!(output_tail("out\n", "err\n"), (vec!["out", "err"], 2));
   }
 
   /// Dropping the future must take the whole command with it.

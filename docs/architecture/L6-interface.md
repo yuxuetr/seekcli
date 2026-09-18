@@ -14,7 +14,7 @@
 | --- | --- |
 | REPL | `main.rs::App::run`（rustyline） |
 | Tab 补全 | `completer.rs::CmdCompleter` |
-| slash 命令 | `commands.rs::handle_command`（**21 条**）；`SLASH_COMMANDS` 是唯一清单，`/help` 与 Tab 补全都从它派生，见 §4.5 |
+| slash 命令 | `commands.rs::handle_command`（**22 条**）；`SLASH_COMMANDS` 是唯一清单，`/help` 与 Tab 补全都从它派生，见 §4.5 |
 | 答案渲染 | `render.rs::Renderer`（按行流式；代码块顶格 + `/copy` 序号），见 §4.7 |
 | 状态指示 | prompt 显示 `model (thinking\|plan\|skill) ❯`；`run_shell` >800ms 显示 spinner |
 | Ctrl-C | `spawn_interrupt_watcher` + 循环轮询；**审批提示单独走 rustyline**（阶段五十五），见 §4.8 |
