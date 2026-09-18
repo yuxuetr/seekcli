@@ -195,8 +195,15 @@ markdown 原文**：围栏与 `**` 直接打给人看。`render.rs` 补上这半
 `extract_code_blocks` + `/copy N` 接通。
 
 渲染是**终端的属性，不是答案的属性**：进历史、进 `/copy`、进 `--output json` 的
-始终是原始 markdown。`ToolCall` / `Finish` 分支必须先把渲染器里那半行吐出来再打
-自己的东西，否则通知会插到一行尚未打完的正文前面。
+始终是原始 markdown。
+
+**跨流顺序是这里唯一的陷阱**：内容走 stdout（行缓冲）、进度与通知走 stderr
+（无缓冲，见 §2「输出分流」）。`ToolCall` / `Finish` 分支吐出的半行没有换行符，
+所以必须**紧跟一次 `flush_content`**，否则它留在 stdout 缓冲区里，排到通知
+后面——屏幕上的答案被重排。没有任何单测能看见这件事：`Response` 是对的，渲染器
+单测也是对的，错的只有两个流落到终端上的先后。因此留了一个 `#[ignore]` 的观察
+入口（`engine::tests::eyeball_the_rendered_stream`），不需要 API key，输出本身
+就是它的产物。
 
 序号一致性有门（`engine::tests::copy_labels_match_the_blocks_copy_hands_out`）：
 两个围栏扫描器互不知情，而**标签指错块比没有标签更糟**。
