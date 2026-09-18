@@ -15,6 +15,7 @@
 | REPL | `main.rs::App::run`（rustyline） |
 | Tab 补全 | `completer.rs::CmdCompleter` |
 | slash 命令 | `commands.rs::handle_command`（**21 条**）；`SLASH_COMMANDS` 是唯一清单，`/help` 与 Tab 补全都从它派生，见 §4.5 |
+| 答案渲染 | `render.rs::Renderer`（按行流式；代码块顶格 + `/copy` 序号），见 §4.7 |
 | 状态指示 | prompt 显示 `model (thinking\|plan\|skill) ❯`；`run_shell` >800ms 显示 spinner |
 | Ctrl-C | `spawn_interrupt_watcher` + 循环轮询 |
 | Ctrl-V 贴图 | `main.rs::PasteKey`（rustyline 条件绑定 → `/paste`），见 §4.4 |
@@ -175,6 +176,30 @@ headless 运行按设计不保存会话（`run_headless`），所以在那里「
 
 空历史时报「no stored sessions yet」并以退出码 1 结束，而不是开一个看起来像
 续接的空白会话。
+
+### 4.7 答案渲染（阶段五十四）
+
+阶段七删掉 termimad / syntect 之后，屏幕上留下的不是「纯文本」而是**未渲染的
+markdown 原文**：围栏与 `**` 直接打给人看。`render.rs` 补上这半条，且**不引依赖**
+——做的是 markdown 结构渲染（标题 / 列表 / 粗体 / 行内 code / 代码块），不是语法
+高亮。§5「不做 TUI」的判据没有被推翻：一个 190 行、纯函数可测、不持有终端句柄的
+模块，与「把渲染复杂度重新引回来」是两回事。
+
+**按行缓冲是全部设计。** markdown 里决定一行怎么画的构造全部由行首几个字符决定，
+于是「攒到换行符再画」不需要前瞻、不需要语法树、也不需要重画已经打出去的字。
+代价是输出从逐 token 变成逐行。
+
+**代码块的约束来自剪贴板，不是来自美观**：围栏内每一行逐字节打在第 0 列，没有
+缩进、没有竖线、没有底色——这些恰好是鼠标框选会一起带走的东西。围栏本身换成一行
+暗色标签，写上这一块的 `/copy` 序号，把阶段七就已存在却没有入口的
+`extract_code_blocks` + `/copy N` 接通。
+
+渲染是**终端的属性，不是答案的属性**：进历史、进 `/copy`、进 `--output json` 的
+始终是原始 markdown。`ToolCall` / `Finish` 分支必须先把渲染器里那半行吐出来再打
+自己的东西，否则通知会插到一行尚未打完的正文前面。
+
+序号一致性有门（`engine::tests::copy_labels_match_the_blocks_copy_hands_out`）：
+两个围栏扫描器互不知情，而**标签指错块比没有标签更糟**。
 
 ## 5. 明确不做
 
