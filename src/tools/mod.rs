@@ -183,8 +183,18 @@ mod tests {
   /// store's behaviour is covered against an injected home in
   /// `proposals::tests`, and `ProposalStore::at` exists so those tests need no
   /// `HOME` mutation — which edition 2024 made `unsafe` anyway.
+  #[expect(
+    clippy::await_holding_lock,
+    reason = "the test lock is held across awaits on purpose; see the fn doc"
+  )]
   #[tokio::test]
   async fn proposing_an_unknown_kind_names_the_valid_ones() {
+    // Takes the lock although it sets nothing: it goes through the dispatcher,
+    // so it *reads* the policy mode, and a lock only one side holds is not a
+    // lock. Without this it failed roughly one run in three once the suite got
+    // slow enough to overlap with the `ReadOnly` window two tests below --
+    // reporting a `[MODE DENIED]` that had nothing to do with `propose`.
+    let _guard = crate::testsync::lock();
     let out = ToolDispatcher::new()
       .execute("propose", r#"{"kind":"plugin","name":"x","content":"y"}"#)
       .await;

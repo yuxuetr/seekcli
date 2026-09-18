@@ -37,11 +37,20 @@ fn interrupted() -> bool {
   }
 }
 
-/// Resolves once the user has asked to stop.
+/// Raise the interrupt the loop polls, for a caller that owns the terminal
+/// rather than the flag.
 ///
-/// Deliberately does **not** clear the flag: the agent loop's own check is
-/// what ends the turn, and consuming it here would kill the command while
-/// leaving the loop to carry on as if nothing happened.
+/// The approval prompt is the one place a user can press Ctrl-C while the
+/// REPL's watcher is not the thing reading the key — see
+/// `approval::confirm_interactive`.
+pub(crate) fn request_interrupt() {
+  if let Ok(guard) = INTERRUPT.lock()
+    && let Some(flag) = guard.as_ref()
+  {
+    flag.store(true, Ordering::SeqCst);
+  }
+}
+
 /// Kill the command's whole process group.
 ///
 /// Shelling out to `kill` rather than taking a `libc` dependency for one call:
@@ -52,6 +61,14 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
   let Some(pid) = child.id() else {
     return;
   };
+  kill_pgid(pid);
+}
+
+/// The same kill, by pid alone.
+///
+/// Split out for `Cleanup`, which runs after the `Child` is gone: a `Drop`
+/// impl cannot borrow something the dropped future already owns.
+fn kill_pgid(pid: u32) {
   let _ = std::process::Command::new("kill")
     .arg("-KILL")
     .arg(format!("-{pid}"))
@@ -60,6 +77,56 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
     .status();
 }
 
+/// Stops the spinner and the command when this scope ends **however it ends**.
+///
+/// The tool deadline in `tools::mod` is
+/// `tokio::time::timeout(limit, run(args))`, which on expiry *drops* this
+/// future rather than returning through it. Everything written after the
+/// `select!` in `run_shell` is then simply never reached — and both things it
+/// does were unbounded:
+///
+/// * the spinner is a separate `tokio::spawn`ed task polling a flag nobody
+///   would ever set, so it went on redrawing stderr every 120ms forever,
+///   painting over the model's answer and over the next approval prompt;
+/// * the child was never killed, so the whole process tree ran on as an orphan.
+///
+/// Measured, not reasoned: a `raco pkg install` whose 600s cap had already
+/// fired was still alive at 17m33s, while a spinner on screen still named it.
+///
+/// `Drop` is the only code a dropped future is guaranteed to run, so the
+/// cleanup lives here instead of in a line that has to be *reached*. The happy
+/// path still stops the spinner explicitly before joining it — that ordering is
+/// a different requirement, and setting the flag twice costs nothing.
+struct Cleanup {
+  stop: Arc<AtomicBool>,
+  done: Arc<tokio::sync::Notify>,
+  /// `Some` only while the child may still be running. Cleared once it is
+  /// reaped, so a normal command does not pay for a `kill` that could only
+  /// target a process which has already exited.
+  pgid: Option<u32>,
+}
+
+impl Cleanup {
+  fn reaped(&mut self) {
+    self.pgid = None;
+  }
+}
+
+impl Drop for Cleanup {
+  fn drop(&mut self) {
+    self.stop.store(true, Ordering::SeqCst);
+    self.done.notify_one();
+    if let Some(pid) = self.pgid {
+      kill_pgid(pid);
+    }
+  }
+}
+
+/// Resolves once the user has asked to stop.
+///
+/// Deliberately does **not** clear the flag: the agent loop's own check is
+/// what ends the turn, and consuming it here would kill the command while
+/// leaving the loop to carry on as if nothing happened.
 async fn cancelled() {
   loop {
     if interrupted() {
@@ -137,6 +204,12 @@ pub async fn run_shell(args: &Value) -> Result<String> {
   let spinner_done = Arc::new(tokio::sync::Notify::new());
   let spinner_task =
     spawn_delayed_spinner(command.to_string(), stop_flag.clone(), spinner_done.clone());
+  // Armed before the child exists so a spawn failure still stops the spinner.
+  let mut cleanup = Cleanup {
+    stop: stop_flag.clone(),
+    done: spinner_done.clone(),
+    pgid: None,
+  };
 
   // Spawned rather than `.output()`ed so the child stays reachable: Ctrl-C
   // used to return control to the REPL while the command kept running with
@@ -173,6 +246,7 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     .process_group(0)
     .spawn()
     .context("Failed to spawn shell command")?;
+  cleanup.pgid = child.id();
 
   // Drain the pipes concurrently. A child that fills a pipe buffer blocks
   // forever if nobody is reading, so this cannot wait for exit first.
@@ -205,6 +279,9 @@ pub async fn run_shell(args: &Value) -> Result<String> {
       child.wait().await.context("reaping interrupted shell command")?
     }
   };
+
+  // Reaped: from here on the guard has nothing left to kill.
+  cleanup.reaped();
 
   // Signal the spinner to stop and wait for it to clear cleanly. The notify is
   // what makes "wait" bounded by how long clearing takes rather than by the
@@ -451,6 +528,51 @@ mod tests {
       ids[0], ids[1],
       "the child's stdin is not /dev/null -- it inherited ours, and any \
        command that asks a question on it will block forever:\n{text}"
+    );
+  }
+
+  /// Dropping the future must take the whole command with it.
+  ///
+  /// This is exactly how the tool deadline in `tools::mod` ends a command:
+  /// `tokio::time::timeout` drops the future rather than returning through it,
+  /// so everything written after the `select!` is skipped. Before `Cleanup`,
+  /// that skipped the kill *and* the spinner stop — measured on a
+  /// `raco pkg install` still alive at 17m33s against a 600s cap, with its
+  /// spinner still redrawing the screen. The orphan is the half that can be
+  /// observed from a test; the spinner rides on the same `Drop`.
+  ///
+  /// `sleep 45; echo <marker>` rather than a bare `sleep`: `sh` execs away for
+  /// a simple command, and then the marker would not be in anyone's argv to
+  /// look for. A compound command keeps `sh` alive, which is also the case
+  /// where killing only the child would leave the grandchild running.
+  #[tokio::test]
+  async fn a_dropped_command_does_not_outlive_its_future() {
+    crate::tools::approval::set_interaction(crate::tools::approval::Interaction::AutoApprove);
+    let marker = format!("seekcli-orphan-probe-{}", std::process::id());
+    let command = format!("sleep 45; echo {marker}");
+
+    let dropped = tokio::time::timeout(
+      std::time::Duration::from_millis(400),
+      run_shell(&serde_json::json!({ "command": command })),
+    )
+    .await;
+    assert!(dropped.is_err(), "the probe command returned on its own");
+
+    // The kill happens in `Drop`, which has run by now; give the OS a moment
+    // to reap before asking whether anything is left.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let out = std::process::Command::new("ps")
+      .args(["-Ao", "command"])
+      .output();
+    let listing = match out {
+      Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+      Err(e) => panic!("ps failed: {e}"),
+    };
+    assert!(
+      !listing.contains(&marker),
+      "the command outlived the future that owned it -- an orphan the agent \
+       can no longer see, stop, or account for"
     );
   }
 

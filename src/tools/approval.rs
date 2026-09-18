@@ -7,7 +7,6 @@
 //! injection.
 
 use colored::Colorize;
-use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 
 /// Three-state outcome of classifying a shell command (harness allow/ask/deny).
@@ -226,14 +225,48 @@ fn confirm_interactive(cmd: &str, reason: &str) -> bool {
     reason.yellow()
   );
   eprintln!("    $ {}", cmd.bright_white());
-  eprint!("    Proceed? [y/N] ");
-  io::stderr().flush().ok();
 
-  let mut buf = String::new();
-  if io::stdin().read_line(&mut buf).is_err() {
-    return false;
+  // rustyline rather than `io::stdin().read_line`, for one reason: Ctrl-C.
+  // A blocking `read_line` cannot be interrupted — the watcher only sets a
+  // flag, and the read retries through EINTR — so Ctrl-C at this prompt did
+  // nothing but echo `^C` on a line of its own. rustyline is already the
+  // REPL's line editor and reports the key as `Interrupted`.
+  let answer =
+    rustyline::DefaultEditor::new().and_then(|mut editor| editor.readline("    Proceed? [y/N] "));
+
+  match verdict_for(answer) {
+    Verdict::Approve => true,
+    Verdict::Decline => false,
+    Verdict::Interrupted => {
+      eprintln!("    {}", "interrupted — stopping the turn".yellow());
+      // Ctrl-C means "stop", not "decline this one command": denying alone
+      // would send the model straight on to its next idea.
+      super::shell::request_interrupt();
+      false
+    }
   }
-  buf.trim().eq_ignore_ascii_case("y")
+}
+
+/// What the prompt's outcome means.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+  Approve,
+  Decline,
+  Interrupted,
+}
+
+/// Split from the reading so it can be tested: reading needs a terminal, and a
+/// test that opens one would block forever on a developer's machine while
+/// passing vacuously in CI.
+fn verdict_for(answer: Result<String, rustyline::error::ReadlineError>) -> Verdict {
+  match answer {
+    Ok(line) if line.trim().eq_ignore_ascii_case("y") => Verdict::Approve,
+    Ok(_) => Verdict::Decline,
+    Err(rustyline::error::ReadlineError::Interrupted) => Verdict::Interrupted,
+    // Ctrl-D, or no usable terminal at all. Declining is the safe default for
+    // a prompt whose whole job is to gate a dangerous command.
+    Err(_) => Verdict::Decline,
+  }
 }
 
 fn contains_rm_rf(lower: &str) -> bool {
@@ -270,6 +303,46 @@ fn has_token(haystack: &str, word: &str) -> bool {
   haystack
     .split(|c: char| c.is_whitespace() || c == ';' || c == '|' || c == '&')
     .any(|tok| tok == word)
+}
+
+#[cfg(test)]
+mod prompt_tests {
+  use super::*;
+  use rustyline::error::ReadlineError;
+
+  /// Ctrl-C at the prompt means "stop", not "decline this one command".
+  ///
+  /// The distinction is the whole point of the change: the old blocking
+  /// `read_line` could not see Ctrl-C at all, so the key did nothing but echo
+  /// `^C`. Mapping it to `Decline` instead would be almost as bad — the model
+  /// would take the refusal and move straight on to its next idea.
+  #[test]
+  fn ctrl_c_stops_the_turn_and_ctrl_d_only_declines() {
+    assert_eq!(
+      verdict_for(Err(ReadlineError::Interrupted)),
+      Verdict::Interrupted
+    );
+    assert_eq!(verdict_for(Err(ReadlineError::Eof)), Verdict::Decline);
+  }
+
+  /// No terminal at all also declines: this prompt exists to gate a dangerous
+  /// command, so the failure direction has to be "don't run it".
+  #[test]
+  fn an_unusable_terminal_declines() {
+    let io_err = ReadlineError::Io(std::io::Error::other("no tty"));
+    assert_eq!(verdict_for(Err(io_err)), Verdict::Decline);
+  }
+
+  /// Only a bare `y` approves — unchanged from the `read_line` version, and
+  /// pinned here because it is an approval semantic, not a formatting detail.
+  #[test]
+  fn only_y_approves() {
+    assert_eq!(verdict_for(Ok("y".to_string())), Verdict::Approve);
+    assert_eq!(verdict_for(Ok("  Y  ".to_string())), Verdict::Approve);
+    assert_eq!(verdict_for(Ok(String::new())), Verdict::Decline);
+    assert_eq!(verdict_for(Ok("n".to_string())), Verdict::Decline);
+    assert_eq!(verdict_for(Ok("yes".to_string())), Verdict::Decline);
+  }
 }
 
 #[cfg(test)]
