@@ -4,3 +4,7 @@
 
 # Generated at runtime; SeekCLI reads ~/.seekcli/config.toml instead.
 /config.toml
+
+# GitHub Pages 构建产物（site/stage.py + mdbook build site）
+/site/src
+/site/book

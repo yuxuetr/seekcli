@@ -1,0 +1,21 @@
+# GitHub Pages 文档站。构建：python3 site/stage.py && mdbook build site
+# src 是 stage.py 生成的暂存目录，镜像仓库根的目录结构——文档里大量
+# `../../TODOs.md` 式的跨目录相对链接，只有结构一致才能原样生效。
+[book]
+title = "SeekCLI"
+language = "zh-CN"
+src = "src"
+
+# 默认的 index 预处理器会把 README.md 改名成 index.html，但不改写指向
+# README.md 的链接（docs 里到处是 `architecture/README.md`），于是全部 404。
+# 关掉它，README 就老老实实生成 README.html；站点首页由 html 渲染器
+# 用第一章另行生成 index.html。
+[build]
+use-default-preprocessors = false
+
+[preprocessor.links]
+
+[output.html]
+site-url = "/seekcli/"
+git-repository-url = "https://github.com/yuxuetr/seekcli"
+edit-url-template = "https://github.com/yuxuetr/seekcli/edit/main/{path}"
