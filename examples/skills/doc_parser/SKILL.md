@@ -1,79 +1,56 @@
 ---
 name: doc_parser
-description: 通过 MinerU 高保真解析 PDF / Docx / PPTX / Xlsx / 图像 为 Markdown（含 OCR）
-version: "2"
+description: 用 MinerU 把 PDF / Docx / PPTX / Xlsx / 图片逐字逐格转成 Markdown。需要精确提取表格、公式、整页文字，或要解析非图片文档时用；只是看懂一张图不需要它——你自己能看图
+version: "3"
 ---
 
 # Document Parser Skill
 
-DeepSeek V4 不能直接读 PDF / 图片等二进制内容。激活本 skill 后，按
-以下流程：
+你自己能看图（`/paste` 贴进来的、`read_image` 读到的都会直接给你看）。
+本 skill 不是给你补视觉，而是补**逐字逐格的精确转录**——这是看图最容易出错的地方。
 
-## 工作流 A：解析文档（PDF / Docx / PPTX / Xlsx）
+## 什么时候用 MinerU，什么时候自己看
 
-1. 获取文件路径（用户给的，或 list_dir / run_shell 找到）
-2. `run_shell: bash <scripts_dir>/mineru_parse.sh <file_path>`
-   返回**生成的 Markdown 文件路径**（不是内容本身，避免 stdout 过大）
-3. `read_file` 读这个路径
-   - 50KB 自动截断；大文档时用 run_shell + grep 定位关键段
-4. 基于 Markdown 完成用户的实际任务
+| 任务 | 做法 |
+| --- | --- |
+| 「这张图是什么」「报错在哪」「趋势如何」 | **自己看**，不调 MinerU |
+| 提取表格、公式、整页文字；图里的数字之后要拿去计算或引用 | **MinerU** |
+| PDF / Docx / PPTX / Xlsx（你没法直接读） | **MinerU** |
 
-## 工作流 B：OCR 剪贴板里的图片
+拿不准时按后果判断：**读错一个数字会不会导致错误结论**？会，就走 MinerU。
+密集表格是看图最容易错格、编出数字而且看起来很可信的地方。
 
-1. `run_shell: bash <scripts_dir>/clip_to_png.sh`
-   把 macOS 剪贴板里的图保存到 `/tmp/seekcli_clip.png`
-2. `run_shell: bash <scripts_dir>/mineru_parse.sh /tmp/seekcli_clip.png`
-   MinerU 内部走 OCR (`is_ocr: true`)，返回 Markdown 路径
-3. read_file → 把识别出的文字 / 表格 / 公式呈现给用户
+## 工作流
 
-## 工作流 C：OCR 给定路径的图片
-
-直接 `mineru_parse.sh <image_path>`，跳过 clip_to_png 步骤。
+1. **拿到文件路径**
+   - 用户贴的图：消息里有一行 `[attached image saved at <path>]`，用这个路径
+   - 文档：用户给的路径，或用 `list_dir` / `grep` 找到
+2. `run_shell: bash <scripts_dir>/mineru_parse.sh <path>`
+   stdout 只返回**生成的 Markdown 文件路径**（内容不进 stdout，免得撑爆上下文）
+3. `read_file` 读这个路径。大文档会只给头尾预览，用 `grep` 在原文件里定位需要的段落
+4. **对照核对**（输入是图片时）：你同时有原图和 MinerU 的结果，核一遍表头、
+   行列对齐、数字。发现不一致就**指出来**，不要悄悄改成你看到的版本——
+   两边哪个对需要说出依据
+5. 交付结果，注明表格 / 文字来自 MinerU 提取
 
 ## 注意事项
 
-- 需要 `MINERU_API_KEY` 环境变量
-- MinerU 是远程异步 API：典型耗时 5-30 秒，长文档可能更久
-  （脚本最多等 120 秒）
-- 支持格式：PDF / Docx / PPTX / Xlsx / PNG / JPG / WebP / BMP
-- 输出路径形如 `/tmp/seekcli_mineru_<timestamp>.md`，重启后系统自动清
+- 需要 `MINERU_API_KEY` 环境变量，以及 `jq`、`unzip`
+- MinerU 是远程异步 API：文件会上传到 mineru.net，典型耗时 5–30 秒，脚本最多等 120 秒
+- 单文件上限 200MB
+- 输出在 `/tmp/seekcli_mineru_<timestamp>.md`
 
-## 失败处理规范（**重要**）
+## 失败处理（**重要**）
 
-如果 mineru_parse.sh 返回错误（超时 / API 失败 / 网络问题），你**必须**
-按以下顺序处理，**不要静默装新工具或换技术栈**：
+`mineru_parse.sh` 报错（超时 / API 失败 / 网络 / key 失效）时：
 
-1. 把 stderr 里的错误信息**原样**报告给用户
-2. 询问用户希望怎么处理：
-   - 重试一次？（偶尔的网络抖动）
-   - 换用 vision skill 描述图像（如果输入是图）？
-   - 用户自己提供另一份解析后的内容？
-3. **绝对禁止**：
-   - 未经用户同意 `pip install` / `brew install` / `cargo install` 等装包操作
-   - 改用其他 PDF 解析库（PyMuPDF / pdfplumber 等）
-   - 把 PDF 转图片再走 VLM 这种弯路
+1. 把 stderr 的错误信息**原样**告诉用户
+2. 问用户怎么办：重试一次？还是接受由你直接看图给出结果——
+   并**明说**这样表格和数字的精度不如 MinerU
+3. **禁止**：
+   - 未经同意 `pip install` / `brew install` / `cargo install` 装包
+   - 换用其他解析库（PyMuPDF / pdfplumber 等）自创替代方案
+   - 在用户不知情的情况下改成自己看图，却把结果当成精确提取交付
 
-doc_parser skill 的定义就是"用 MinerU"。MinerU 不行就停下问用户，不要
-自创替代方案 —— 那会绕过用户选择 MinerU 时的设计意图（高保真表格 /
-公式 / 版面重建）。
-
-## 与 vision skill 的分工
-
-- **vision** (StepFun VLM)：图像**视觉理解**（含 OCR，但侧重描述与
-  语义）— 适合"这张图什么内容"、"图里发生了什么"
-- **doc_parser** (MinerU)：**文本提取**为主（OCR 高保真，含表格 /
-  公式重建）— 适合"提取图里的所有文字"、"解析 PDF / 截图为
-  Markdown"
-
-如果用户说"OCR"、"提取文字"、"识别表格"，优先用 doc_parser。
-如果用户说"描述图片"、"图里有什么"，优先用 vision。
-
-## 工作示例
-
-用户："OCR 一下剪贴板里这张图"
-
-你应该：
-1. clip_to_png.sh → /tmp/seekcli_clip.png
-2. mineru_parse.sh /tmp/seekcli_clip.png → /tmp/seekcli_mineru_xxx.md
-3. read_file 拿到 Markdown 内容
-4. 把识别出的文字 / 表格还原给用户，注明它来自 MinerU OCR
+MinerU 是用户为高保真表格 / 公式 / 版面重建选定的工具。它不可用时停下来问，
+而不是悄悄换掉——换掉的那一刻，「这些数字是精确提取的」就不再成立了。

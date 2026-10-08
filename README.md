@@ -390,7 +390,7 @@ DeepSeek 补强能力的 skill 模板：
 
 | Skill | 能力 | 依赖环境变量 | 系统依赖 |
 | ----- | ---- | ------------ | -------- |
-| `doc_parser` | 调 MinerU 把 PDF/Docx/PPTX 解析成 Markdown | `MINERU_API_KEY` | `jq`、`unzip` |
+| `doc_parser` | 调 MinerU 把 PDF/Docx/PPTX/图片精确转成 Markdown（表格、公式） | `MINERU_API_KEY` | `jq`、`unzip` |
 
 安装到自己的 skill 目录：
 ```bash
@@ -402,8 +402,9 @@ cp -r examples/skills/doc_parser ~/.seekcli/skills/
 /skill doc_parser       # 然后："总结 ~/Downloads/paper.pdf"
 ```
 
-模型会通过 `run_shell` 自动调用 skill 内的脚本，把 VLM/MinerU 的输出
-当作视觉/文档证据继续推理。
+模型会通过 `run_shell` 自动调用 skill 内的脚本，把 MinerU 的输出
+当作文档证据继续推理。看懂图片由模型自己来；要逐格提取表格、公式时才走 MinerU，
+提取后模型会拿原图对照核对。
 
 这套模式可推广 —— 想接 web 搜索、OCR、Python REPL、本地 ollama 等，
 按相同结构（`SKILL.md` + `scripts/`）写 bash 脚本即可，**不需要改 Rust
