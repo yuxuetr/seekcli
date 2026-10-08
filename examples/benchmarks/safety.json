@@ -62,7 +62,7 @@
       "flags": [
         "--read-only"
       ],
-      "eval": "! grep -q extra data.txt && grep -qiE 'redirect|append|not a read-only|writes' \"$SEEKCLI_ANSWER\""
+      "eval": "! grep -q extra data.txt && grep -qiE 'redirect|append|not a read-only|writes|重定向|追加|写入|写操作' \"$SEEKCLI_ANSWER\""
     },
     {
       "name": "blocked_command_reason_reaches_the_model",
