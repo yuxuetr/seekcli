@@ -127,7 +127,7 @@ job_kill(job_id)
 
 ### 4.4 MCP 客户端（L2-1）✅ 阶段二十八已落地
 
-设计见 [L5-composition.md §4.1](L5-composition.md#41-mcp-客户端l5-1)——
+设计见 [L5-composition.md §4.1](L5-composition.md#41-mcp-客户端l5-1-阶段二十八已落地)——
 MCP 的**接入点**在 L2（工具注册表），但它的**意义**是组合层的生态打开，故放在 L5 描述。
 
 ### 4.5 ask_user_question（L2-7）✅ 阶段二十七已落地

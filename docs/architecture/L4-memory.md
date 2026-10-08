@@ -116,7 +116,7 @@ pub enum EventPayload {
 
 ### 4.4 压缩改造 ✅ 阶段二十六 26.2 已落地
 
-- 阈值从字节改为 token（依赖 [L0 §4.3](L0-llm-substrate.md#43-token-计数-seaml0-4) 的 `TokenCounter`）。
+- 阈值从字节改为 token（依赖 [L0 §4.3](L0-llm-substrate.md#43-token-计数-seaml0-4-阶段二十六-262-已落地) 的 `TokenCounter`）。
 - 压缩分两层，因为它们防的是不同的事：
   - **轮次边界**（`maybe_compact_session`）产出 `Compaction` 事件，摘要进日志并跨轮沿用。
     这是修复所在——工作集每轮都从日志重新投影，此前 stage-3 摘要因此蒸发，

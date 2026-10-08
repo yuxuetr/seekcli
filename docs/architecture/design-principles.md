@@ -147,7 +147,7 @@ SeekCLI 知道自己是本地 CLI、只有一个执行世界、一个用户、�
 
 判据何时该翻转是可判定的：**当某一层出现真实的第二个实现时。**
 `LlmProvider` 已有四个实现（Resilient / Recording / CostTracker / Replay）故已抽 trait；
-`LoopHook` 至今只有编译期已知的内部用户，故不抽（见 [L1 §4.2](L1-engine.md#42-loophook-扩展点l1-1暂不做)）。
+`LoopHook` 至今只有编译期已知的内部用户，故不抽（见 [L1 §4.2](L1-engine.md#42-loophook-扩展点l1-1-暂不做)）。
 
 ## 6. 变更本文件
 

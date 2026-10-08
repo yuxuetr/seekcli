@@ -111,7 +111,7 @@ crates.io 发布已于 2026-09-12 定为不做；多平台 release 已于 2026-0
 
 *目标：把检索从「教模型用 run_shell 配 sed/grep」变成一等工具。*
 *来源：L2-2 —— 评估认定为**单项性价比最高**的改动。*
-*设计：[L2 §4.1](docs/architecture/L2-tools.md#41-原生检索工具l2-2最高性价比)*
+*设计：[L2 §4.1](docs/architecture/L2-tools.md#41-原生检索工具l2-2-阶段二十一已落地)*
 
 - [x] **21.1 `tools/search.rs`**
     - [x] 依赖 `ignore` + `grep-searcher` / `grep-regex` / `grep-matcher`。
@@ -181,7 +181,7 @@ crates.io 发布已于 2026-09-12 定为不做；多平台 release 已于 2026-0
 ### ✅ 阶段二十三：L6 headless 通用化
 
 *目标：打开被脚本 / CI / 其它程序调用的全部场景。*
-*来源：L6-1 / L6-2 —— 成本极低价值极高。设计：[L6 §4.1](docs/architecture/L6-interface.md#41-通用-headlessl6-1--l6-2)*
+*来源：L6-1 / L6-2 —— 成本极低价值极高。设计：[L6 §4.1](docs/architecture/L6-interface.md#41-通用-headlessl6-1--l6-2-阶段二十三已落地)*
 
 - [x] **23.1 `-p` 一次性执行**
     - [x] `seekcli -p "<prompt>"` 执行后打 stdout 并退出。
@@ -273,7 +273,7 @@ crates.io 发布已于 2026-09-12 定为不做；多平台 release 已于 2026-0
 ### ✅ 阶段二十五：L7 LLM 录制 / 回放（**重构前置条件**）
 
 *目标：让 agent 主循环第一次具备自动化测试能力。*
-*来源：L7-2。设计：[L7 §4.1](docs/architecture/L7-observability.md#41-llm-录制--回放l7-2优先级最高)*
+*来源：L7-2。设计：[L7 §4.1](docs/architecture/L7-observability.md#41-llm-录制--回放l7-2-阶段二十五已落地)*
 
 > **这一阶段必须先于二十六 / 二十七 / 三十一。**
 > 现在 87 个单测全是纯逻辑，`run_agent_loop` 零覆盖；
@@ -375,7 +375,7 @@ CI 门禁棘轮从 45 上调到 60。
 ### ✅ 阶段二十七：L2 工具执行管线中间件化
 
 *目标：把硬编码 `match` 换成注册表 + 中间件链，兑现阶段八 8.3 的推迟项。*
-*来源：L2-3 / L2-4。设计：[L2 §4.2](docs/architecture/L2-tools.md#42-执行管线中间件化l2-3--l2-4)*
+*来源：L2-3 / L2-4。设计：[L2 §4.2](docs/architecture/L2-tools.md#42-执行管线中间件化l2-3--l2-4-阶段二十七已落地)*
 
 - [x] **27.2 结构化 `ToolResult`**
     - [x] `ToolKind { Ok, Denied, Failed, BadArgs, TimedOut }`，兑现阶段八 8.3 的推迟项。
@@ -412,7 +412,7 @@ CI 门禁棘轮从 45 上调到 60。
 
 *目标：让第三方能给 SeekCLI 加能力，而不必改 Rust 源码。*
 *来源：L2-1 / L5-1 —— 评估认定的**最大单点缺口**。*
-*设计：[L5 §4.1](docs/architecture/L5-composition.md#41-mcp-客户端l5-1)*
+*设计：[L5 §4.1](docs/architecture/L5-composition.md#41-mcp-客户端l5-1-阶段二十八已落地)*
 
 - [x] **28.1 协议实现**
     - [x] **只做 stdio transport**；手写 JSON-RPC，零新依赖。拥有失败模式才好处理：
@@ -449,7 +449,7 @@ CI 门禁棘轮从 45 上调到 60。
 ### ✅ 阶段二十九：L7 评估闭环强化
 
 *目标：让「引擎变好还是变坏」有数可依。*
-*来源：L7-1。设计：[L7 §4.2](docs/architecture/L7-observability.md#42-eval-套件扩容l7-1)*
+*来源：L7-1。设计：[L7 §4.2](docs/architecture/L7-observability.md#42-eval-套件扩容l7-1-阶段二十九已落地)*
 
 - [x] **29.1 eval 套件扩到 26 个任务**：`fs.json`(6) / `shell.json`(4) / `multistep.json`(5) /
       `recovery.json`(4) / `safety.json`(4) + 原 `basic.json`(3)。
@@ -482,7 +482,7 @@ CI 门禁棘轮从 45 上调到 60。
 ### ✅ 阶段三十：L2 后台任务与 job 控制（30.4 另行排期）
 
 *目标：长命令与子代理不再阻塞对话。*
-*来源：L2-5 / L5-2。设计：[L2 §4.3](docs/architecture/L2-tools.md#43-后台任务l2-5)*
+*来源：L2-5 / L5-2。设计：[L2 §4.3](docs/architecture/L2-tools.md#43-后台任务l2-5-阶段三十已落地)*
 
 - [x] **30.1 job 注册表**：输出写 `~/.seekcli/jobs/<id>.log` 而非内存缓冲——一次长构建
       不能无界撑大进程，`job_output` 也才能只取尾部。stderr 与 stdout 写同一日志：
@@ -543,7 +543,7 @@ CI 门禁棘轮从 45 上调到 60。
 ### ✅ 阶段三十二：L8 任务声明式化
 
 *目标：加一个定时任务不再需要改 Rust。*
-*来源：L8-1。设计：[L8 §4.1](docs/architecture/L8-loop.md#41-任务声明式化l8-1)*
+*来源：L8-1。设计：[L8 §4.1](docs/architecture/L8-loop.md#41-任务声明式化l8-1-阶段三十二已落地)*
 
 - [x] **32.1 `TASK.md` 格式**：与 `SKILL.md` 同构，**共用同一个 frontmatter 切分器**
       （`skills::split_frontmatter`）——两者都是「YAML 头 + 一段其实是 prompt 的 Markdown
@@ -763,7 +763,7 @@ dsh 的教训写在它的 Agent Note 里：模型猜方法签名、猜返回值�
 **自描述的收益先于自修改兑现**——即使永远不做自修改，这一条也值。
 
 - [x] **35.1 只读工具 `harness_inspect`**（L7-6），一个 `what` 参数分区返回：
-    - [x] `tools`：当前工具面 + **调用签名** + 来源标注（built-in / mcp:<server> / skill）
+    - [x] `tools`：当前工具面 + **调用签名** + 来源标注（built-in / `mcp:<server>` / skill）
     - [x] `policy`：当前 mode 与**生效中的**命令规则
     - [x] `skills`：活跃 skill、可用 skill、**待审提案**（看见已有提案才不会重复起草）
     - [x] `mcp`：各 server 状态与失败原因（复用 34.2 的 `failures`）
