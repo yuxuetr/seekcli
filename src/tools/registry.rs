@@ -22,7 +22,8 @@ pub fn system_tools() -> Vec<Tool> {
     make_tool(
       "write_file",
       "Write content to a file, overwriting if it exists. Creates parent directories as needed. \
-       In a later release, writes outside the current working directory will be rejected.",
+       The path must resolve inside the current working directory; writes outside it are \
+       refused with [PATH DENIED].",
       json!({
         "type": "object",
         "properties": {
@@ -179,7 +180,9 @@ pub fn system_tools() -> Vec<Tool> {
     make_tool(
       "run_shell",
       "Execute a shell command via `sh -c`. Captures both stdout and stderr. \
-       In a later release, dangerous commands (rm -rf, sudo, curl|sh, etc.) will prompt for user confirmation. \
+       Dangerous commands (rm -rf, sudo, curl|sh, etc.) and writes outside the working directory \
+       need the user's approval first; catastrophic ones are blocked outright. A refusal comes back \
+       as [USER DENIED] or [PATH DENIED]. \
        Failures return exit status + stderr so you can self-correct.",
       json!({
         "type": "object",

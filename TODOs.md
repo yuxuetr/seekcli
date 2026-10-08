@@ -2122,13 +2122,20 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       它就开始约三次一红，报的还是一个与 `propose` 毫无关系的 `[MODE DENIED]`。
       改动前 6/6 绿、未修时 3 次红 1 次、补锁后 10/10 绿。
 
-- [ ] **55.7 `run_shell` 的工具描述对模型说谎**（顺带发现，本阶段未改）。
+- [x] **55.7 `run_shell` 的工具描述对模型说谎**（顺带发现，本阶段未改）。
       它仍写着「In a later release, dangerous commands (rm -rf, sudo,
       curl|sh, etc.) **will prompt** for user confirmation」——审批门阶段八
       就落地了，这句话对**模型**说安全机制还不存在。
       没有一并改是因为改工具描述等于改 prompt，应当过一遍 eval 再动，不该搭车。
       **写成正文是我的错**：按本文件开头的约定，`grep '- [ ]'` 数出来的才算
       待办，写成正文等于它不存在——正是这条约定当初要防的事。2026-09-18 补勾。
+      **DONE 2026-10-08**：`run_shell` 改为如实描述（危险命令 / 越界写需批准、
+      灾难级直接拦、拒绝以 `[USER DENIED]` / `[PATH DENIED]` 返回）；同时发现
+      `write_file` 也写着「In a later release … will be rejected」，而
+      `path_security` 早已在拒，一并改。eval：safety 7 + shell 4 前后各跑一遍，
+      before 6/7 + 4/4、after 7/7 + 4/4；before 唯一的红项单独各跑 3 次，
+      before 3/3、after 2/3（失败那次是 API 流 60s 空闲，0 次模型调用）——
+      结论是无可观测差异，不是改善。
 
 ---
 
