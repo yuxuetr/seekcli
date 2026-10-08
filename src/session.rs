@@ -322,25 +322,33 @@ fn rebuild_user_message(content: &str, images: &[ImageRef]) -> Message {
 /// Shared by the user and tool arms so the degradation rule has exactly one
 /// implementation — two copies would drift, and the one that drifted would be
 /// the one that silently lied about an image being present.
+///
+/// A loaded image also names its file. The model receives pixels but not where
+/// they live, so without the path a pasted table could only be looked at, never
+/// handed to a file-based extractor (MinerU via `doc_parser`) when looking is
+/// not accurate enough. The path is added here at projection time rather than
+/// recorded, so older sessions gain it on `/resume` and the log stays as typed.
 fn load_images(content: &str, images: &[ImageRef]) -> (String, Vec<crate::api::ImagePart>) {
   let mut text = content.to_string();
   let mut loaded = Vec::new();
   for image in images {
-    match std::fs::read(&image.path) {
-      Ok(bytes) => loaded.push(crate::api::ImagePart {
-        media_type: image.media_type.clone(),
-        data_base64: base64_encode(&bytes),
-      }),
-      Err(_) => {
-        if !text.is_empty() {
-          text.push('\n');
-        }
-        text.push_str(&format!(
-          "[image no longer available: {} — offload blobs are swept after 30 days]",
-          image.path
-        ));
+    let line = match std::fs::read(&image.path) {
+      Ok(bytes) => {
+        loaded.push(crate::api::ImagePart {
+          media_type: image.media_type.clone(),
+          data_base64: base64_encode(&bytes),
+        });
+        format!("[attached image saved at {}]", image.path)
       }
+      Err(_) => format!(
+        "[image no longer available: {} — offload blobs are swept after 30 days]",
+        image.path
+      ),
+    };
+    if !text.is_empty() {
+      text.push('\n');
     }
+    text.push_str(&line);
   }
   (text, loaded)
 }
@@ -728,6 +736,14 @@ mod tests {
     );
     assert_eq!(msg.images().len(), 1);
     assert_eq!(msg.images()[0].data_base64, "Zm9vYmFy");
+    // The model sees pixels but not where they live; without the path it
+    // cannot hand the image to a file-based tool such as MinerU.
+    let text = match &msg {
+      Message::Simple { content, .. } => content.clone(),
+      other => panic!("unexpected variant: {other:?}"),
+    };
+    assert!(text.starts_with("what is this?"), "{text}");
+    assert!(text.contains(&blob.display().to_string()), "{text}");
     std::fs::remove_dir_all(&dir).ok();
   }
 
