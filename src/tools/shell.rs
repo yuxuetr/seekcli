@@ -74,9 +74,16 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 ///
 /// Split out for `Cleanup`, which runs after the `Child` is gone: a `Drop`
 /// impl cannot borrow something the dropped future already owns.
+///
+/// `-s KILL -- -<pgid>`, the POSIX spelling, not `-KILL -<pgid>`. Ubuntu's
+/// `kill` is procps, which hands its arguments to getopt: a bare `-7584` there
+/// is parsed as an option cluster before anyone treats it as a process group,
+/// and the result was a group that survived — on Linux only, and silently,
+/// since this call's stderr goes nowhere. After `--` every argument is a pid
+/// in every implementation; macOS `/bin/kill` accepts the same spelling.
 fn kill_pgid(pid: u32) {
   let _ = std::process::Command::new("kill")
-    .arg("-KILL")
+    .args(["-s", "KILL", "--"])
     .arg(format!("-{pid}"))
     .stdout(Stdio::null())
     .stderr(Stdio::null())
@@ -547,7 +554,9 @@ mod tests {
   ///
   /// `stat` both paths and compare: device+inode differs for a pipe or a tty
   /// and matches for `/dev/null`. GNU spells it `-c`, BSD `-f`, and the release
-  /// ships both platforms.
+  /// ships both platforms. `-L` is not optional: on Linux `/dev/fd/0` is a
+  /// symlink into `/proc`, and without it GNU `stat` describes the link itself
+  /// (a `/proc` device) — red on every Linux run whatever stdin really is.
   ///
   /// **This door is blind when the runner's own stdin is already `/dev/null`**,
   /// which is the case under CI and under most non-interactive shells — the
@@ -567,7 +576,7 @@ mod tests {
     let out = run_shell(&serde_json::json!({
       "command":
         "for f in /dev/fd/0 /dev/null; \
-         do stat -c '%d %i' $f 2>/dev/null || stat -f '%d %i' $f; done"
+         do stat -L -c '%d %i' $f 2>/dev/null || stat -L -f '%d %i' $f; done"
     }))
     .await;
 
