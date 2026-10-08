@@ -391,10 +391,12 @@ DeepSeek 补强能力的 skill 模板：
 | Skill | 能力 | 依赖环境变量 | 系统依赖 |
 | ----- | ---- | ------------ | -------- |
 | `doc_parser` | 调 MinerU 把 PDF/Docx/PPTX/图片转成 Markdown（表格、公式） | `MINERU_API_KEY` | `jq`、`unzip` |
+| `finance` | 用 Tushare 取行情 / 财务 / 资金流 / 宏观数据，存 parquet 后分析出图；只读研究 | `TUSHARE_TOKEN` | `uv` |
 
 安装到自己的 skill 目录：
 ```bash
 cp -r examples/skills/doc_parser ~/.seekcli/skills/
+cp -r examples/skills/finance ~/.seekcli/skills/     # 依赖由 uv 首次运行时自动安装
 ```
 
 装好即可：已安装的 skill 每轮以「名字 + 一行描述」列给模型，任务匹配时它会
