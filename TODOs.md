@@ -1313,7 +1313,7 @@ skill + shell 脚本这条路可用，照抄即可，不该占代码排期。
       **计算结果**（由工具执行，保留输入与方法）、**判断**（写明假设与不确定性）。
 - [x] **46.4** 时效性口径：「当前」截至何时、实时还是延迟、新闻发布时间与
       事件发生时间是否不同、财务数据是否经过重述。
-      **DONE 2026-10-08（金融部分）**：`examples/skills/finance/`，数据源 Tushare。
+      **DONE 2026-10-08（金融部分）**：`~/.seekcli/skills/finance/`（skill 不进仓库），数据源 Tushare。
       `scripts/ts.py` 用 PEP 723 内联依赖、`uv run --script` 运行，环境随 skill 走；
       `apis` / `doc` 查官方接口目录（运行时拉取——官方仓库未声明许可证，不复制），
       `fetch` 存 `~/.seekcli/data/tushare/<api>/<查询摘要>.parquet`，stdout 只给路径与概要，

@@ -378,41 +378,19 @@ allowed_tools:
 ```
 自动把所有 .json 转成 `<name>/SKILL.md` 目录，原文件备份为 `<name>.json.bak`。
 
-### 📦 内置示例 Skills
+### 📦 Skill 放在哪
 
-`examples/skills/` 目录提供了一个**用 bash + curl + 第三方 API** 给
-DeepSeek 补强能力的 skill 模板：
-
-> 原先还有一个 `vision` skill，用外部 VLM 描述图片。**阶段四十一之后它被删除了**：
-> `deepseek-flash` 自己能看图，图像也已经能真正进入请求（`/paste`、`read_image`、
-> MCP 透传三条入口）。留着它只会让 agent 白跑一趟外部 VLM，换来一段比原图
-> 信息量更少的文字。
-
-| Skill | 能力 | 依赖环境变量 | 系统依赖 |
-| ----- | ---- | ------------ | -------- |
-| `doc_parser` | 调 MinerU 把 PDF/Docx/PPTX/图片转成 Markdown（表格、公式） | `MINERU_API_KEY` | `jq`、`unzip` |
-| `finance` | 用 Tushare 取行情 / 财务 / 资金流 / 宏观数据，存 parquet 后分析出图；只读研究 | `TUSHARE_TOKEN` | `uv` |
-
-安装到自己的 skill 目录：
-```bash
-cp -r examples/skills/doc_parser ~/.seekcli/skills/
-cp -r examples/skills/finance ~/.seekcli/skills/     # 依赖由 uv 首次运行时自动安装
-```
+Skill 不随仓库发布，全部放在 `~/.seekcli/skills/<name>/`，结构是
+`SKILL.md`（frontmatter 里写 `name` / `description`）+ 可选的 `scripts/`、`references/`。
 
 装好即可：已安装的 skill 每轮以「名字 + 一行描述」列给模型，任务匹配时它会
-自己 `load_skill`。也可以手动激活：
+自己 `load_skill`，并通过 `run_shell` 调用 skill 内的脚本。也可以手动激活：
 ```
-/skill doc_parser       # 然后："总结 ~/Downloads/paper.pdf"
+/skill <name>
 ```
 
-模型会通过 `run_shell` 自动调用 skill 内的脚本，把 MinerU 的输出
-当作文档证据继续推理。看懂图片、小表格由模型自己来；PDF 等文档、
-或要一次转录完整的大表格时走 MinerU，提取后模型会拿原图对照核对。
-（实测在清晰截图上，模型裁图放大逐块读也能逐格全对，只是要多轮调用。）
-
-这套模式可推广 —— 想接 web 搜索、OCR、Python REPL、本地 ollama 等，
-按相同结构（`SKILL.md` + `scripts/`）写 bash 脚本即可，**不需要改 Rust
-代码**。
+想接 web 搜索、OCR、文档解析、行情数据等外部能力，按这个结构写脚本即可，
+**不需要改 Rust 代码**。
 
 ---
 
