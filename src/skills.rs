@@ -84,6 +84,22 @@ impl SkillManager {
     })
   }
 
+  /// Rooted somewhere other than `$HOME`. Replay tests compare every request
+  /// byte for byte, and the skill index is part of the request, so a test that
+  /// read the developer's real skills would pass in CI and fail on any machine
+  /// that has one installed.
+  #[cfg(test)]
+  pub(crate) fn at(root: PathBuf) -> Result<Self> {
+    let skills_dir = root.join("skills");
+    let proposals_dir = root.join("proposals");
+    fs::create_dir_all(&skills_dir)?;
+    fs::create_dir_all(&proposals_dir)?;
+    Ok(Self {
+      skills_dir,
+      proposals_dir,
+    })
+  }
+
   pub fn skills_dir(&self) -> &PathBuf {
     &self.skills_dir
   }

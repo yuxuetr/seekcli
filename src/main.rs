@@ -292,7 +292,11 @@ impl App {
         .join("seekcli-test-sessions")
         .join(uuid::Uuid::new_v4().to_string()),
     )?;
-    let skill_manager = SkillManager::new()?;
+    let skill_manager = SkillManager::at(
+      std::env::temp_dir()
+        .join("seekcli-test-skills")
+        .join(uuid::Uuid::new_v4().to_string()),
+    )?;
     let model = config.brain.flash_model.clone();
     let current_session = history.create_session(model.clone());
     let memory_budget = agent::compressor::Budget::from_config(&config.memory);

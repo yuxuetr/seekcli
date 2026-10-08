@@ -39,6 +39,8 @@ pub enum PromptKind {
   Memory,
   /// The research / citation contract (stage 43).
   Research,
+  /// The one-line-per-skill index that makes `load_skill` discoverable.
+  SkillIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

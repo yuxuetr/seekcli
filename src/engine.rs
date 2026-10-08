@@ -1183,6 +1183,7 @@ impl App {
       self.plan_mode,
       self.research_enabled,
       memory_note,
+      self.skill_index_note(),
     );
     // Logged before the request goes out, for the same reason tool intent is:
     // a record written afterwards is a record that a crash can lose.
@@ -1275,6 +1276,7 @@ impl App {
       self.plan_mode,
       self.research_enabled,
       memory_note,
+      self.skill_index_note(),
     );
     let tools = skill.and_then(|s| s.to_api_tools());
     // Headless runs used to produce no trace at all: this path never opened a
@@ -1525,6 +1527,7 @@ impl App {
     plan_mode: bool,
     research: bool,
     memory: Option<String>,
+    skills: Option<String>,
   ) -> Vec<(PromptKind, String)> {
     let mut injected: Vec<(PromptKind, String)> = Vec::new();
     // Plan Mode guidance is added/removed as the flag toggles. Marker-prefixed
@@ -1603,58 +1606,20 @@ impl App {
     if research {
       let rules = agent::prompt::research_rules();
       injected.push((PromptKind::Research, rules.clone()));
-      let present = messages.iter().any(|m| {
-        matches!(
-          m,
-          Message::Simple { role, content: t, .. }
-            if role == "system" && t == &rules
-        )
-      });
-      if !present {
-        let head_end = messages
-          .iter()
-          .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
-          .count();
-        messages.insert(
-          head_end,
-          Message::Simple {
-            images: Vec::new(),
-            role: "system".to_string(),
-            content: rules,
-            reasoning_content: None,
-            tool_calls: None,
-          },
-        );
-      }
+      Self::insert_after_system_head(messages, rules);
     }
 
     // Persistent memory, on the same terms: a separate message after the
     // kernel, absent entirely when nothing has been recorded.
     if let Some(mem) = memory {
       injected.push((PromptKind::Memory, mem.clone()));
-      let present = messages.iter().any(|m| {
-        matches!(
-          m,
-          Message::Simple { role, content: t, .. }
-            if role == "system" && t == &mem
-        )
-      });
-      if !present {
-        let head_end = messages
-          .iter()
-          .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
-          .count();
-        messages.insert(
-          head_end,
-          Message::Simple {
-            images: Vec::new(),
-            role: "system".to_string(),
-            content: mem,
-            reasoning_content: None,
-            tool_calls: None,
-          },
-        );
-      }
+      Self::insert_after_system_head(messages, mem);
+    }
+
+    // The skill index, likewise: absent when nothing is installed.
+    if let Some(index) = skills {
+      injected.push((PromptKind::SkillIndex, index.clone()));
+      Self::insert_after_system_head(messages, index);
     }
 
     // Plan Mode message goes after the leading run of system messages
@@ -1677,6 +1642,58 @@ impl App {
       );
     }
     injected
+  }
+
+  /// Append `content` as a system message after the leading run of system
+  /// messages, unless an identical one is already there. Idempotent because
+  /// `ensure_agent_system_prompt` runs every turn: a note appended once per
+  /// turn would grow the prompt without bound.
+  fn insert_after_system_head(messages: &mut Vec<Message>, content: String) {
+    let present = messages.iter().any(|m| {
+      matches!(
+        m,
+        Message::Simple { role, content: t, .. }
+          if role == "system" && t == &content
+      )
+    });
+    if present {
+      return;
+    }
+    let head_end = messages
+      .iter()
+      .take_while(|m| matches!(m, Message::Simple { role, .. } if role == "system"))
+      .count();
+    messages.insert(
+      head_end,
+      Message::Simple {
+        images: Vec::new(),
+        role: "system".to_string(),
+        content,
+        reasoning_content: None,
+        tool_calls: None,
+      },
+    );
+  }
+
+  /// The installed-skill index for this turn. Read from disk each turn, like
+  /// the memory note, so a skill accepted mid-session is visible on the next.
+  fn skill_index_note(&self) -> Option<String> {
+    match self.skill_manager.load_skills() {
+      Ok(skills) => {
+        let entries: Vec<(&str, &str)> = skills
+          .iter()
+          .map(|s| (s.name.as_str(), s.description.as_str()))
+          .collect();
+        agent::prompt::skills_index(&entries)
+      }
+      Err(e) => {
+        eprintln!(
+          "{} could not list installed skills; the model will not see them this turn: {e}",
+          "[Skills]".yellow()
+        );
+        None
+      }
+    }
   }
 
   /// Log what the harness injected into this request, once per distinct
@@ -2700,7 +2717,7 @@ mod tests {
   #[test]
   fn the_citation_contract_appears_only_with_the_web_tools() {
     let mut without = vec![Message::new_user_text("hi".to_string())];
-    App::ensure_agent_system_prompt(&mut without, false, false, None);
+    App::ensure_agent_system_prompt(&mut without, false, false, None, None);
     assert!(
       !without.iter().any(|m| matches!(
         m,
@@ -2710,7 +2727,7 @@ mod tests {
     );
 
     let mut with = vec![Message::new_user_text("hi".to_string())];
-    App::ensure_agent_system_prompt(&mut with, false, true, None);
+    App::ensure_agent_system_prompt(&mut with, false, true, None, None);
     assert!(
       with.iter().any(|m| matches!(
         m,
@@ -2726,7 +2743,7 @@ mod tests {
   fn injecting_the_contract_does_not_disturb_the_cache_prefix() {
     let kernel = agent::prompt::agent_system_prompt();
     let mut messages = vec![Message::new_user_text("hi".to_string())];
-    App::ensure_agent_system_prompt(&mut messages, false, true, None);
+    App::ensure_agent_system_prompt(&mut messages, false, true, None, None);
     match messages.first() {
       Some(Message::Simple { role, content, .. }) => {
         assert_eq!(role, "system");
@@ -2742,7 +2759,7 @@ mod tests {
   fn the_contract_is_injected_once_not_once_per_turn() {
     let mut messages = vec![Message::new_user_text("hi".to_string())];
     for _ in 0..3 {
-      App::ensure_agent_system_prompt(&mut messages, false, true, None);
+      App::ensure_agent_system_prompt(&mut messages, false, true, None, None);
     }
     let count = messages
       .iter()
@@ -2751,6 +2768,30 @@ mod tests {
       })
       .count();
     assert_eq!(count, 1, "{messages:?}");
+  }
+
+  /// The skill index rides the same idempotent insertion, and is reported so
+  /// the session logs what the model was shown.
+  #[test]
+  fn the_skill_index_is_injected_once_and_reported() {
+    let index = "# Installed skills\n\n- `doc_parser`: tables\n".to_string();
+    let mut messages = vec![Message::new_user_text("hi".to_string())];
+    let mut reported = Vec::new();
+    for _ in 0..3 {
+      reported =
+        App::ensure_agent_system_prompt(&mut messages, false, false, None, Some(index.clone()));
+    }
+    let count = messages
+      .iter()
+      .filter(|m| matches!(m, Message::Simple { content, .. } if content == &index))
+      .count();
+    assert_eq!(count, 1, "{messages:?}");
+    assert!(
+      reported
+        .iter()
+        .any(|(k, c)| *k == PromptKind::SkillIndex && c == &index),
+      "{reported:?}"
+    );
   }
 
   #[test]

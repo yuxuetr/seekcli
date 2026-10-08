@@ -139,6 +139,29 @@ pub fn memory_rules(preferences: &str, scopes: &[crate::memory::ScopeSummary]) -
   Some(out)
 }
 
+const SKILL_GUIDANCE: &str = "\nThese are listed, not loaded: a skill's instructions and scripts reach \
+                              you only after `load_skill`. When the task matches a description, \
+                              load the skill before doing the work.\n";
+
+/// Installed skills, one line each — the discovery half of `load_skill`.
+///
+/// A skill's description says *when* to use it, but it used to reach the model
+/// only after activation, which is exactly when it was no longer needed. With
+/// nothing but `load_skill`'s generic examples on the surface, 0 of 6 table
+/// extraction runs found `doc_parser` (2026-10-08). Same terms as the memory
+/// scopes above: the index costs a line per skill, the bodies stay on disk.
+pub fn skills_index(skills: &[(&str, &str)]) -> Option<String> {
+  if skills.is_empty() {
+    return None;
+  }
+  let mut out = String::from("# Installed skills\n\n");
+  for (name, description) in skills {
+    out.push_str(&format!("- `{name}`: {description}\n"));
+  }
+  out.push_str(SKILL_GUIDANCE);
+  Some(out)
+}
+
 /// Plan Mode guidance, injected as a system message only while `/plan` is on.
 /// Externalizes long-task state to the workspace filesystem (PLAN.md / TODO.md)
 /// so it survives context compression and process restarts — the harness
@@ -353,5 +376,30 @@ mod tests {
   fn nothing_recorded_means_nothing_injected() {
     assert!(memory_rules("", &[]).is_none());
     assert!(memory_rules("   \n ", &[]).is_none());
+  }
+
+  /// The description is the whole point: a bare name is what the model had
+  /// before, and it never loaded anything from it.
+  #[test]
+  fn each_skill_is_listed_with_its_description() {
+    let out = skills_index(&[
+      ("doc_parser", "用 MinerU 精确提取表格"),
+      ("translator", "翻译"),
+    ])
+    .expect("two skills");
+    assert!(
+      out.contains("- `doc_parser`: 用 MinerU 精确提取表格\n"),
+      "{out}"
+    );
+    assert!(out.contains("- `translator`: 翻译\n"), "{out}");
+    assert!(
+      out.contains("load_skill"),
+      "must say how to use the list: {out}"
+    );
+  }
+
+  #[test]
+  fn no_skills_means_nothing_injected() {
+    assert!(skills_index(&[]).is_none());
   }
 }
