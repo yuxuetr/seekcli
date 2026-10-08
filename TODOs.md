@@ -1321,7 +1321,8 @@ skill + shell 脚本这条路可用，照抄即可，不该占代码排期。
       46.2–46.4 写成 SKILL.md 的硬规则 / 三分法表 / 时效性四条。
       没用官方 MCP：它是 HTTP 传输且 token 在 URL 里，SeekCLI 的 MCP 只有 stdio。
       离线验过：目录检索、文档拉取、缺 token、坏参数，以及用假 tushare 模块跑的
-      成功 / 覆盖 / 0 行 / 无权限 / 限流重试 / duckdb 读目录。**真实取数待用户 token 验证。**
+      成功 / 覆盖 / 0 行 / 无权限 / 限流重试 / duckdb 读目录。真实取数已验：
+      `fetch daily ts_code=600519.SH start_date=20260901` → 22 行，20260901 ~ 20261008。
       CQF / 雅思部分不在本次范围。
 
 ---
