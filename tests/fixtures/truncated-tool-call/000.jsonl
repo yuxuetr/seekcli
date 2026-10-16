@@ -1,0 +1,5 @@
+{"Content":"先看看再写。"}
+{"ToolCall":{"id":"call_glob","type":"function","function":{"name":"glob","arguments":"{\"pattern\": \"*.txt\"}"}}}
+{"ToolCall":{"id":"call_cut","type":"function","function":{"name":"write_file","arguments":"{\"path\": \"big.txt\", \"content\": \"aaaaaaaa"}}}
+{"Usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100}}
+{"Finish":"length"}

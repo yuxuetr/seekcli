@@ -591,6 +591,13 @@ struct Response {
   /// it as the end of the turn is what reported a cut-off sentence as
   /// `Completed`. OpenAI-style wires say `length`, Anthropic says `max_tokens`.
   truncated: bool,
+  /// A tool call whose arguments the limit cut off, taken out of `tool_calls`.
+  ///
+  /// Dispatching it only ever produced `[BAD ARGS]`, and that result's
+  /// recovery hint ("check for unescaped quotes") names the wrong cause — the
+  /// JSON was fine, there was just not room for all of it — so the model
+  /// re-emitted the same oversized call and was cut off again.
+  cut_call: Option<api::ToolCall>,
 }
 
 /// Sent back after a reply that was cut off with no tool calls, so the model
@@ -602,6 +609,32 @@ struct Response {
 const CONTINUE_AFTER_TRUNCATION: &str = "[Truncated] Your previous reply was cut off by the \
   output token limit. Continue exactly where it stopped — do not restart, summarise, or \
   repeat what you already wrote.";
+
+/// What the harness owes the model after a response the output limit cut off,
+/// or `None` when nothing was lost.
+///
+/// "Continue where you stopped" is only right for prose. A cut tool call cannot
+/// be continued — the call is gone — and the size that cut it off will cut its
+/// re-emission off too, so the notice says so and says how to split the work.
+/// Sent after the turn's tool results, which keeps assistant→tool alternation.
+fn truncation_notice(
+  truncated: bool,
+  tool_calls: &[api::ToolCall],
+  cut_call: Option<&api::ToolCall>,
+) -> Option<String> {
+  match cut_call {
+    Some(tc) => Some(format!(
+      "[Truncated] Your call to `{}` was cut off by the output token limit after {} bytes \
+       of arguments and was NOT executed. Emitting it the same way will be cut off again: \
+       split the work into smaller calls — for a large file, write_file a first part, \
+       then add the rest with edit_file.",
+      tc.function.name,
+      tc.function.arguments.len()
+    )),
+    None if truncated && tool_calls.is_empty() => Some(CONTINUE_AFTER_TRUNCATION.to_string()),
+    None => None,
+  }
+}
 
 impl App {
   /// Issue one request and consume its stream.
@@ -630,6 +663,7 @@ impl App {
       tool_calls: Vec::new(),
       usage: None,
       truncated: false,
+      cut_call: None,
     };
     let mut is_reasoning = false;
     // One per call, because the `/copy` index it prints is scoped to one
@@ -711,6 +745,24 @@ impl App {
     // path pays nothing for this.
     ui::content(&md.finish());
     ui::flush_content()?;
+
+    // Only the tail of a response can be cut, so only the last call can be
+    // partial; any before it are complete and still run. A last call that
+    // happens to parse was not cut mid-arguments and runs as well.
+    if out.truncated
+      && out.tool_calls.last().is_some_and(|tc| {
+        serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_err()
+      })
+    {
+      out.cut_call = out.tool_calls.pop();
+      if let Some(tc) = &out.cut_call {
+        eprintln!(
+          "{} the `{}` call was cut off by the output limit — not executed",
+          "Agent:".cyan(),
+          tc.function.name
+        );
+      }
+    }
     Ok(out)
   }
 
@@ -916,6 +968,7 @@ impl App {
         tool_calls,
         usage,
         truncated,
+        cut_call,
       } = self.request_step(&messages, &tools).await?;
       if let Some(u) = usage {
         cost.record(&u);
@@ -926,9 +979,11 @@ impl App {
           "tool_calls": tool_calls.len(),
           "content_bytes": content.len(),
           "truncated": truncated,
+          "cut_call": cut_call.as_ref().map(|tc| tc.function.name.clone()),
         }),
       );
       tracer.end(gen_span);
+      let notice = truncation_notice(truncated, &tool_calls, cut_call.as_ref());
 
       messages.push(Message::Simple {
         images: Vec::new(),
@@ -946,23 +1001,19 @@ impl App {
         },
       });
 
-      if tool_calls.is_empty() && truncated {
-        cut_off.push_str(&content);
-        messages.push(Message::new_user_text(
-          CONTINUE_AFTER_TRUNCATION.to_string(),
-        ));
-        tracer.end(turn);
-        continue;
-      }
-      if tool_calls.is_empty() {
+      if tool_calls.is_empty() && notice.is_none() {
         text = std::mem::take(&mut cut_off) + &content;
         status = LoopStatus::Completed;
         tracer.end(turn);
         break;
       }
-      // The model went back to work instead of finishing the fragment; what
-      // it says at the end is the answer, and the fragment is in the history.
-      cut_off.clear();
+      if tool_calls.is_empty() && cut_call.is_none() {
+        cut_off.push_str(&content);
+      } else {
+        // The model went back to work instead of finishing the fragment; what
+        // it says at the end is the answer, and the fragment is in the history.
+        cut_off.clear();
+      }
 
       // Named so a doom loop is visible by eye: fifteen `execute` spans all
       // reading `["grep"]` is the answer to "why did this hit its cap".
@@ -1023,6 +1074,9 @@ impl App {
             outcome.images,
           ));
         }
+      }
+      if let Some(n) = notice {
+        messages.push(Message::new_user_text(n));
       }
       tracer.end(exec);
       tracer.end(turn);
@@ -1934,6 +1988,7 @@ impl App {
         tool_calls,
         usage,
         truncated,
+        cut_call,
       } = self.request_step(&messages, &effective_tools).await?;
 
       // Attribute the cost to this turn. `self.cost` holds the running total,
@@ -1963,6 +2018,7 @@ impl App {
         serde_json::json!({
           "tool_calls": tool_calls.len(),
           "verdict": verdict,
+          "cut_call": cut_call.as_ref().map(|tc| tc.function.name.clone()),
           "content_bytes": assistant_content.len(),
           "reasoning_bytes": assistant_reasoning.len(),
         }),
@@ -1991,27 +2047,23 @@ impl App {
         },
       );
 
-      if tool_calls.is_empty() && !truncated {
+      let notice = truncation_notice(truncated, &tool_calls, cut_call.as_ref());
+      if tool_calls.is_empty() && notice.is_none() {
         final_content = std::mem::take(&mut cut_off) + &assistant_content;
         completed = true;
         self.tracer.end(turn_span);
         break;
       }
-      if tool_calls.is_empty() {
-        // Cut off mid-reply. Not a `continue` (see `the_turn_loop_has_one_exit`):
-        // the empty batch runs nothing, and the shared tail is exactly right
-        // for it — the nudge is journalled, the doom-loop streak resets, and
-        // no planning pass is armed because nothing failed.
+      // Cut off, so not done. Not a `continue` (see `the_turn_loop_has_one_exit`):
+      // a possibly empty batch runs, and the shared tail is exactly right for
+      // it — the notice is journalled after the results, the doom-loop streak
+      // resets, and no planning pass is armed because nothing failed.
+      if tool_calls.is_empty() && cut_call.is_none() {
         eprintln!(
           "{} reply was cut off — asking the model to continue",
           "Agent:".cyan()
         );
         cut_off.push_str(&assistant_content);
-        log_push(
-          &mut messages,
-          &mut events,
-          Message::new_user_text(CONTINUE_AFTER_TRUNCATION.to_string()),
-        );
       } else {
         // The model went back to work instead of finishing the fragment; what
         // it says at the end is the answer, and the fragment is in the history.
@@ -2326,6 +2378,9 @@ impl App {
         }),
       );
       self.tracer.end(exec_span);
+      if let Some(n) = notice {
+        log_push(&mut messages, &mut events, Message::new_user_text(n));
+      }
 
       // Ordering point 2: results are on disk before they go back to the
       // model. A degradation here is not fatal — the side effects already
@@ -3180,6 +3235,34 @@ mod tests {
     );
     assert_eq!(outcome.status, LoopStatus::Completed);
     assert_eq!(outcome.text, "发现一：发现二。");
+  }
+
+  /// The sub-agent copy of the same rule: the cut call is dropped, so the
+  /// next request ends in the notice (user), not in a `[BAD ARGS]` (tool).
+  #[tokio::test]
+  async fn a_sub_agent_tool_call_cut_off_is_not_run() {
+    let app = match App::for_test(Box::new(crate::api::record::Replaying::new(
+      std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/truncated-subagent-tool"),
+    ))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {e}"),
+    };
+    let template = match subagents::registry::lookup("explore") {
+      Some(t) => t,
+      None => panic!("the explore template must exist"),
+    };
+    let spent = std::sync::atomic::AtomicU64::new(0);
+    let outcome = match app.run_sub_agent(template, "读 a 文件", &[], &spent).await {
+      Ok(o) => o,
+      Err(e) => panic!("sub-agent failed: {e}"),
+    };
+    assert_eq!(outcome.iterations, 2);
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert_eq!(
+      outcome.text, "结论。",
+      "no fragment of the cut call leaks into the answer"
+    );
   }
 
   #[test]

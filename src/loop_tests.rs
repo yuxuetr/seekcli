@@ -189,6 +189,47 @@ mod tests {
     );
   }
 
+  /// A tool call cut off by the output limit is not run, and the model is told
+  /// why — not handed a `[BAD ARGS]` whose recovery hint ("check your quotes")
+  /// names the wrong cause and invites the same oversized call again.
+  ///
+  /// The batch also carries a complete `glob` before the cut call: only the
+  /// tail of a response can be cut, so that call still runs, and the notice
+  /// has to come after its result to keep assistant→tool alternation intact.
+  #[tokio::test]
+  async fn a_tool_call_cut_off_by_the_output_limit_is_not_run() {
+    use crate::session::EventPayload;
+
+    let scratch = Scratch::enter("truncated-call");
+    let mut app = app_for("truncated-tool-call");
+
+    let outcome = match app.run_headless("写一个很大的文件 big.txt", None).await {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert_eq!(outcome.llm_calls, 3);
+    assert_eq!(
+      std::fs::read_to_string(scratch.path("big.txt")).unwrap_or_default(),
+      "small",
+      "only the retried, complete call may have written the file"
+    );
+    let notice = outcome.events.iter().find_map(|e| match e {
+      EventPayload::UserMessage { content, .. } if content.starts_with("[Truncated]") => {
+        Some(content.clone())
+      }
+      _ => None,
+    });
+    match notice {
+      Some(n) => assert!(
+        n.contains("write_file") && n.contains("NOT executed"),
+        "the notice must name the call and say it did not run: {n}"
+      ),
+      None => panic!("no [Truncated] notice was sent to the model"),
+    }
+  }
+
   /// The policy gate seen from inside the loop: a denial must come back as a
   /// tool result the model can react to, not as an error that aborts the turn.
   #[tokio::test]

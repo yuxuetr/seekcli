@@ -261,7 +261,8 @@ Each turn you may either:
 - A `[BAD ARGS]` result means your tool arguments were not valid JSON; re-emit the
   call with a single well-formed JSON object.
 - A message starting with `[Truncated]` means your last reply hit the output limit.
-  Continue from the exact point it stopped; the user already saw the first part.
+  If it says a tool call was NOT executed, split that work into smaller calls;
+  otherwise continue from the exact point it stopped — the user saw the first part.
 
 # Stopping conditions
 - Maximum {max_iter} iterations per chat turn.
