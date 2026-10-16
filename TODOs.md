@@ -2231,12 +2231,14 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       **更正评估时的一处说法**：截断的**工具调用** JSON 并不会被记成 Completed——
       `tool_calls` 非空，走的是 `[BAD ARGS]`。
 
-- [ ] **57.2 截断的工具调用拿到错误的恢复建议**（观察，未修）。OpenAI wire 在
-      `length` 时把半截参数照常 flush 成 ToolCall，结果是 `[BAD ARGS]` +
-      「检查引号、逗号、括号」——真实原因是长度，原样重发会再次被截断。
-      **当前不做**：`~/.seekcli/sessions` 里没有一次真实发生（`BAD ARGS` 命中的
-      全是源码文本）。重估条件：trace 里出现 `verdict == "acted"` 且同轮工具结果
-      为 `[BAD ARGS]`、且该轮 gen 的 `completion_tokens` 贴近上限。
+- [x] **57.2 截断的工具调用拿到错误的恢复建议** ✅ 2026-10-16（`083d084`）。
+      OpenAI wire 在 `length` 时把半截参数照常 flush 成 ToolCall，结果是
+      `[BAD ARGS]` +「检查引号、逗号、括号」——真实原因是长度，原样重发会再次被截断。
+      改为：截断且最后一个调用参数不是合法 JSON 时，把它摘出、不执行（只有尾部
+      会被截断，前面完整的调用照常跑）；结果之后发 `[Truncated]` 消息，写明调用名、
+      截在多少字节、怎么拆分。与 57.1 共用 `truncation_notice`；子 agent 循环随之
+      去掉 `continue`。generate span 新增 `cut_call` 字段。
+      评估时因「无真实发生记录」未排，按用户要求修复。
 
 ---
 
