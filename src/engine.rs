@@ -586,7 +586,22 @@ struct Response {
   /// the attribution stage 47 built for time. `None` when the provider sent no
   /// usage block (replay fixtures, and some error paths).
   usage: Option<crate::api::UsageInfo>,
+  /// The provider stopped because it hit the output limit, not because the
+  /// model was done. Without tool calls this is half an answer, and treating
+  /// it as the end of the turn is what reported a cut-off sentence as
+  /// `Completed`. OpenAI-style wires say `length`, Anthropic says `max_tokens`.
+  truncated: bool,
 }
+
+/// Sent back after a reply that was cut off with no tool calls, so the model
+/// finishes it instead of the loop ending on the fragment.
+///
+/// A user message, like the doom-loop reminder: it is the harness speaking at
+/// the point of decision, and it keeps assistant→user alternation intact. The
+/// `[Truncated]` prefix is explained in `agent_system_prompt`.
+const CONTINUE_AFTER_TRUNCATION: &str = "[Truncated] Your previous reply was cut off by the \
+  output token limit. Continue exactly where it stopped — do not restart, summarise, or \
+  repeat what you already wrote.";
 
 impl App {
   /// Issue one request and consume its stream.
@@ -614,6 +629,7 @@ impl App {
       reasoning: String::new(),
       tool_calls: Vec::new(),
       usage: None,
+      truncated: false,
     };
     let mut is_reasoning = false;
     // One per call, because the `/copy` index it prints is scoped to one
@@ -661,9 +677,10 @@ impl App {
           Self::drain_in_flight(&mut md, &mut is_reasoning)?;
           eprintln!();
           if let Some(r) = reason
-            && r == "length"
+            && matches!(r.as_str(), "length" | "max_tokens")
           {
             eprintln!("\n{}", "[Note: Max output limit reached.]".yellow());
+            out.truncated = true;
           }
         }
         StreamItem::Usage(info) => {
@@ -861,6 +878,9 @@ impl App {
     let mut text = String::new();
     let mut status = LoopStatus::MaxIterations;
     let mut iterations = 0usize;
+    // Replies cut off by the output limit, waiting for the turn that finishes
+    // them. See `CONTINUE_AFTER_TRUNCATION`.
+    let mut cut_off = String::new();
 
     for iter in 0..template.max_iter {
       iterations = iter + 1;
@@ -895,6 +915,7 @@ impl App {
         reasoning,
         tool_calls,
         usage,
+        truncated,
       } = self.request_step(&messages, &tools).await?;
       if let Some(u) = usage {
         cost.record(&u);
@@ -904,6 +925,7 @@ impl App {
         serde_json::json!({
           "tool_calls": tool_calls.len(),
           "content_bytes": content.len(),
+          "truncated": truncated,
         }),
       );
       tracer.end(gen_span);
@@ -924,12 +946,23 @@ impl App {
         },
       });
 
+      if tool_calls.is_empty() && truncated {
+        cut_off.push_str(&content);
+        messages.push(Message::new_user_text(
+          CONTINUE_AFTER_TRUNCATION.to_string(),
+        ));
+        tracer.end(turn);
+        continue;
+      }
       if tool_calls.is_empty() {
-        text = content;
+        text = std::mem::take(&mut cut_off) + &content;
         status = LoopStatus::Completed;
         tracer.end(turn);
         break;
       }
+      // The model went back to work instead of finishing the fragment; what
+      // it says at the end is the answer, and the fragment is in the history.
+      cut_off.clear();
 
       // Named so a doom loop is visible by eye: fifteen `execute` spans all
       // reading `["grep"]` is the answer to "why did this hit its cap".
@@ -1793,6 +1826,9 @@ impl App {
     // Two-Stage ReAct: set when the previous turn failed, forcing a tools-free
     // planning pass before the next action (micro trigger).
     let mut plan_next = false;
+    // Replies cut off by the output limit, waiting for the turn that finishes
+    // them. See `CONTINUE_AFTER_TRUNCATION`.
+    let mut cut_off = String::new();
 
     for iter in 0..max_iter {
       iterations = iter + 1;
@@ -1897,6 +1933,7 @@ impl App {
         reasoning: assistant_reasoning,
         tool_calls,
         usage,
+        truncated,
       } = self.request_step(&messages, &effective_tools).await?;
 
       // Attribute the cost to this turn. `self.cost` holds the running total,
@@ -1914,6 +1951,8 @@ impl App {
       // the next occurrence is greppable.
       let verdict = if !tool_calls.is_empty() {
         "acted"
+      } else if truncated {
+        "truncated"
       } else if assistant_content.trim().is_empty() {
         "empty"
       } else {
@@ -1952,11 +1991,31 @@ impl App {
         },
       );
 
-      if tool_calls.is_empty() {
-        final_content = assistant_content;
+      if tool_calls.is_empty() && !truncated {
+        final_content = std::mem::take(&mut cut_off) + &assistant_content;
         completed = true;
         self.tracer.end(turn_span);
         break;
+      }
+      if tool_calls.is_empty() {
+        // Cut off mid-reply. Not a `continue` (see `the_turn_loop_has_one_exit`):
+        // the empty batch runs nothing, and the shared tail is exactly right
+        // for it — the nudge is journalled, the doom-loop streak resets, and
+        // no planning pass is armed because nothing failed.
+        eprintln!(
+          "{} reply was cut off — asking the model to continue",
+          "Agent:".cyan()
+        );
+        cut_off.push_str(&assistant_content);
+        log_push(
+          &mut messages,
+          &mut events,
+          Message::new_user_text(CONTINUE_AFTER_TRUNCATION.to_string()),
+        );
+      } else {
+        // The model went back to work instead of finishing the fragment; what
+        // it says at the end is the answer, and the fragment is in the history.
+        cut_off.clear();
       }
 
       // Ordering point 1: the intent to call these tools is on disk before
@@ -1997,7 +2056,9 @@ impl App {
         &format!("{} tool(s)", tool_calls.len()),
         turn_span,
       );
-      eprintln!("\n{} Executing tools...", "Agent:".cyan());
+      if !tool_calls.is_empty() {
+        eprintln!("\n{} Executing tools...", "Agent:".cyan());
+      }
       // Snapshot this turn's trajectory for doom-loop detection before the
       // calls are consumed below.
       let turn_tool_calls = tool_calls.clone();
@@ -2299,7 +2360,9 @@ impl App {
       plan_next = depth == 0 && turn_had_failure;
 
       self.tracer.end(turn_span);
-      eprintln!("{} Returning tool results to model...", "Agent:".cyan());
+      if !turn_tool_calls.is_empty() {
+        eprintln!("{} Returning tool results to model...", "Agent:".cyan());
+      }
     }
 
     if !completed {
@@ -3087,6 +3150,36 @@ mod tests {
       app.memory.is_none(),
       "a replayed prompt must not depend on the developer's memory directory"
     );
+  }
+
+  /// The sub-agent loop is a separate copy of the control flow, so it needs
+  /// its own guard: a child whose summary is cut off must not hand the parent
+  /// half a finding labelled `completed`. Also covers Anthropic's spelling of
+  /// the same stop reason, `max_tokens`.
+  #[tokio::test]
+  async fn a_truncated_sub_agent_summary_is_continued() {
+    let app = match App::for_test(Box::new(crate::api::record::Replaying::new(
+      std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/truncated-subagent"),
+    ))) {
+      Ok(a) => a,
+      Err(e) => panic!("cannot build test App: {e}"),
+    };
+    let template = match subagents::registry::lookup("explore") {
+      Some(t) => t,
+      None => panic!("the explore template must exist"),
+    };
+    let spent = std::sync::atomic::AtomicU64::new(0);
+    let outcome = match app.run_sub_agent(template, "找东西", &[], &spent).await {
+      Ok(o) => o,
+      Err(e) => panic!("sub-agent failed: {e}"),
+    };
+    assert_eq!(
+      outcome.iterations, 2,
+      "the cut-off summary must be continued"
+    );
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert_eq!(outcome.text, "发现一：发现二。");
   }
 
   #[test]

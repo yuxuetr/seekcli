@@ -159,6 +159,36 @@ mod tests {
     assert!(!outcome.text.is_empty());
   }
 
+  /// A reply cut off by the output limit is not an answer.
+  ///
+  /// "No tool calls" means the model handed the turn back; `finish_reason ==
+  /// "length"` means it did not get to. Before this was told apart, the first
+  /// half of a sentence came back as `Completed` and the loop stopped there.
+  ///
+  /// Hand-written rather than recorded: the output limit is not configurable,
+  /// so a real truncation cannot be produced on demand. Only the stream items
+  /// matter here, and those are exactly what a provider emits.
+  #[tokio::test]
+  async fn a_reply_cut_off_by_the_output_limit_is_continued_not_completed() {
+    let _scratch = Scratch::enter("truncated");
+    let mut app = app_for("truncated-answer");
+
+    let outcome = match app.run_headless("写一段很长的说明", None).await {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(
+      outcome.llm_calls, 2,
+      "a truncated reply must get a second call to finish, not end the run"
+    );
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert_eq!(
+      outcome.text, "第一段，第二段。",
+      "the answer is both halves — the cut-off part was shown and is not to be lost"
+    );
+  }
+
   /// The policy gate seen from inside the loop: a denial must come back as a
   /// tool result the model can react to, not as an error that aborts the turn.
   #[tokio::test]
