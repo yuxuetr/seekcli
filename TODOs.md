@@ -2215,6 +2215,29 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       对 harness 的启示：这类错误单测和门都拦不住，只能靠**让模型去读源码而不是
       回忆**。可考虑在 prompt 里加一条：断言「某版本改了行为」之前先找到定义。
 
+### 🟤 阶段五十七：停止信号与截断（2026-10-16）
+
+*来源：对照「gather → act → verify → repeat」图审视主循环。「无工具调用即停」
+本身成立——它表示模型把话轮交还给用户（汇报 / 澄清 / 说明做不了）；
+问题是它被当成了唯一判据。*
+
+- [x] **57.1 截断的回复被记为 Completed** ✅ 2026-10-16（`7bad472`）。
+      `finish_reason == "length"` 只打一行提示，随后因 `tool_calls` 为空判
+      `completed = true`——半句话成了最终答案。改为追加 `[Truncated]` user 消息
+      让模型续写，片段累积进最终文本；主循环与子 agent 循环都改。主循环**不用
+      `continue`**（`the_turn_loop_has_one_exit` 当场拦下第一版），而是让空批次走
+      共享尾部。顺带补上 Anthropic 的 `max_tokens`（此前只认 `length`）。
+      fixture 手写：输出上限不可配置，真实截断无法按需复现。
+      **更正评估时的一处说法**：截断的**工具调用** JSON 并不会被记成 Completed——
+      `tool_calls` 非空，走的是 `[BAD ARGS]`。
+
+- [ ] **57.2 截断的工具调用拿到错误的恢复建议**（观察，未修）。OpenAI wire 在
+      `length` 时把半截参数照常 flush 成 ToolCall，结果是 `[BAD ARGS]` +
+      「检查引号、逗号、括号」——真实原因是长度，原样重发会再次被截断。
+      **当前不做**：`~/.seekcli/sessions` 里没有一次真实发生（`BAD ARGS` 命中的
+      全是源码文本）。重估条件：trace 里出现 `verdict == "acted"` 且同轮工具结果
+      为 `[BAD ARGS]`、且该轮 gen 的 `completion_tokens` 贴近上限。
+
 ---
 
 ### 本轮需同步修订的既有约束
