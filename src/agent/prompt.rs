@@ -263,6 +263,9 @@ Each turn you may either:
 - A message starting with `[Truncated]` means your last reply hit the output limit.
   If it says a tool call was NOT executed, split that work into smaller calls;
   otherwise continue from the exact point it stopped — the user saw the first part.
+- A message starting with `[VERIFY FAILED]` means the project's own check ran after
+  you stopped and failed. You are not done: fix the cause shown in its output,
+  then finish again. Do not just repeat your previous summary.
 
 # Stopping conditions
 - Maximum {max_iter} iterations per chat turn.

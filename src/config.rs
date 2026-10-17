@@ -70,6 +70,9 @@ pub struct Config {
   /// Decision-path tracing and how much of it to keep.
   #[serde(default)]
   pub trace: TraceConfig,
+  /// A check the harness runs when the model says it is done.
+  #[serde(default)]
+  pub verify: VerifyConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -433,6 +436,18 @@ impl Default for TraceConfig {
 /// has exactly one field, so a typo in it cannot be noticed any other way —
 /// the value would simply default to `false` and the feature would be silently
 /// off, which is the failure this whole section exists to end.
+/// `deny_unknown_fields` for the same reason as `[planning]`: one field, and a
+/// misspelt key would leave every run silently unverified.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyConfig {
+  /// Run through `sh -c` in the working directory when the main agent stops
+  /// after changing something; exit 0 is a pass. Normally set per project in
+  /// `./.seekcli.toml` — which is why that layer needs trust first.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub command: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PlanningConfig {
@@ -576,6 +591,7 @@ impl Default for Config {
       limits: LimitsConfig::default(),
       planning: PlanningConfig::default(),
       trace: TraceConfig::default(),
+      verify: VerifyConfig::default(),
     }
   }
 }

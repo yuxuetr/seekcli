@@ -28,6 +28,18 @@ pub(crate) enum LoopStatus {
   BudgetExhausted,
 }
 
+/// Whether anything checked the result. Separate from `LoopStatus` on
+/// purpose: that says why the loop stopped, this says whether stopping was
+/// earned. "completed" read as "it worked" is the mistake the pair prevents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verification {
+  /// No `[verify] command`, or the run changed nothing for it to check.
+  NotVerified,
+  Passed,
+  /// Still failing after `VERIFY_RETRIES` attempts to fix it.
+  Failed,
+}
+
 /// Whether a run writes its events to the session log as it goes.
 ///
 /// Only the interactive turn does. `run_headless` is documented as saving no
@@ -55,6 +67,7 @@ pub(crate) struct LoopResult {
   /// forcing the log and the loop to share one mutable path.
   pub events: Vec<EventPayload>,
   pub status: LoopStatus,
+  pub verification: Verification,
   pub iterations: usize,
 }
 
@@ -636,6 +649,92 @@ fn truncation_notice(
   }
 }
 
+/// How many times a failing `[verify] command` sends the model back before the
+/// run ends as `Failed`. A constant, not a config key: nobody has needed a
+/// different number, and a check that fails three times in a row is telling
+/// the user something the model cannot fix alone.
+const VERIFY_RETRIES: usize = 2;
+
+/// How much of a failing check's output the model gets. The end, because a
+/// test runner puts its summary and the first failure's detail there.
+const VERIFY_OUTPUT_TAIL: usize = 4_000;
+
+/// What the harness decides when the main agent stops.
+enum Stop {
+  Done(Verification),
+  /// Not done: send this back and let the loop run another turn.
+  Retry(String),
+}
+
+/// The deterministic half of "verify results": the model asking to stop is
+/// a request, and this is where the harness checks it — Claude Code's Stop
+/// hook, reduced to the one event SeekCLI has a use for.
+///
+/// Only when the run changed something (`mutated`). Re-running a project's
+/// test suite after every chat reply would make the REPL unusable there, and
+/// a run that only read has nothing new to check. Runs with no gate in front:
+/// the command is the user's own (trusted config), not the model's.
+async fn verify_on_stop(command: Option<&str>, mutated: bool, failures: &mut usize) -> Stop {
+  let Some(command) = command.filter(|_| mutated) else {
+    return Stop::Done(Verification::NotVerified);
+  };
+  eprintln!("\n{} {}", "[Verify]".cyan(), command);
+  let ran = match tools::shell::execute(command).await {
+    Ok(r) => r,
+    // A check that cannot run has not passed. Reported, not retried: the
+    // model cannot fix a missing `sh`.
+    Err(e) => {
+      eprintln!("{} could not run: {e:#}", "[Verify]".red());
+      return Stop::Done(Verification::Failed);
+    }
+  };
+  if ran.cancelled {
+    eprintln!("{} interrupted — not verified", "[Verify]".yellow());
+    return Stop::Done(Verification::NotVerified);
+  }
+  if ran.status.success() {
+    eprintln!("{} passed", "[Verify]".green());
+    return Stop::Done(Verification::Passed);
+  }
+  *failures += 1;
+  if *failures > VERIFY_RETRIES {
+    eprintln!(
+      "{} still failing after {} retries ({}) — stopping",
+      "[Verify]".red(),
+      VERIFY_RETRIES,
+      ran.status
+    );
+    return Stop::Done(Verification::Failed);
+  }
+  eprintln!(
+    "{} failed ({}) — sending the output back ({}/{})",
+    "[Verify]".red(),
+    ran.status,
+    failures,
+    VERIFY_RETRIES
+  );
+  let mut output = String::from_utf8_lossy(&ran.stdout).into_owned();
+  output.push_str(&String::from_utf8_lossy(&ran.stderr));
+  let mut cut = output.len().saturating_sub(VERIFY_OUTPUT_TAIL);
+  while !output.is_char_boundary(cut) {
+    cut += 1;
+  }
+  let omitted = if cut > 0 {
+    format!("[first {cut} bytes not shown]\n")
+  } else {
+    String::new()
+  };
+  Stop::Retry(format!(
+    "[VERIFY FAILED] You stopped, but the project's verification command `{command}` \
+     failed ({}). You are not done: find the cause, fix it, then finish again. \
+     Retry {}/{}. Its output:\n```\n{omitted}{}\n```",
+    ran.status,
+    failures,
+    VERIFY_RETRIES,
+    output[cut..].trim_end()
+  ))
+}
+
 impl App {
   /// Issue one request and consume its stream.
   ///
@@ -1201,6 +1300,7 @@ fn title_from(prompt: &str) -> String {
 pub(crate) struct HeadlessOutcome {
   pub text: String,
   pub status: LoopStatus,
+  pub verification: Verification,
   pub iterations: usize,
   pub llm_calls: u64,
   /// What the run appended to the conversation.
@@ -1388,6 +1488,7 @@ impl App {
     Ok(HeadlessOutcome {
       text: run.text,
       status: run.status,
+      verification: run.verification,
       iterations: run.iterations,
       llm_calls: self.cost.api_calls - calls_before,
       events: run.events,
@@ -1883,6 +1984,13 @@ impl App {
     // Replies cut off by the output limit, waiting for the turn that finishes
     // them. See `CONTINUE_AFTER_TRUNCATION`.
     let mut cut_off = String::new();
+    // For `verify_on_stop`: whether anything ran that can change the machine,
+    // and how many checks have failed. `invoke_agent` counts — a general
+    // sub-agent writes files the main agent never touched.
+    let mut mutated = false;
+    let mut verify_failures = 0usize;
+    let mut verification = Verification::NotVerified;
+    let verify_command = self.config.verify.command.clone().filter(|_| depth == 0);
 
     for iter in 0..max_iter {
       iterations = iter + 1;
@@ -2047,18 +2155,25 @@ impl App {
         },
       );
 
-      let notice = truncation_notice(truncated, &tool_calls, cut_call.as_ref());
+      let mut notice = truncation_notice(truncated, &tool_calls, cut_call.as_ref());
       if tool_calls.is_empty() && notice.is_none() {
-        final_content = std::mem::take(&mut cut_off) + &assistant_content;
-        completed = true;
-        self.tracer.end(turn_span);
-        break;
+        match verify_on_stop(verify_command.as_deref(), mutated, &mut verify_failures).await {
+          Stop::Done(v) => {
+            verification = v;
+            final_content = std::mem::take(&mut cut_off) + &assistant_content;
+            completed = true;
+            self.tracer.end(turn_span);
+            break;
+          }
+          Stop::Retry(failed) => notice = Some(failed),
+        }
       }
-      // Cut off, so not done. Not a `continue` (see `the_turn_loop_has_one_exit`):
-      // a possibly empty batch runs, and the shared tail is exactly right for
-      // it — the notice is journalled after the results, the doom-loop streak
-      // resets, and no planning pass is armed because nothing failed.
-      if tool_calls.is_empty() && cut_call.is_none() {
+      // Cut off or failed verification, so not done. Not a `continue` (see
+      // `the_turn_loop_has_one_exit`): a possibly empty batch runs, and the
+      // shared tail is exactly right for it — the notice is journalled after
+      // the results, the doom-loop streak resets, and no planning pass is
+      // armed because no tool failed.
+      if truncated && tool_calls.is_empty() && cut_call.is_none() {
         eprintln!(
           "{} reply was cut off — asking the model to continue",
           "Agent:".cyan()
@@ -2114,6 +2229,11 @@ impl App {
       // Snapshot this turn's trajectory for doom-loop detection before the
       // calls are consumed below.
       let turn_tool_calls = tool_calls.clone();
+      mutated |= turn_tool_calls.iter().any(|tc| {
+        let name = tc.function.name.as_str();
+        let read_only = crate::mcp::is_mcp_tool(name).then(|| self.mcp.is_read_only(name));
+        name == "invoke_agent" || tools::policy::is_mutating_with(name, read_only)
+      });
       // Tracks whether any tool failed this turn — drives the Two-Stage ReAct
       // micro trigger (force a planning pass before the next action).
       let mut turn_had_failure = false;
@@ -2443,6 +2563,7 @@ impl App {
       text: final_content,
       events,
       status,
+      verification,
       iterations,
     })
   }

@@ -351,7 +351,10 @@ JSONL，每行一个任务：
 - `status` 说**循环为什么停**（completed / max_iterations / interrupted）。
 - `verification` 说**有没有东西检查过结果**。
 
-`-p` 路径上它恒为 `not_verified`——headless 运行没有验收条件。
-今天唯一产出真实判决的是 benchmark runner，它按验证命令的退出码判定。
+~~`-p` 路径上它恒为 `not_verified`——headless 运行没有验收条件。~~
+**阶段五十八 58.4 起**：配置了 `[verify] command` 且本次运行执行过会改动机器的工具时，
+主 agent 停下由 harness 跑该命令——退出 0 为 `passed`；非 0 发 `[VERIFY FAILED]` 续跑，
+重试 `VERIFY_RETRIES`（2）次仍失败为 `failed`，`-p` 退出码 2。没配或没改动仍是
+`not_verified`。benchmark runner 的判定方式不变。
 **把 `completed` 读成「成功了」，正是这两个字段要防的那个错误：
 模型答完了不等于任务过了。**

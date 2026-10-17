@@ -210,6 +210,81 @@ pub async fn run_shell(args: &Value) -> Result<String> {
 
   eprintln!("\n{} {}", "[Agent Executing]".cyan(), command);
 
+  let Ran {
+    status,
+    stdout: stdout_bytes,
+    stderr: stderr_bytes,
+    cancelled: was_cancelled,
+  } = execute(command).await?;
+
+  if was_cancelled {
+    eprintln!("{} command interrupted by user.", "[Agent]".yellow());
+    let partial = String::from_utf8_lossy(&stdout_bytes);
+    return Ok(format!(
+      "[USER DENIED] Command interrupted by the user: {command}\n\
+       Do not retry it. Partial output before it was stopped:\n{}",
+      super::offload::offload(partial.into_owned(), Some("interrupted command")).await
+    ));
+  }
+
+  let output = std::process::Output {
+    status,
+    stdout: stdout_bytes,
+    stderr: stderr_bytes,
+  };
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  echo_output_tail(&stdout, &stderr);
+
+  let mut result = String::new();
+  if !stdout.is_empty() {
+    result.push_str("STDOUT:\n");
+    result.push_str(&stdout);
+    result.push('\n');
+  }
+  if !stderr.is_empty() {
+    result.push_str("STDERR:\n");
+    result.push_str(&stderr);
+    result.push('\n');
+  }
+
+  if result.is_empty() {
+    result.push_str("Command executed successfully with no output.");
+  }
+
+  // Offload bulky output (logs, large dumps) to a temp file, keeping a
+  // head+tail preview so the context isn't flooded. Ephemeral output, so no
+  // source hint.
+  let result = super::offload::offload(result, None).await;
+
+  if output.status.success() {
+    Ok(result)
+  } else {
+    // Even if it failed, we return Ok(result) so the LLM gets the stderr and can retry
+    Ok(format!(
+      "Command failed with exit code: {}.\n{}",
+      output.status, result
+    ))
+  }
+}
+
+/// What one foreground command did. `cancelled` means Ctrl-C stopped it and
+/// the output is whatever arrived before.
+pub(crate) struct Ran {
+  pub status: std::process::ExitStatus,
+  pub stdout: Vec<u8>,
+  pub stderr: Vec<u8>,
+  pub cancelled: bool,
+}
+
+/// Spawn, wait, drain — with no gate in front of it.
+///
+/// Split from `run_shell` for the verify gate (`engine::verify_on_stop`),
+/// whose command comes from the user's trusted config rather than from the
+/// model, so it skips the policy and approval that `run_shell` puts in front
+/// of this — but needs every lesson below exactly as much.
+pub(crate) async fn execute(command: &str) -> Result<Ran> {
   // Spawn a side task that activates a progress spinner only if the command
   // takes longer than SPINNER_DELAY. The spinner clears itself when the
   // main task signals completion via the shared atomic flag.
@@ -326,56 +401,12 @@ pub async fn run_shell(args: &Value) -> Result<String> {
     )
   };
 
-  if was_cancelled {
-    eprintln!("{} command interrupted by user.", "[Agent]".yellow());
-    let partial = String::from_utf8_lossy(&stdout_bytes);
-    return Ok(format!(
-      "[USER DENIED] Command interrupted by the user: {command}\n\
-       Do not retry it. Partial output before it was stopped:\n{}",
-      super::offload::offload(partial.into_owned(), Some("interrupted command")).await
-    ));
-  }
-
-  let output = std::process::Output {
+  Ok(Ran {
     status,
     stdout: stdout_bytes,
     stderr: stderr_bytes,
-  };
-
-  let stdout = String::from_utf8_lossy(&output.stdout);
-  let stderr = String::from_utf8_lossy(&output.stderr);
-  echo_output_tail(&stdout, &stderr);
-
-  let mut result = String::new();
-  if !stdout.is_empty() {
-    result.push_str("STDOUT:\n");
-    result.push_str(&stdout);
-    result.push('\n');
-  }
-  if !stderr.is_empty() {
-    result.push_str("STDERR:\n");
-    result.push_str(&stderr);
-    result.push('\n');
-  }
-
-  if result.is_empty() {
-    result.push_str("Command executed successfully with no output.");
-  }
-
-  // Offload bulky output (logs, large dumps) to a temp file, keeping a
-  // head+tail preview so the context isn't flooded. Ephemeral output, so no
-  // source hint.
-  let result = super::offload::offload(result, None).await;
-
-  if output.status.success() {
-    Ok(result)
-  } else {
-    // Even if it failed, we return Ok(result) so the LLM gets the stderr and can retry
-    Ok(format!(
-      "Command failed with exit code: {}.\n{}",
-      output.status, result
-    ))
-  }
+    cancelled: was_cancelled,
+  })
 }
 
 /// Echo the tail of a command's output to the operator.

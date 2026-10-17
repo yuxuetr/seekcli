@@ -621,13 +621,12 @@ async fn run_prompt(app: &mut App, prompt: String, format: OutputFormat) -> Resu
         // stopped; this says whether anything checked the result. A consumer
         // reading "completed" as "it worked" is making exactly the mistake
         // these two fields exist to prevent: the model answering is not the
-        // task passing.
-        //
-        // Nothing sets this to passed/failed on this path — `-p` has no
-        // acceptance criterion. The benchmark runner judges by a verification
-        // command's exit code, and that is currently the only producer of a
-        // real verdict.
-        "verification": "not_verified",
+        // task passing. A real verdict needs `[verify] command`.
+        "verification": match outcome.verification {
+          engine::Verification::NotVerified => "not_verified",
+          engine::Verification::Passed => "passed",
+          engine::Verification::Failed => "failed",
+        },
         "iterations": outcome.iterations,
         "llm_calls": outcome.llm_calls,
         "usage": {
@@ -642,6 +641,11 @@ async fn run_prompt(app: &mut App, prompt: String, format: OutputFormat) -> Resu
   }
 
   Ok(match outcome.status {
+    // The model finished but the check it was held to did not pass: the same
+    // "stopped without converging" a retrying caller needs to see.
+    engine::LoopStatus::Completed if outcome.verification == engine::Verification::Failed => {
+      exit::NOT_CONVERGED
+    }
     engine::LoopStatus::Completed => exit::OK,
     // Same class as running out of turns: the run stopped without finishing,
     // and a caller that retries wants to know that before it does.

@@ -230,6 +230,92 @@ mod tests {
     }
   }
 
+  fn verify_notice(events: &[crate::session::EventPayload]) -> Vec<String> {
+    use crate::session::EventPayload;
+    events
+      .iter()
+      .filter_map(|e| match e {
+        EventPayload::UserMessage { content, .. } if content.starts_with("[VERIFY FAILED]") => {
+          Some(content.clone())
+        }
+        _ => None,
+      })
+      .collect()
+  }
+
+  /// The model saying it is done is a request to stop, not proof. With a
+  /// verify command configured, a failing check sends the model back to work
+  /// with the output, and only a passing one ends the run as `passed`.
+  #[tokio::test]
+  async fn a_failing_verify_command_sends_the_model_back_to_work() {
+    let scratch = Scratch::enter("verify-retry");
+    let mut app = app_for("verify-fails-then-passes");
+    app.config.verify.command =
+      Some("grep -q fixed out.txt || { echo 'out.txt is not fixed'; exit 1; }".into());
+
+    let outcome = match app.run_headless("修好 out.txt", None).await {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(outcome.status, LoopStatus::Completed);
+    assert_eq!(outcome.verification, crate::engine::Verification::Passed);
+    assert_eq!(outcome.llm_calls, 4, "the first stop must not end the run");
+    assert_eq!(outcome.text, "修好了。");
+    assert_eq!(
+      std::fs::read_to_string(scratch.path("out.txt")).unwrap_or_default(),
+      "fixed"
+    );
+    let notices = verify_notice(&outcome.events);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+      notices[0].contains("out.txt is not fixed"),
+      "the model needs the command's output to know what to fix: {}",
+      notices[0]
+    );
+  }
+
+  /// A check that never passes must not loop forever, and must not be
+  /// reported as success: the run stops as `failed` after a fixed number of
+  /// retries.
+  #[tokio::test]
+  async fn a_verify_command_that_never_passes_ends_as_failed() {
+    let _scratch = Scratch::enter("verify-exhausted");
+    let mut app = app_for("verify-exhausted");
+    app.config.verify.command = Some("exit 1".into());
+
+    let outcome = match app.run_headless("修好 out.txt", None).await {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(outcome.verification, crate::engine::Verification::Failed);
+    assert_eq!(outcome.llm_calls, 4);
+    assert_eq!(verify_notice(&outcome.events).len(), 2);
+    assert_eq!(outcome.text, "我改不动了。");
+  }
+
+  /// Verification checks what the run changed. A run that only answered a
+  /// question changed nothing, and running the project's test suite after
+  /// every chat reply would make the REPL unusable in that project.
+  #[tokio::test]
+  async fn a_run_that_changed_nothing_is_not_verified() {
+    let _scratch = Scratch::enter("verify-unchanged");
+    let mut app = app_for("verify-nothing-changed");
+    app.config.verify.command = Some("exit 1".into());
+
+    let outcome = match app.run_headless("答案是多少？", None).await {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(
+      outcome.verification,
+      crate::engine::Verification::NotVerified
+    );
+    assert_eq!(outcome.llm_calls, 1);
+  }
+
   /// The policy gate seen from inside the loop: a denial must come back as a
   /// tool result the model can react to, not as an error that aborts the turn.
   #[tokio::test]

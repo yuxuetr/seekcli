@@ -1,0 +1,3 @@
+{"ToolCall":{"id":"call_2","type":"function","function":{"name":"write_file","arguments":"{\"path\": \"out.txt\", \"content\": \"fixed\"}"}}}
+{"Usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100}}
+{"Finish":"tool_calls"}

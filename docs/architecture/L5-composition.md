@@ -185,7 +185,7 @@ file:line 的发现**。
 | 项 | 理由 |
 | --- | --- |
 | 插件框架 / profile / bundle 组合 | dsh 需要它是因为要支持第三方发行版；单人 Rust CLI 上，编译期组合 + MCP 已覆盖扩展需求，插件框架的复杂度收益比不成立 |
-| hooks 协议桥 | 待 MCP 落地后重估——若用户真的需要 hook，多半可以用 MCP server 表达 |
+| hooks 协议桥（通用） | ~~待 MCP 落地后重估——若用户真的需要 hook，多半可以用 MCP server 表达~~ **七评推翻理由、收窄范围**：MCP 工具由模型决定调不调，hook 的价值恰在不由模型决定，故不能互替。只落地一个事件——停止时的 `[verify] command`（阶段五十八 58.4，`engine::verify_on_stop`）。通用 hooks 仍不做，重估条件：出现第二个**不同事件**的真实需求 |
 | workflow / ralph 编排 | 纯 ReAct + 类型化 SubAgent 已足够；DAG 编排是另一个产品 |
 | 在线自演化 Skill | 见 [design-principles](design-principles.md) |
 
