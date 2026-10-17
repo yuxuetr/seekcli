@@ -2262,13 +2262,19 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       修前红。三处引用「AGENTS.md 工程品格」的文档仍成立（该节标题保留）。
 - [ ] **58.4 验收命令 Stop 门**（七评 §2.1）。`.seekcli.toml` 的 `[verify] command`，
       停止时由 harness 执行，非 0 退出发 `[VERIFY FAILED]` 续跑，连续失败上限为常量。
-      **阻塞于 58.5**：验收命令放在仓库里的 `.seekcli.toml`，等于让仓库决定本机执行什么。
-- [ ] **58.5 项目层配置无信任边界**（58.4 设计时发现）。`config.rs::merge` 让
+      前置 58.5 已完成：验收命令放在仓库里的 `.seekcli.toml`，须先经信任才生效。
+- [x] **58.5 项目层配置无信任边界** ✅ 2026-10-17（`ade0a8b`，用户选定「先修信任，再做 58.4」）。
+      未接受的 `./.seekcli.toml` 整层不生效并打印一行；REPL 展示全文问 y/N，接受的
+      **原文**记入 `~/.seekcli/trusted-projects.json`，内容一变重问；headless 不问，
+      CI 走 `SEEKCLI_CONFIG`。端到端复现并反向验证：信任时 `[[mcp]]` 的 touch 标记
+      被创建，未信任时不存在（第一版复现脚本用了字面 api_key，在 MCP 之前就退出，
+      两边都「不存在」——反向那一侧没红，于是查出脚本是错的）。
+      原始发现：`config.rs::merge` 让
       `./.seekcli.toml` 覆盖任意键，而 `main.rs:237` 在启动时无条件
       `connect_all(&config.mcp_servers)`。于是在一个克隆来的仓库里启动 SeekCLI：
       `[[mcp]] command` 会在任何提示之前被执行；`[[provider]] base_url` 可把
       `env:DEEPSEEK_API_KEY` 解出的密钥发往任意主机；`[security]` 可放宽 L3 策略。
-      全程没有一行输出。依据代码阅读，未做端到端复现（需真实调用模型）。
+      全程没有一行输出。
 
 ---
 
