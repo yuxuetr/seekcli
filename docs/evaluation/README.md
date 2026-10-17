@@ -12,7 +12,7 @@
 | [2026-09-13-fourth-assessment.md](2026-09-13-fourth-assessment.md) | **四评**：第二、三轮推进完毕后的 D 口径复盘。九个排期缺口结清；方法学收获是「设计稿要写得可被证伪」 |
 | [2026-09-15-usage-reality-check.md](2026-09-15-usage-reality-check.md) | **五评**：E 口径（真实使用）。读 `~/.seekcli/` 而不是 `src/`——真实使用停止于阶段七剥离外围能力的同一天。新增缺口 L1-7 / L2-10 / L3-6 / L4-9 ~ 12 / L5-7 / L7-9 / L7-10，§7 记第四轮的真实验收 |
 | [2026-09-16-architecture-review.md](2026-09-16-architecture-review.md) | **六评**：架构评审。问的不是「建了什么」而是「建得对不对」——分层 / 内聚 / 耦合 / 完整性 / 风险。结论：内核健康，单点债务集中在 `run_agent_loop` |
-| [2026-10-17-claude-code-comparison.md](2026-10-17-claude-code-comparison.md) | **七评**：B 口径，参照物换成 Claude Code 扩展体系，经 design-principles §5 三问过滤。该做：验收命令（Stop 门）、AGENTS.md 超出自身 8 KB 注入上限；顺带测出审计日志被测试污染且有 467 行交织损坏 |
+| [2026-10-17-claude-code-comparison.md](2026-10-17-claude-code-comparison.md) | **七评**：B 口径，参照物换成 Claude Code 扩展体系，经 design-principles §5 三问过滤。该做：验收命令（Stop 门）、AGENTS.md 超出自身 8 KB 注入上限；顺带测出审计日志被测试污染且有 467 行交织损坏。阶段五十八全部落地，并补出项目配置信任边界（§7）；§3 重估条件见 `scripts/reconsider-7th.py` |
 
 ## 与其它文档的关系
 
