@@ -321,6 +321,24 @@ mod tests {
     let _ = std::fs::remove_file(&path);
   }
 
+  /// This repository's own rules file is read by this function whenever
+  /// SeekCLI runs here. At 10740 bytes it was cut at the heading of the LLM
+  /// interaction section, so the model never saw that section, the pre-commit
+  /// checks or the commit conventions — and nothing said so except a marker
+  /// line the user does not see.
+  #[test]
+  fn the_repo_agents_md_fits_its_own_cap() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = workspace_rules(root).expect("the repo has an AGENTS.md");
+    assert!(
+      !out.contains("workspace rules truncated"),
+      "AGENTS.md is {} bytes; the cap is {WORKSPACE_RULES_CAP}",
+      std::fs::read_to_string(root.join("AGENTS.md"))
+        .map(|s| s.trim().len())
+        .unwrap_or(0)
+    );
+  }
+
   fn scope(name: &str, entries: usize) -> crate::memory::ScopeSummary {
     crate::memory::ScopeSummary {
       name: name.to_string(),
