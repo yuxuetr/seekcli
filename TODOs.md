@@ -2262,6 +2262,13 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       修前红。三处引用「AGENTS.md 工程品格」的文档仍成立（该节标题保留）。
 - [ ] **58.4 验收命令 Stop 门**（七评 §2.1）。`.seekcli.toml` 的 `[verify] command`，
       停止时由 harness 执行，非 0 退出发 `[VERIFY FAILED]` 续跑，连续失败上限为常量。
+      **阻塞于 58.5**：验收命令放在仓库里的 `.seekcli.toml`，等于让仓库决定本机执行什么。
+- [ ] **58.5 项目层配置无信任边界**（58.4 设计时发现）。`config.rs::merge` 让
+      `./.seekcli.toml` 覆盖任意键，而 `main.rs:237` 在启动时无条件
+      `connect_all(&config.mcp_servers)`。于是在一个克隆来的仓库里启动 SeekCLI：
+      `[[mcp]] command` 会在任何提示之前被执行；`[[provider]] base_url` 可把
+      `env:DEEPSEEK_API_KEY` 解出的密钥发往任意主机；`[security]` 可放宽 L3 策略。
+      全程没有一行输出。依据代码阅读，未做端到端复现（需真实调用模型）。
 
 ---
 
