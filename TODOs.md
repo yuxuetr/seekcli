@@ -2266,6 +2266,8 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       重试 `VERIFY_RETRIES = 2` 次仍败 → `failed`，`-p` 退出 2。没配或没改动 → `not_verified`。
       从 `run_shell` 拆出 `tools::shell::execute` 供两处复用（stdin=null、进程组、Ctrl-C）。
       三条回放测试，各自经短路反向验证会红。L5 hooks 排除项与 L7 verification 说明已改。
+      复查补修（`fix(engine)` 紧随其后）：验收命令被 Ctrl-C 取消时原记为 `Completed`
+      （`-p` 退出 0），改为 `Interrupted`；有回放测试，修前红。
       **未做**：真实模型下的端到端运行（需付费调用，按约定先问）。
       前置 58.5：验收命令放在仓库里的 `.seekcli.toml`，须先经信任才生效。
 - [x] **58.5 项目层配置无信任边界** ✅ 2026-10-17（`ade0a8b`，用户选定「先修信任，再做 58.4」）。
