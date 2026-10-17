@@ -421,7 +421,7 @@ pub(crate) async fn execute(command: &str) -> Result<Ran> {
 /// Flush left and uncoloured, for the reason code blocks are: everything a
 /// mouse selection picks up here has to be the output and nothing else. stderr,
 /// because this is what the operator watches, not the turn's result.
-fn echo_output_tail(stdout: &str, stderr: &str) {
+pub(crate) fn echo_output_tail(stdout: &str, stderr: &str) {
   let (shown, total) = output_tail(stdout, stderr);
   if shown.is_empty() {
     return;

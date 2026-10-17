@@ -695,6 +695,12 @@ async fn verify_on_stop(command: Option<&str>, mutated: bool, failures: &mut usi
     eprintln!("{} interrupted — not verified", "[Verify]".yellow());
     return Stop::Interrupted;
   }
+  let mut output = String::from_utf8_lossy(&ran.stdout).into_owned();
+  let stderr = String::from_utf8_lossy(&ran.stderr);
+  // The user sees the check's own words, not only the model's account of
+  // them — the same reason `run_shell` echoes.
+  tools::shell::echo_output_tail(&output, &stderr);
+  output.push_str(&stderr);
   if ran.status.success() {
     eprintln!("{} passed", "[Verify]".green());
     return Stop::Done(Verification::Passed);
@@ -716,8 +722,6 @@ async fn verify_on_stop(command: Option<&str>, mutated: bool, failures: &mut usi
     failures,
     VERIFY_RETRIES
   );
-  let mut output = String::from_utf8_lossy(&ran.stdout).into_owned();
-  output.push_str(&String::from_utf8_lossy(&ran.stderr));
   let mut cut = output.len().saturating_sub(VERIFY_OUTPUT_TAIL);
   while !output.is_char_boundary(cut) {
     cut += 1;
