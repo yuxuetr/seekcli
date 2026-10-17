@@ -2260,9 +2260,14 @@ API key）。它不断言任何东西——**这正是它的定位**：单测证
       原文整节移入 `design-principles.md` §7（一处自引用改为 §5.1）；现 6851 字节。
       `the_repo_agents_md_fits_its_own_cap` 断言 `workspace_rules` 输出无截断标记，
       修前红。三处引用「AGENTS.md 工程品格」的文档仍成立（该节标题保留）。
-- [ ] **58.4 验收命令 Stop 门**（七评 §2.1）。`.seekcli.toml` 的 `[verify] command`，
-      停止时由 harness 执行，非 0 退出发 `[VERIFY FAILED]` 续跑，连续失败上限为常量。
-      前置 58.5 已完成：验收命令放在仓库里的 `.seekcli.toml`，须先经信任才生效。
+- [x] **58.4 验收命令 Stop 门** ✅ 2026-10-17（`8bc4865`）。`[verify] command`；
+      主 agent 停下且本次运行执行过改动机器的工具（含 `invoke_agent`）时由 harness
+      执行：0 → `passed`；非 0 → `[VERIFY FAILED]` + 输出尾部 4000 字节，走共享尾部续跑；
+      重试 `VERIFY_RETRIES = 2` 次仍败 → `failed`，`-p` 退出 2。没配或没改动 → `not_verified`。
+      从 `run_shell` 拆出 `tools::shell::execute` 供两处复用（stdin=null、进程组、Ctrl-C）。
+      三条回放测试，各自经短路反向验证会红。L5 hooks 排除项与 L7 verification 说明已改。
+      **未做**：真实模型下的端到端运行（需付费调用，按约定先问）。
+      前置 58.5：验收命令放在仓库里的 `.seekcli.toml`，须先经信任才生效。
 - [x] **58.5 项目层配置无信任边界** ✅ 2026-10-17（`ade0a8b`，用户选定「先修信任，再做 58.4」）。
       未接受的 `./.seekcli.toml` 整层不生效并打印一行；REPL 展示全文问 y/N，接受的
       **原文**记入 `~/.seekcli/trusted-projects.json`，内容一变重问；headless 不问，
