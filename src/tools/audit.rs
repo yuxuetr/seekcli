@@ -35,9 +35,24 @@ impl Outcome {
   }
 }
 
+#[cfg(not(test))]
 fn log_path() -> Option<PathBuf> {
   let home = std::env::var("HOME").ok()?;
   Some(PathBuf::from(home).join(".seekcli").join("audit.jsonl"))
+}
+
+/// Tests dispatch real tools through free functions that never see an `App`,
+/// so `for_test`'s scratch directories cannot reach this path; the switch has
+/// to live here. One file per test process, so a run's records stay together.
+#[cfg(test)]
+fn log_path() -> Option<PathBuf> {
+  static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+  let path = PATH.get_or_init(|| {
+    std::env::temp_dir()
+      .join("seekcli-test-audit")
+      .join(format!("{}.jsonl", uuid::Uuid::new_v4()))
+  });
+  Some(path.clone())
 }
 
 /// Cheap content digest. Not cryptographic — it exists so two identical calls
@@ -85,17 +100,26 @@ pub fn record_command(command: &str, outcome: Outcome, note: &str) {
 }
 
 fn append(entry: Value) {
-  let Some(path) = log_path() else {
-    return;
-  };
+  if let Some(path) = log_path() {
+    append_to(&path, entry);
+  }
+}
+
+fn append_to(path: &std::path::Path, entry: Value) {
   if let Some(parent) = path.parent() {
     let _ = std::fs::create_dir_all(parent);
   }
   // Best-effort: an unwritable audit log must not stop the agent, but the
   // failure is announced rather than swallowed (design-principles §4).
-  match OpenOptions::new().create(true).append(true).open(&path) {
+  match OpenOptions::new().create(true).append(true).open(path) {
     Ok(mut f) => {
-      if writeln!(f, "{}", entry).is_err() {
+      // One `write` per record. `writeln!` goes through serde_json's
+      // `Display`, which emits every token as its own write; under
+      // `O_APPEND` each lands at the end atomically, so concurrent writers
+      // interleave token by token. A whole line in one call does not.
+      let mut line = entry.to_string();
+      line.push('\n');
+      if f.write_all(line.as_bytes()).is_err() {
         eprintln!("[Audit] could not append to {}", path.display());
       }
     }
@@ -131,6 +155,57 @@ mod tests {
     // An MCP tool is classified by what its server declared.
     assert!(is_mutating_with("mcp__fs__write_file", Some(false)));
     assert!(!is_mutating_with("mcp__fs__read_text_file", Some(true)));
+  }
+
+  /// Same failure `for_test` fixed for sessions, one module over: every
+  /// dispatch in a replay test appended to the user's real audit log. One day
+  /// of it held 3510 entries, most with a temp-dir cwd — which is exactly the
+  /// data the seventh assessment's reconsideration criteria read from.
+  #[test]
+  fn a_test_build_never_writes_the_real_audit_log() {
+    let real = std::env::var("HOME").unwrap_or_default();
+    let path = log_path()
+      .map(|p| p.display().to_string())
+      .unwrap_or_default();
+    assert!(
+      !real.is_empty() && !path.starts_with(&format!("{real}/.seekcli")),
+      "tests must not append to the real ~/.seekcli/audit.jsonl: {path}"
+    );
+  }
+
+  /// Parallel tool batches and parallel tests both append to one file. A record
+  /// written as several `write` calls interleaves with its neighbours; the real
+  /// log had 467 of 7653 lines that were two records spliced together.
+  #[test]
+  fn concurrent_appends_never_splice_records() {
+    let path = std::env::temp_dir()
+      .join("seekcli-test-audit")
+      .join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+    std::thread::scope(|s| {
+      for t in 0..8 {
+        let path = &path;
+        s.spawn(move || {
+          for i in 0..50 {
+            append_to(
+              path,
+              serde_json::json!({ "thread": t, "i": i, "note": "x".repeat(200) }),
+            );
+          }
+        });
+      }
+    });
+    let text = std::fs::read_to_string(&path).unwrap();
+    let bad: Vec<&str> = text
+      .lines()
+      .filter(|l| serde_json::from_str::<Value>(l).is_err())
+      .collect();
+    assert_eq!(text.lines().count(), 400);
+    assert!(
+      bad.is_empty(),
+      "{} spliced lines, e.g. {:?}",
+      bad.len(),
+      bad.first()
+    );
   }
 
   #[test]
