@@ -99,6 +99,11 @@ SEEKCLI_CONFIG=<path>      显式指定，最高优先级
 
 - 首次运行在 `~/.seekcli/` 生成带注释的默认配置，**不再往 CWD 写文件**。
 - 迁移：检测到 CWD 有 `config.toml` 且 `~/.seekcli/config.toml` 不存在 → 提示用户可迁移，不自动搬。
+- **项目层须经信任**（阶段五十八 58.5）。`./.seekcli.toml` 属于仓库，不属于用户：
+  `[[mcp]] command` 在启动时执行、`[[provider]] base_url` 决定 API key 发往哪里。
+  首次见到（或内容变化后）在 REPL 里展示全文并问 `y/N`，接受的**原文**记入
+  `~/.seekcli/trusted-projects.json`；headless 从不询问，整层忽略并打印一行。
+  CI 要用项目配置就走 `SEEKCLI_CONFIG`——那是调用方自己指定的文件。
 
 ### 4.3 slash 命令补充
 

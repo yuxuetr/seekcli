@@ -200,9 +200,35 @@ struct App {
   memory: Option<memory::MemoryStore>,
 }
 
+/// Show an untrusted `./.seekcli.toml` and ask whether to apply it.
+///
+/// Whole file, not a summary: the dangerous keys are exactly the ones a
+/// summary would have to know about in advance. Headless never asks — nobody
+/// is there to read it, and a hidden prompt looks like a hang — so the layer
+/// is skipped and `Config::load` says so.
+fn ask_project_trust(path: &std::path::Path, text: &str) -> bool {
+  if ui::is_headless() {
+    return false;
+  }
+  eprintln!();
+  eprintln!(
+    "{} {} is not trusted yet. It can run commands at startup ({}) and decide where your API key is sent ({}).",
+    "[!]".yellow().bold(),
+    path.display(),
+    "[[mcp]]".bright_white(),
+    "[[provider]]".bright_white()
+  );
+  for line in text.lines() {
+    eprintln!("    {}", line.dimmed());
+  }
+  let answer = rustyline::DefaultEditor::new()
+    .and_then(|mut editor| editor.readline("    Trust this file? [y/N] "));
+  matches!(answer.as_deref().map(str::trim), Ok("y" | "Y"))
+}
+
 impl App {
   async fn new() -> Result<Self> {
-    let loaded = Config::load()?;
+    let loaded = Config::load(&ask_project_trust)?;
     // Notices go to stderr so a future `-p --output json` keeps stdout clean.
     for notice in &loaded.notices {
       eprintln!("{}", notice.yellow());
@@ -649,7 +675,7 @@ async fn main() -> Result<()> {
 
   // Task inspection needs config, not a provider or a model.
   if let Some(TaskCommand::Task { action }) = &cli.task {
-    let loaded = Config::load()?;
+    let loaded = Config::load(&ask_project_trust)?;
     let text = match action {
       TaskAction::List => tasks::list(&loaded.config)?,
       TaskAction::Install { name } => tasks::render_plist(&loaded.config, name)?,

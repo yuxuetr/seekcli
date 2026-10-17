@@ -586,6 +586,9 @@ impl Default for Config {
 pub struct Layout {
   pub user: PathBuf,
   pub project: PathBuf,
+  /// Which project files the user has reviewed and accepted — see
+  /// `project_trust`.
+  pub trusted: PathBuf,
   pub legacy: PathBuf,
   pub explicit: Option<PathBuf>,
 }
@@ -595,8 +598,11 @@ impl Layout {
     let home = std::env::var("HOME").context("cannot determine HOME directory")?;
     let cwd = std::env::current_dir().context("cannot determine current directory")?;
     Ok(Self {
-      user: PathBuf::from(home).join(".seekcli").join("config.toml"),
+      user: PathBuf::from(&home).join(".seekcli").join("config.toml"),
       project: cwd.join(PROJECT_CONFIG_FILE),
+      trusted: PathBuf::from(home)
+        .join(".seekcli")
+        .join("trusted-projects.json"),
       legacy: cwd.join(LEGACY_CONFIG_FILE),
       explicit: std::env::var(CONFIG_ENV).ok().map(PathBuf::from),
     })
@@ -614,11 +620,13 @@ pub struct Loaded {
 }
 
 impl Config {
-  pub fn load() -> Result<Loaded> {
-    Self::load_from(&Layout::from_env()?)
+  /// `ask` is shown an untrusted project file's path and content and decides
+  /// whether to trust it; see `project_trust`.
+  pub fn load(ask: &dyn Fn(&Path, &str) -> bool) -> Result<Loaded> {
+    Self::load_from(&Layout::from_env()?, ask)
   }
 
-  pub fn load_from(layout: &Layout) -> Result<Loaded> {
+  pub fn load_from(layout: &Layout, ask: &dyn Fn(&Path, &str) -> bool) -> Result<Loaded> {
     let mut notices = Vec::new();
     let user_existed = layout.user.exists();
 
@@ -655,6 +663,9 @@ impl Config {
       }
       let text = fs::read_to_string(&path)
         .with_context(|| format!("cannot read config file {}", path.display()))?;
+      if path == layout.project && !project_trust(layout, &text, ask, &mut notices) {
+        continue;
+      }
       let value: toml::Value =
         toml::from_str(&text).with_context(|| format!("invalid TOML in {}", path.display()))?;
       merge(&mut merged, value);
@@ -683,6 +694,73 @@ impl Config {
       notices,
     })
   }
+}
+
+/// Whether the project layer may apply.
+///
+/// The project file lives in the repository, and the repository is not the
+/// user: `[[mcp]] command` is executed at startup before any prompt,
+/// `[[provider]] base_url` decides where the API key is sent, and `[security]`
+/// can loosen the L3 policy. Applying it unread made cloning a repository and
+/// starting SeekCLI in it the same as running its code.
+///
+/// Trust is the exact content the user accepted, not a digest of it: the
+/// in-tree digest is FNV, which identifies content but does not resist someone
+/// crafting a collision, and these files are small enough to store whole.
+/// Any change — a `git pull` included — asks again, as `direnv allow` does.
+fn project_trust(
+  layout: &Layout,
+  text: &str,
+  ask: &dyn Fn(&Path, &str) -> bool,
+  notices: &mut Vec<String>,
+) -> bool {
+  let key = fs::canonicalize(&layout.project)
+    .unwrap_or_else(|_| layout.project.clone())
+    .display()
+    .to_string();
+  let mut trusted: std::collections::BTreeMap<String, String> =
+    match fs::read_to_string(&layout.trusted) {
+      Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+        notices.push(format!(
+          "[Config] {} is not valid JSON ({e}); treating every project file as untrusted",
+          layout.trusted.display()
+        ));
+        Default::default()
+      }),
+      Err(_) => Default::default(),
+    };
+  if trusted.get(&key).map(String::as_str) == Some(text) {
+    return true;
+  }
+  let changed = trusted.contains_key(&key);
+  if !ask(&layout.project, text) {
+    notices.push(format!(
+      "[Config] ignored {key}: {} — it can run commands ([[mcp]]) and redirect your API key \
+       ([[provider]]). Start seekcli interactively here to review it, or pass it via {CONFIG_ENV}.",
+      if changed {
+        "changed since you trusted it"
+      } else {
+        "not trusted"
+      }
+    ));
+    return false;
+  }
+  trusted.insert(key, text.to_string());
+  let saved = serde_json::to_string_pretty(&trusted)
+    .map_err(anyhow::Error::from)
+    .and_then(|body| {
+      if let Some(parent) = layout.trusted.parent() {
+        fs::create_dir_all(parent)?;
+      }
+      Ok(fs::write(&layout.trusted, body)?)
+    });
+  if let Err(e) = saved {
+    notices.push(format!(
+      "[Config] could not record trust in {} ({e}); you will be asked again next time",
+      layout.trusted.display()
+    ));
+  }
+  true
 }
 
 impl Layout {
@@ -880,9 +958,84 @@ mod tests {
     Layout {
       user: root.join("home/.seekcli/config.toml"),
       project: root.join("work/.seekcli.toml"),
+      trusted: root.join("home/.seekcli/trusted-projects.json"),
       legacy: root.join("work/config.toml"),
       explicit: None,
     }
+  }
+
+  fn trust_all(_: &Path, _: &str) -> bool {
+    true
+  }
+
+  fn trust_none(_: &Path, _: &str) -> bool {
+    false
+  }
+
+  /// The repository is not the user. A cloned repo's `.seekcli.toml` used to
+  /// apply unread — including `[[mcp]] command`, which runs at startup, and
+  /// `[[provider]] base_url`, which decides where the API key goes.
+  #[test]
+  fn an_untrusted_project_layer_is_ignored_and_says_so() {
+    let root = temp_root("untrusted");
+    let l = layout(&root);
+    write(
+      &l.user,
+      "[brain]\nflash_model = \"user\"\npro_model = \"p\"\n",
+    );
+    write(&l.project, "[brain]\nflash_model = \"project\"\n");
+    let loaded = match Config::load_from(&l, &trust_none) {
+      Ok(v) => v,
+      Err(e) => panic!("load failed: {e}"),
+    };
+    assert_eq!(loaded.config.brain.flash_model, "user");
+    assert_eq!(loaded.sources, vec![l.user.clone()]);
+    assert!(
+      loaded.notices.iter().any(|n| n.contains("not trusted")),
+      "ignoring it silently would look like the override is broken: {:?}",
+      loaded.notices
+    );
+  }
+
+  /// Accepting once is remembered — but only for the content that was read.
+  /// A file that changes after it was trusted (a `git pull`) asks again.
+  #[test]
+  fn trust_is_remembered_until_the_file_changes() {
+    let root = temp_root("trust-remembered");
+    let l = layout(&root);
+    write(&l.project, "[brain]\nflash_model = \"v1\"\n");
+    let asked = std::cell::Cell::new(0);
+    let count_and_trust = |_: &Path, _: &str| {
+      asked.set(asked.get() + 1);
+      true
+    };
+    for _ in 0..2 {
+      let loaded = match Config::load_from(&l, &count_and_trust) {
+        Ok(v) => v,
+        Err(e) => panic!("load failed: {e}"),
+      };
+      assert_eq!(loaded.config.brain.flash_model, "v1");
+    }
+    assert_eq!(
+      asked.get(),
+      1,
+      "an accepted file must not be asked about twice"
+    );
+
+    write(&l.project, "[brain]\nflash_model = \"v2\"\n");
+    let loaded = match Config::load_from(&l, &trust_none) {
+      Ok(v) => v,
+      Err(e) => panic!("load failed: {e}"),
+    };
+    assert_eq!(
+      loaded.config.brain.flash_model,
+      Config::default().brain.flash_model
+    );
+    assert!(
+      loaded.notices.iter().any(|n| n.contains("changed since")),
+      "{:?}",
+      loaded.notices
+    );
   }
 
   fn temp_root(name: &str) -> PathBuf {
@@ -955,7 +1108,7 @@ mod tests {
     let root = temp_root("first-run");
     let l = layout(&root);
 
-    let loaded = match Config::load_from(&l) {
+    let loaded = match Config::load_from(&l, &trust_all) {
       Ok(v) => v,
       Err(e) => panic!("load failed: {}", e),
     };
@@ -989,7 +1142,7 @@ mod tests {
     // Mentions one key only; the rest must survive from the layer below.
     write(&l.project, "[brain]\nflash_model = \"project-flash\"\n");
 
-    let loaded = match Config::load_from(&l) {
+    let loaded = match Config::load_from(&l, &trust_all) {
       Ok(v) => v,
       Err(e) => panic!("load failed: {}", e),
     };
@@ -1012,7 +1165,7 @@ mod tests {
     write(&explicit, "[brain]\nflash_model = \"explicit\"\n");
     l.explicit = Some(explicit);
 
-    let loaded = match Config::load_from(&l) {
+    let loaded = match Config::load_from(&l, &trust_all) {
       Ok(v) => v,
       Err(e) => panic!("load failed: {}", e),
     };
@@ -1024,7 +1177,7 @@ mod tests {
     let root = temp_root("explicit-missing");
     let mut l = layout(&root);
     l.explicit = Some(root.join("nope.toml"));
-    assert!(Config::load_from(&l).is_err());
+    assert!(Config::load_from(&l, &trust_all).is_err());
   }
 
   #[test]
@@ -1033,7 +1186,7 @@ mod tests {
     let l = layout(&root);
     write(&l.user, "[security]\ndeny = [\"shutdown\"]\n");
 
-    let loaded = match Config::load_from(&l) {
+    let loaded = match Config::load_from(&l, &trust_all) {
       Ok(v) => v,
       Err(e) => panic!("load failed: {}", e),
     };
@@ -1047,7 +1200,7 @@ mod tests {
     let l = layout(&root);
     write(&l.legacy, "[brain]\nflash_model = \"legacy\"\n");
 
-    let loaded = match Config::load_from(&l) {
+    let loaded = match Config::load_from(&l, &trust_all) {
       Ok(v) => v,
       Err(e) => panic!("load failed: {}", e),
     };
@@ -1073,7 +1226,7 @@ mod tests {
       "[brain]\nflash_model = \"user\"\npro_model = \"p\"\n",
     );
 
-    let loaded = match Config::load_from(&l) {
+    let loaded = match Config::load_from(&l, &trust_all) {
       Ok(v) => v,
       Err(e) => panic!("load failed: {}", e),
     };
@@ -1086,7 +1239,7 @@ mod tests {
     let l = layout(&root);
     write(&l.user, "[brain\nflash_model =");
 
-    let err = match Config::load_from(&l) {
+    let err = match Config::load_from(&l, &trust_all) {
       Ok(_) => panic!("expected a parse error"),
       Err(e) => format!("{:#}", e),
     };
