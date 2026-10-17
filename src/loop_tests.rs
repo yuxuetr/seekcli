@@ -295,6 +295,42 @@ mod tests {
     assert_eq!(outcome.text, "我改不动了。");
   }
 
+  /// Ctrl-C during the check is the user saying stop. It kills the command,
+  /// and the run must end as `Interrupted` — not `Completed`, which `-p`
+  /// turns into exit 0 for a run nobody verified and the user cut short.
+  #[tokio::test]
+  async fn ctrl_c_during_verification_ends_the_run_as_interrupted() {
+    let _scratch = Scratch::enter("verify-ctrl-c");
+    let mut app = app_for("verify-exhausted");
+    app.config.verify.command = Some("sleep 5".into());
+    let flag = app.interrupt.clone();
+    tools::shell::set_interrupt(flag.clone());
+    let presser = tokio::spawn(async move {
+      tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+      flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let outcome = app.run_headless("修好 out.txt", None).await;
+    let _ = presser.await;
+    app
+      .interrupt
+      .store(false, std::sync::atomic::Ordering::SeqCst);
+    let outcome = match outcome {
+      Ok(o) => o,
+      Err(e) => panic!("loop failed: {}", e),
+    };
+
+    assert_eq!(outcome.status, LoopStatus::Interrupted);
+    assert_eq!(
+      outcome.verification,
+      crate::engine::Verification::NotVerified
+    );
+    assert_eq!(
+      outcome.llm_calls, 2,
+      "nothing may run after the user said stop"
+    );
+  }
+
   /// Verification checks what the run changed. A run that only answered a
   /// question changed nothing, and running the project's test suite after
   /// every chat reply would make the REPL unusable in that project.

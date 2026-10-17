@@ -664,6 +664,9 @@ enum Stop {
   Done(Verification),
   /// Not done: send this back and let the loop run another turn.
   Retry(String),
+  /// Ctrl-C killed the check. The user said stop, so the run ends as
+  /// `Interrupted` — `Done(NotVerified)` would report it `Completed`.
+  Interrupted,
 }
 
 /// The deterministic half of "verify results": the model asking to stop is
@@ -690,7 +693,7 @@ async fn verify_on_stop(command: Option<&str>, mutated: bool, failures: &mut usi
   };
   if ran.cancelled {
     eprintln!("{} interrupted — not verified", "[Verify]".yellow());
-    return Stop::Done(Verification::NotVerified);
+    return Stop::Interrupted;
   }
   if ran.status.success() {
     eprintln!("{} passed", "[Verify]".green());
@@ -2158,14 +2161,22 @@ impl App {
       let mut notice = truncation_notice(truncated, &tool_calls, cut_call.as_ref());
       if tool_calls.is_empty() && notice.is_none() {
         match verify_on_stop(verify_command.as_deref(), mutated, &mut verify_failures).await {
-          Stop::Done(v) => {
-            verification = v;
+          Stop::Retry(failed) => notice = Some(failed),
+          stop => {
+            if let Stop::Done(v) = stop {
+              verification = v;
+            } else {
+              // Consumed here, as the top-of-iteration check would have: the
+              // flag is what killed the command, and it is still set.
+              take_interrupt(&self.interrupt, depth);
+              interrupted = true;
+              events.push(EventPayload::Interrupted);
+            }
             final_content = std::mem::take(&mut cut_off) + &assistant_content;
             completed = true;
             self.tracer.end(turn_span);
             break;
           }
-          Stop::Retry(failed) => notice = Some(failed),
         }
       }
       // Cut off or failed verification, so not done. Not a `continue` (see
