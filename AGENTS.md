@@ -36,7 +36,7 @@ SeekCLI —— DeepSeek + Tools + Harness Agent 核心，单人维护的本地 C
 - **`impl App` 可以分块到子模块**（`engine.rs` / `commands.rs` / `benchmark.rs`），
   靠 Rust「子模块可见祖先私有项」规则避免 main.rs 膨胀。
 - **给模型看的字符串前缀**（`[USER DENIED]` / `[PATH DENIED]` / `[BAD ARGS]` /
-  `[Recovery]`）是呈现层约定。新增时同步更新 `agent::prompt::agent_system_prompt`，
+  `[Recovery]` / `[Truncated]` / `[VERIFY FAILED]`）是呈现层约定。新增时同步更新 `agent::prompt::agent_system_prompt`，
   否则模型不知道该怎么反应。
 
 ## 交互约定

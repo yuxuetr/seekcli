@@ -844,7 +844,8 @@ fn write_default_config(path: &Path) -> Result<()> {
      # Layers, in increasing priority:\n\
      #   1. built-in defaults\n\
      #   2. this file\n\
-     #   3. ./{project} in the working directory (partial override)\n\
+     #   3. ./{project} in the working directory (partial override, applied only\n\
+     #      once you trust it - it can run commands and redirect your API key)\n\
      #   4. ${env} (partial override, highest priority)\n\
      #\n\
      # An override file only needs the keys it changes.\n\

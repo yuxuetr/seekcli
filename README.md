@@ -140,7 +140,18 @@ seekcli -p "..." --yes                          # 危险命令自动批准（默
 seekcli -c                                      # 接上最近一次会话进 REPL
 seekcli --resume <id>                           # 接上指定会话（接受 id 前缀）
 ```
-退出码：`0` 完成 ｜ `1` 运行时错误 ｜ `2` 未收敛（达到迭代上限）｜ `3` 被中断。
+退出码：`0` 完成 ｜ `1` 运行时错误 ｜ `2` 未收敛（达到迭代上限，或验收命令重试后仍失败）｜ `3` 被中断。
+
+### 验收命令（停止时由 harness 检查）
+```toml
+# ./.seekcli.toml
+[verify]
+command = "cargo test --quiet"
+```
+本次运行**改动过东西**（写文件、跑命令、委派子 agent）时，模型说完成后由 SeekCLI 执行这条命令：
+退出 0 记为通过；非 0 把输出尾部以 `[VERIFY FAILED]` 送回模型继续修，重试 2 次仍失败则停止并记为失败。
+只回答问题、没有改动的运行不触发。`--output json` 的 `verification` 字段随之为
+`passed` / `failed` / `not_verified`。
 
 headless 下**绝不等待输入**：审批默认自动拒绝，模型收到 `[USER DENIED]` 后自行调整。
 
@@ -176,6 +187,9 @@ job_kill(id)
 - **复合命令逐条判定取最严**：`ls; rm -rf /` 由 `rm` 决定，不再被无害前缀带过。
   `$(...)` 与反引号里的命令同样计入。
 - **越界写**：重定向或写动词指向工作区外的绝对 / `~` 路径 → 需要审批。
+- **项目配置须经信任**：`./.seekcli.toml` 属于仓库而非用户（`[[mcp]]` 启动即执行命令、
+  `[[provider]]` 决定 API key 发往哪里），首次见到或内容变化后在 REPL 里展示全文问 `y/N`，
+  未接受则整层不生效；headless 从不询问，直接忽略。
 - **审计日志** `~/.seekcli/audit.jsonl`：参数记摘要不记原文（避免日志自身变成泄露源），
   `run_shell` 记完整命令。
 
@@ -185,10 +199,11 @@ job_kill(id)
 ### 配置文件
 ```
 ~/.seekcli/config.toml   用户级主配置，首次运行自动生成（带注释）
-./.seekcli.toml          项目级覆盖，可选；只需写要改的键
+./.seekcli.toml          项目级覆盖，可选；只需写要改的键；经你信任后才生效
 $SEEKCLI_CONFIG          显式指定，优先级最高
 ```
-三层按上述顺序合并，后者逐键覆盖前者。**SeekCLI 不会往当前目录写任何配置文件。**
+三层按上述顺序合并，后者逐键覆盖前者。接受过的项目文件原文记在
+`~/.seekcli/trusted-projects.json`；CI 里要用项目配置，用 `$SEEKCLI_CONFIG` 指向它。**SeekCLI 不会往当前目录写任何配置文件。**
 （0.1.0 曾读写 `./config.toml`，检测到遗留文件会提示迁移命令，不自动搬。）
 
 ### LLM Provider（wire 协议）
