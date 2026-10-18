@@ -99,8 +99,10 @@ jobs:
           cp README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # Checksums travel with the artifact so a download can be verified
-          # without trusting the page it came from.
-          shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+          # without trusting the page it came from. Hashed from inside dist/
+          # so the file names the bare archive: v0.3.0's said
+          # `dist/<name>.tar.gz`, and `shasum -c` next to a download failed.
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff
