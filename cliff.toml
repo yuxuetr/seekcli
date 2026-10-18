@@ -63,7 +63,11 @@ commit_preprocessors = [
 # regex for parsing and grouping commits
 commit_parsers = [
     { message = "\\[skip", skip = true },
-    { message = "\\p{Han}", skip = true },
+    # A template leftover used to sit here: `\p{Han}` → skip. AGENTS.md requires
+    # Chinese commit messages, so it dropped 62 of 0.2.0's commits and every
+    # one after — the 0.3.0 preview came out empty.
+    # TODOs.md bookkeeping says what was ticked off, not what changed.
+    { message = "^docs\\(todos\\)", skip = true },
     { message = "^feat", group = "Features" },
     { message = "^fix", group = "Bug Fixes" },
     { message = "^doc", group = "Documentation" },
